@@ -56,7 +56,7 @@ const includeWebkit = process.env.CAW_E2E_SKIP_WEBKIT !== "1" && (webkitBundleIn
 
 export default defineConfig({
   testDir: "./tests/e2e",
-  // Specs share one hermetic server state dir and one folder tree, so they run in order.
+  // Ceiling: one server, state dir, fixture manifest, and folder tree, so specs stay serial. Upgrade path: per-shard server with its own port, state dir, fixture manifest, and roots before enabling `--shard` + N workers.
   fullyParallel: false,
   workers: 1,
   forbidOnly: !!process.env.CI,

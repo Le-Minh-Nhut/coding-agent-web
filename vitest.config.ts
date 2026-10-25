@@ -1,5 +1,10 @@
+import { availableParallelism } from "node:os";
 import { fileURLToPath } from "node:url";
 import { defineConfig } from "vitest/config";
+
+const maxWorkers = Math.max(2, Math.floor(availableParallelism() / 2));
+// Per-file temp dirs and isolated fixtures make file-level parallelism safe.
+// Owner deliberately halves the machine because a sibling project shares it; do not optimize this back up.
 
 const pkg = (name: string) => fileURLToPath(new URL(`./packages/${name}/src/index.ts`, import.meta.url));
 
@@ -14,6 +19,8 @@ export default defineConfig({
     },
   },
   test: {
+    maxWorkers: process.env.CAW_COMPAT === "1" ? 1 : maxWorkers,
+    minWorkers: 1,
     include: [
       "tests/**/*.test.{ts,tsx}",
       "packages/*/test/**/*.test.ts",
