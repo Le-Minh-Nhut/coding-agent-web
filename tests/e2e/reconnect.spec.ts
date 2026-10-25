@@ -4,8 +4,8 @@ import { harnessFixture, installMockCollabHost, openSeededConversation, requireA
 /**
  * Losing the network must never look like the agent finishing. docs/architecture/
  * mobile-client.md draws the line explicitly: a dropped socket is reported as
- * `disconnected`, never as `stopped`; and prompts carry an idempotency key so a
- * retry cannot queue the same prompt twice.
+ * `disconnected`, never as `stopped`; after an accepted prompt, automatic
+ * reconnect does not resubmit it. This does not claim manual retries are deduplicated.
  *
  * The mock host lets the harness drop the socket on demand — the same mechanism a
  * lost Wi-Fi connection exercises. The screen is opened once per test: the app

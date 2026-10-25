@@ -13,6 +13,7 @@ import { promisify } from "node:util";
 import { access, readFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
+import assert from "node:assert/strict";
 
 const run = promisify(execFile);
 const asJson = process.argv.includes("--json");
@@ -58,30 +59,92 @@ check(
   collabHelp.ok ? "help rendered" : collabHelp.stderr.split("\n")[0],
 );
 
+export function evaluateCollabList(parsed) {
+  const required = [
+    "instanceId",
+    "generation",
+    "pid",
+    "sessionId",
+    "cwd",
+    "relayConnected",
+    "inputRequired",
+    "busy",
+    "access",
+  ];
+  if (parsed?.version !== 1) {
+    return {
+      status: "fail",
+      detail: `version=${parsed?.version ?? "unknown"} (expected 1)`,
+    };
+  }
+  const hosts = Array.isArray(parsed?.hosts) ? parsed.hosts : [];
+  if (hosts.length === 0) {
+    return {
+      status: "warn",
+      detail: `version=${parsed.version} hosts=0 — no collab hosts running; per-host shape unverifiable without a live host`,
+    };
+  }
+  const host = hosts[0];
+  const missing = required.filter((key) => !(key in host));
+  if (missing.length > 0) {
+    return {
+      status: "fail",
+      detail: `version=${parsed.version} hosts=${hosts.length} missing=${missing.join(",")}`,
+    };
+  }
+  return {
+    status: "ok",
+    detail: `version=${parsed.version} hosts=${hosts.length}`,
+  };
+}
+
+export function selfCheck() {
+  const validHost = {
+    instanceId: "inst-1",
+    generation: 1,
+    pid: 1234,
+    sessionId: "sess-1",
+    cwd: "/tmp",
+    relayConnected: true,
+    inputRequired: false,
+    busy: false,
+    access: "full",
+  };
+
+  // 1. Empty hosts => warn (not fail)
+  const emptyRes = evaluateCollabList({ version: 1, hosts: [] });
+  assert.equal(emptyRes.status, "warn");
+  assert.match(emptyRes.detail, /no collab hosts running/);
+
+  // 2. Malformed host row => fail
+  const malformedRes = evaluateCollabList({ version: 1, hosts: [{ instanceId: "inst-1" }] });
+  assert.equal(malformedRes.status, "fail");
+  assert.match(malformedRes.detail, /missing=/);
+
+  // 3. Valid host row => ok
+  const validRes = evaluateCollabList({ version: 1, hosts: [validHost] });
+  assert.equal(validRes.status, "ok");
+
+  // 4. Non-version 1 => fail regardless of hosts
+  const wrongVerEmpty = evaluateCollabList({ version: 2, hosts: [] });
+  assert.equal(wrongVerEmpty.status, "fail");
+  const wrongVerValid = evaluateCollabList({ version: 2, hosts: [validHost] });
+  assert.equal(wrongVerValid.status, "fail");
+}
+
+if (process.argv.includes("--self-check")) {
+  selfCheck();
+  console.log("self-check passed: empty hosts => warn, malformed row => fail, wrong version => fail");
+  process.exit(0);
+}
+selfCheck();
+
 const collabList = await capture("omp", ["collab", "list", "--json"]);
-let hostShape = null;
 if (collabList.ok) {
   try {
     const parsed = JSON.parse(collabList.stdout);
-    const required = [
-      "instanceId",
-      "generation",
-      "pid",
-      "sessionId",
-      "cwd",
-      "relayConnected",
-      "inputRequired",
-      "busy",
-      "access",
-    ];
-    const host = parsed.hosts?.[0];
-    const missing = host ? required.filter((key) => !(key in host)) : required;
-    hostShape = { version: parsed.version, hostCount: parsed.hosts?.length ?? 0, missing };
-    check(
-      "collab list --json shape",
-      missing.length === 0 ? "ok" : "fail",
-      `version=${parsed.version} hosts=${hostShape.hostCount}${missing.length ? ` missing=${missing.join(",")}` : ""}`,
-    );
+    const result = evaluateCollabList(parsed);
+    check("collab list --json shape", result.status, result.detail);
   } catch (error) {
     check("collab list --json parses", "fail", String(error.message));
   }

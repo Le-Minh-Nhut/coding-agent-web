@@ -27,10 +27,12 @@ test.beforeEach(async ({ request }: { request: APIRequestContext }) => {
 
 test("composer is bottom-anchored and reachable at the mobile viewport", async ({ page }) => {
   const fixture = harnessFixture();
-  await installMockCollabHost(page, { conversationId: fixture.seededConversationId });
+  const host = await installMockCollabHost(page, { conversationId: fixture.seededConversationId });
   await openSeededConversation(page);
-
+  await host.send(welcomeFrame(false));
   const composer = page.getByRole("textbox", { name: COMPOSER });
+  await expect(composer).toBeEnabled();
+
   await expect(composer).toBeVisible();
 
   const box = await composer.boundingBox();
@@ -42,6 +44,34 @@ test("composer is bottom-anchored and reachable at the mobile viewport", async (
   await composer.click();
   await expect(composer).toBeFocused();
   await expect(page.getByRole("button", { name: "Send" })).toBeVisible();
+});
+
+test("slash suggestions do not push composer below a narrow viewport", async ({ page }) => {
+  const fixture = harnessFixture();
+  const host = await installMockCollabHost(page, { conversationId: fixture.seededConversationId });
+  await openSeededConversation(page);
+  await host.send(welcomeFrame(false));
+
+  await page.setViewportSize({ width: 375, height: 600 });
+  await page.getByText("Conversation model settings").click();
+  const modelInput = page.locator("#conversation-model");
+  await expect(modelInput).toBeVisible();
+  const modelHeight = await modelInput.evaluate((element) => element.getBoundingClientRect().height);
+  expect(modelHeight, "model input must meet 44px touch minimum").toBeGreaterThanOrEqual(44);
+
+  const composer = page.getByRole("textbox", { name: COMPOSER });
+  await expect(composer).toBeEnabled();
+  await composer.fill("/");
+  await expect(page.getByRole("button", { name: /\/model/ })).toBeVisible();
+  const suggestionHeights = await page.locator(".command-suggestion").evaluateAll((elements) => elements.map((element) => element.getBoundingClientRect().height));
+  expect(suggestionHeights.length).toBeGreaterThan(0);
+  expect(suggestionHeights.every((height) => height >= 44), `suggestion heights: ${suggestionHeights}`).toBe(true);
+  console.log("[mobile touch geometry]", JSON.stringify({ modelHeight, suggestionHeights }));
+
+  const box = await composer.boundingBox();
+  expect(box).not.toBeNull();
+  expect(box!.y).toBeGreaterThanOrEqual(0);
+  expect(box!.y + box!.height).toBeLessThanOrEqual(601);
 });
 
 test("a conversation with no live host offers attach instructions, not an endless spinner", async ({ page }) => {

@@ -59,9 +59,11 @@ if (!tsxBin) {
 const tempRoot = realpathSync(mkdtempSync(join(tmpdir(), "caw-e2e-")));
 const stateDir = join(tempRoot, "state");
 const rootsDir = join(tempRoot, "roots");
+const secondaryRootsDir = join(tempRoot, "roots-secondary");
 
 mkdirSync(stateDir, { recursive: true, mode: 0o700 });
 mkdirSync(rootsDir, { recursive: true });
+mkdirSync(secondaryRootsDir, { recursive: true });
 // A deterministic tree the specs assert on. One directory per spec, so no spec
 // depends on another having run, plus a file to prove non-directories are refused.
 writeFileSync(join(rootsDir, "readme.txt"), "Deterministic E2E fixture file. Not a directory.\n");
@@ -133,7 +135,7 @@ const env = {
   CAW_HOST: "127.0.0.1",
   CAW_PORT: process.env.CAW_E2E_PORT ?? "4399",
   CAW_STATE_DIR: stateDir,
-  CAW_ALLOWED_ROOTS: rootsDir,
+  CAW_ALLOWED_ROOTS: `${rootsDir},${secondaryRootsDir}`,
   // `maxActiveAgents` refuses to go below 1, so the free-load guarantee comes
   // from CAW_OMP_PATH: the adapter probes this path, sees no binary, reports the
   // capability missing, and every launch is refused before any agent exists.

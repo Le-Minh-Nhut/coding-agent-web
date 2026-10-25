@@ -422,15 +422,228 @@ async function openForTest(key: CryptoKey, sealed: Uint8Array<ArrayBuffer>): Pro
   }
 }
 
-/** A `welcome` frame that puts the screen in the given busy state. */
 export function welcomeFrame(busy: boolean) {
   return {
     t: "welcome",
     proto: 3,
     header: { sessionId: "e2e-session", cwd: "/tmp", timestamp: null, version: 1, title: "E2E" },
-    state: { busy },
+    state: { isStreaming: busy, queuedMessageCount: 0, cwd: "/tmp", participants: [] },
     agents: [],
     entryCount: 0,
+  };
+}
+
+export const MOCK_NATIVE_SESSIONS = [
+  {
+    sessionId: "native-sess-001",
+    path: "/tmp/roots/seeded/native-sess-001",
+    cwd: "/tmp/roots/seeded",
+    title: "Feature branch work (terminal)",
+    updatedAt: "2026-10-25T08:30:00.000Z",
+    live: false,
+    tracked: false,
+  },
+  {
+    sessionId: "native-sess-002",
+    path: "/tmp/roots/seeded/native-sess-002",
+    cwd: "/tmp/roots/seeded",
+    title: "Background daemon sync",
+    updatedAt: "2026-10-25T09:15:00.000Z",
+    live: true,
+    tracked: false,
+  },
+  {
+    sessionId: "native-sess-003",
+    path: "/tmp/roots/seeded/native-sess-003",
+    cwd: "/tmp/roots/seeded",
+    title: "Prior migration session",
+    updatedAt: "2026-10-24T18:00:00.000Z",
+    live: "unknown",
+    tracked: true,
+  },
+];
+
+export async function mockNativeSessions(page: Page, sessions = MOCK_NATIVE_SESSIONS): Promise<void> {
+  await page.route("**/api/projects/*/sessions", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ ok: true, data: sessions }),
+    });
+  });
+}
+
+export const MOCK_SUBAGENTS = [
+  {
+    id: "subagent-scout-01",
+    displayName: "scout-codebase",
+    kind: "sub" as const,
+    status: "running" as const,
+    hasSessionFile: true,
+    createdAt: 1774435200000,
+    lastActivity: 1774435250000,
+  },
+  {
+    id: "subagent-test-02",
+    displayName: "test-runner-worker",
+    kind: "sub" as const,
+    status: "idle" as const,
+    hasSessionFile: true,
+    createdAt: 1774435100000,
+    lastActivity: 1774435220000,
+  },
+];
+
+export const MOCK_APPROVAL_REQUEST = {
+  reqId: 101,
+  kind: "select" as const,
+  title: "Allow execution of `rm -rf /tmp/caw-build-cache` on host?",
+  options: [
+    { label: "Approve (Once)", description: "Run command once" },
+    { label: "Approve for Session", description: "Remember choice" },
+    { label: "Deny", description: "Cancel tool execution" },
+  ],
+};
+
+export const LONG_CODING_RESPONSE_TEXT = `### Test Suite Audit & Session Verification Report
+
+We have completed the full regression audit across the Collab relay protocol, worker lifecycle reconcilers, and client connection supervisors. All primary invariants defined in AGENTS.md and docs/architecture/session-lifecycle.md were evaluated against concurrent host disconnects and high-frequency stream interleaving.
+
+1. Verified single-writer enforcement across all 5 workspace runtime nodes.
+2. Verified Collab relay frame encryption using AES-256-GCM envelope envelopes.
+3. Validated auto-compaction triggers and partial transcript state reconstitution.
+4. Benchmarked PTY stream chunk reassembly latency under simulated packet drop.
+
+#### Impacted Core Modules
+
+The following workspace source files were reviewed and verified for deterministic error recovery:
+
+- /home/heheboiz/data/coding-agent-web/packages/collab-protocol/src/internal/crypto/stream-ciphers/aes-gcm-packet-serializer-impl-v2-production.ts
+- packages/contracts/src/session-lifecycle-state-machine-v2.ts
+- apps/server/src/services/tmux-session-supervisor-service.ts
+- apps/web/src/components/ConversationView.tsx
+
+#### Benchmark Metrics & Operational Cluster Telemetry
+
+The table below summarizes measured p95 latencies, process RSS, and availability error budgets across all distributed nodes (wide telemetry matrix):
+
+| Node Identifier | Pod Replica | Microservice Component | Commit Version | Cloud Region | Zone | Runtime Health | Latency (p95) | Memory (RSS) | Error Budget |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| \`node-east-01\` | \`pod-gateway-a1\` | Ingress Dispatcher Gateway | \`v2.18.4-c892a\` | US-East (Virginia) | \`us-east-1a\` | Healthy Nominal | 12.4 ms | 48.2 MB | 99.985% |
+| \`node-east-02\` | \`pod-reconcile-b2\` | Session Lifecycle Reconciler | \`v2.18.4-c892a\` | US-East (Virginia) | \`us-east-1b\` | Active Processing | 84.1 ms | 134.8 MB | 99.920% |
+| \`node-eu-01\` | \`pod-snapshot-c3\` | State Snapshot Storage Tier-1 | \`v2.18.3-a104f\` | EU-Central (Frankfurt) | \`eu-central-1a\` | Synced Standby | 28.6 ms | 62.1 MB | 100.000% |
+| \`node-apse-02\` | \`pod-terminal-d4\` | PTY Stream Terminal Multiplex | \`v2.18.4-c892a\` | AP-Southeast (Singapore) | \`ap-southeast-1b\` | Polling Ready | 5.3 ms | 22.0 MB | 99.992% |
+
+#### Canonical Snapshot Checkpoint URL
+
+The cryptographic verification checkpoint is permanently published at the canonical URI below for reconciliation audits (unbroken link token):
+
+https://internal-control-plane.omp.local/v2/clusters/prod-us-east-1a/nodes/worker-node-8f92a1c0b3d4e5f67890/reconciliation-checkpoints/snapshot-sha256-e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855-epoch-1774435200-sequence-0000000000000428-auth-token-dGhpcy1pcy1hLXZhbGlkLXNpZ25hdHVyZS10b2tlbg
+
+#### Stream Reconstruction Implementation
+
+Here is the production implementation for transcript reconciliation with nonce validation and payload integrity verification:
+
+\`\`\`typescript
+// A ~200-character line to verify horizontal scrolling and wrap behavior in mobile Safari:
+export async function reconcileTranscriptDeltas(sessionId: string, snapshotSequenceId: number, expectedHash: string, validationNonce: string, retryPolicy: RetryPolicyConfiguration = DefaultRetryPolicy): Promise<ReconciliationResult> {
+  const activeStreamBuffer = await fetchReconciliationStreamBuffer(sessionId, snapshotSequenceId, { timeoutMs: 5000, enforceIntegrityCheck: true, expectedHash, validationNonce });
+  if (!activeStreamBuffer.isValid()) {
+    throw new ReconciliationError(\`Corrupted sequence buffer at \${snapshotSequenceId} with hash mismatch\`);
+  }
+  return activeStreamBuffer.verifyAndApply();
+}
+\`\`\`
+
+The test runner verified complete coverage of this routine with zero failed assertions:
+
+\`\`\`text
+=== RUN   TestSessionLifecycleReconciliation
+=== PAUSE TestSessionLifecycleReconciliation
+=== CONT  TestSessionLifecycleReconciliation
+--- PASS: TestSessionLifecycleReconciliation (0.42s)
+=== RUN   TestCollabSocketHandshakeAndSeal
+--- PASS: TestCollabSocketHandshakeAndSeal (0.18s)
+PASS
+coverage: 88.4% of statements
+ok      packages/collab-protocol/tests 1.124s
+\`\`\`
+
+All integration suites are green. Ready for inspection.`;
+
+export const REALISTIC_TOOL_OUTPUT = `$ vitest run tests/protocol
+
+ RUN  v2.1.8 /home/heheboiz/data/coding-agent-web
+
+ ✓ tests/protocol/codec.test.ts (14 tests) 42ms
+   ✓ encodes and decodes hello handshake
+   ✓ verifies AES-256-GCM envelope length (4B peer prefix + 12B IV + tag)
+   ✓ handles truncated packets gracefully
+   ✓ preserves UTF-8 multi-byte characters in prompt payload
+ ✓ tests/protocol/reconciliation.test.ts (8 tests) 88ms
+   ✓ catches sequence number gaps
+   ✓ deduplicates overlapping snapshot chunks
+   ✓ resolves concurrent turn state transitions
+ ✓ tests/protocol/subagent-bus.test.ts (6 tests) 31ms
+   ✓ routes lifecycle events to correct subscriber
+   ✓ maintains per-agent message ordering
+
+ Test Files  3 passed (3)
+      Tests  28 passed (28)
+   Start at  10:24:12
+   Duration  412ms (transform 62ms, setup 0ms, collect 98ms, tests 161ms, environment 0ms, prepare 91ms)
+
+Coverage report generated at coverage/lcov.info
+Statements   : 92.4% ( 412/446 )
+Branches     : 87.5% ( 112/128 )
+Functions    : 95.1% ( 78/82 )
+Lines        : 92.8% ( 387/417 )`;
+
+export function createUserMessageEntry(id: string, text: string, timestamp = Date.now()) {
+  return {
+    id,
+    parentId: null,
+    timestamp: new Date(timestamp).toISOString(),
+    type: "message",
+    message: {
+      role: "user",
+      content: text,
+      timestamp,
+    },
+  };
+}
+
+export function createAssistantMessageEntry(id: string, text: string, timestamp = Date.now()) {
+  return {
+    id,
+    parentId: null,
+    timestamp: new Date(timestamp).toISOString(),
+    type: "message",
+    message: {
+      role: "assistant",
+      content: text,
+      model: "claude-3-7-sonnet",
+      usage: { input: 120, output: 450, totalTokens: 570 },
+      stopReason: "stop",
+      timestamp,
+    },
+  };
+}
+
+export function createToolResultEntry(id: string, toolCallId: string, toolName: string, text: string, isError = false, timestamp = Date.now()) {
+  return {
+    id,
+    parentId: null,
+    timestamp: new Date(timestamp).toISOString(),
+    type: "message",
+    message: {
+      role: "toolResult",
+      toolCallId,
+      toolName,
+      content: text,
+      isError,
+      timestamp,
+    },
   };
 }
 
