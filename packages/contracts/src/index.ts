@@ -23,6 +23,7 @@ export const ERROR_CODES = [
   "agent_not_running",
   "link_unavailable",
   "stale_generation",
+  "already_exists",
   "internal",
 ] as const;
 export type ErrorCode = (typeof ERROR_CODES)[number];
@@ -301,6 +302,17 @@ export const updateProjectSchema = z.object({
 export const browseQuerySchema = z.object({
   path: z.string().min(1).max(4096).optional(),
 }).strict();
+
+export const createDirectorySchema = z.object({
+  path: z.string().min(1).max(4096),
+  name: z.string().trim()
+    .min(1, "Directory name must not be empty")
+    .max(64, "Directory name must be at most 64 characters")
+    .refine((name) => name !== "." && name !== ".." && !/[\/\\\u0000-\u001f\u007f]/u.test(name), "Directory name must not contain separators or control characters"),
+}).strict();
+
+export type CreateDirectoryRequest = z.infer<typeof createDirectorySchema>;
+
 
 export const createConversationSchema = z.object({
   projectId: z.string().min(1).max(64),

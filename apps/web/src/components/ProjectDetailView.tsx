@@ -18,6 +18,7 @@ export function ProjectDetailView({
   const [nativeSessions, setNativeSessions] = useState<NativeSessionSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
+  const [resumingSessionId, setResumingSessionId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const loadData = async () => {
@@ -52,11 +53,20 @@ export function ProjectDetailView({
 
     const res = await api.createConversation(projectId, "New chat");
     setCreating(false);
-    if (res.ok) {
-      onSelectConversation(res.data.id);
-    } else {
-      setError(res.error.message || "Failed to create conversation");
-    }
+    if (res.ok) onSelectConversation(res.data.id);
+    else setError(res.error.message || "Failed to create conversation");
+  };
+
+  const handleResume = async (session: NativeSessionSummary) => {
+    if (resumingSessionId || session.tracked) return;
+    setResumingSessionId(session.sessionId);
+    setError(null);
+    const result = await api.createConversation(projectId, session.title ?? "Resumed session", session.sessionId);
+    setResumingSessionId(null);
+    if (result.ok) onSelectConversation(result.data.id);
+    else if (result.error.code === "conflict_owner") {
+      setError("This session already has a writer or its lease cannot be verified. Attach in the terminal instead; no second agent was started.");
+    } else setError(result.error.message);
   };
 
   return (
@@ -114,6 +124,11 @@ export function ProjectDetailView({
                 <span>{conv.model ?? "Default model"}</span>
                 {conv.lastActivityAt && <span>{new Date(conv.lastActivityAt).toLocaleDateString()}</span>}
               </div>
+              {conv.statusDetail && (
+                <p style={{ fontSize: "0.8rem", color: "var(--text-muted)", marginTop: "6px" }}>
+                  {conv.statusDetail}
+                </p>
+              )}
             </div>
           ))}
         </div>
@@ -142,6 +157,23 @@ export function ProjectDetailView({
                 <p style={{ fontSize: "0.75rem", color: "var(--text-muted)", wordBreak: "break-all" }}>
                   {sess.path}
                 </p>
+                {!sess.tracked && sess.live !== false && (
+                  <p style={{ fontSize: "0.8rem", color: "var(--text-muted)" }}>
+                    {sess.live === true
+                      ? "This session already has a writer. Attach in the terminal instead."
+                      : "Writer lease could not be verified. Resume is disabled to prevent a second writer."}
+                  </p>
+                )}
+                {!sess.tracked && sess.live === false && (
+                  <button
+                    type="button"
+                    className="primary"
+                    disabled={resumingSessionId !== null}
+                    onClick={() => handleResume(sess)}
+                  >
+                    {resumingSessionId === sess.sessionId ? "Resuming…" : "Resume in app"}
+                  </button>
+                )}
               </div>
             ))}
           </div>

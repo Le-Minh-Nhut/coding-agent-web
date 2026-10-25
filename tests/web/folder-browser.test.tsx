@@ -7,6 +7,7 @@ import { api } from "../../apps/web/src/api.js";
 vi.mock("../../apps/web/src/api.js", () => ({
   api: {
     browse: vi.fn(),
+    createDirectory: vi.fn(),
   },
 }));
 
@@ -111,5 +112,67 @@ describe("FolderBrowser", () => {
     });
 
     expect(onSelect).toHaveBeenCalledWith("/home/user/work");
+  });
+
+  it("creates a folder, refreshes listing, and selects the new path", async () => {
+    const rootListing = {
+      path: "/home/user/work", parent: null, roots: ["/home/user/work"],
+      entries: [],
+    };
+    const createdListing = {
+      ...rootListing,
+      entries: [{ name: "new-folder", path: "/home/user/work/new-folder", isDirectory: true, allowed: true, hasProject: false }],
+    };
+    vi.mocked(api.browse).mockResolvedValueOnce({ ok: true, data: rootListing });
+    vi.mocked(api.browse).mockResolvedValueOnce({ ok: true, data: createdListing });
+    vi.mocked(api.createDirectory).mockResolvedValue({ ok: true, data: { path: "/home/user/work/new-folder" } });
+    const onSelect = vi.fn();
+
+    await act(async () => { render(<FolderBrowser onSelect={onSelect} onCancel={() => {}} />); });
+    fireEvent.click(screen.getByRole("button", { name: "+ New Folder" }));
+    fireEvent.change(screen.getByLabelText(/New folder in/), { target: { value: "new-folder" } });
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Create folder" })); });
+
+    expect(api.createDirectory).toHaveBeenCalledWith("/home/user/work", "new-folder");
+    expect(api.browse).toHaveBeenCalledTimes(2);
+    expect(screen.getByText("Selected")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Use this folder" }));
+    expect(onSelect).toHaveBeenCalledWith("/home/user/work/new-folder");
+  });
+
+  it("shows the server error text when folder creation fails", async () => {
+    vi.mocked(api.browse).mockResolvedValue({
+      ok: true, data: { path: "/home/user/work", parent: null, roots: ["/home/user/work"], entries: [] },
+    });
+    vi.mocked(api.createDirectory).mockResolvedValue({
+      ok: false, error: { code: "already_exists", message: "A file or directory with that name already exists" },
+    });
+    await act(async () => { render(<FolderBrowser onSelect={() => {}} onCancel={() => {}} />); });
+    fireEvent.click(screen.getByRole("button", { name: "+ New Folder" }));
+    fireEvent.change(screen.getByLabelText(/New folder in/), { target: { value: "occupied" } });
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Create folder" })); });
+    expect(screen.getByRole("alert").textContent).toBe("A file or directory with that name already exists");
+  });
+
+  it("lets the user switch to another configured workspace root without exposing outside ancestors", async () => {
+    vi.mocked(api.browse).mockImplementation(async (path) => ({
+      ok: true,
+      data: {
+        path: path ?? "/home/user/work",
+        parent: null,
+        roots: ["/home/user/work", "/srv/work"],
+        entries: [],
+      },
+    }));
+    const onSelect = vi.fn();
+    await act(async () => { render(<FolderBrowser onSelect={onSelect} onCancel={() => {}} />); });
+    expect(screen.getByRole("button", { name: "work", exact: true })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "user", exact: true })).toBeNull();
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "/srv/work" })); });
+    expect(api.browse).toHaveBeenLastCalledWith("/srv/work");
+    expect(screen.getByRole("button", { name: "work", exact: true })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "srv", exact: true })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Use this folder" }));
+    expect(onSelect).toHaveBeenCalledWith("/srv/work");
   });
 });

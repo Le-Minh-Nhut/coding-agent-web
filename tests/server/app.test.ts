@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, rm, stat } from "node:fs/promises";
+import { mkdtemp, mkdir, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -7,12 +7,12 @@ import { createRuntimeSpec } from "../../apps/server/src/server.js";
 import { buildApp } from "../../apps/server/src/app.js";
 import type { Conversation } from "@caw/contracts";
 import type { RuntimeLaunchSpec, Supervisor } from "@caw/runtime";
-import type { ServerConfig } from "../../apps/server/src/config.js";
+import type { WorkspacePathPolicy } from "../../apps/server/src/path-policy.js";
 import { createMetadataStore } from "../../apps/server/src/store.js";
 
 const dirs: string[] = [];
 afterEach(async () => { await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true }))); });
-async function fixture(options: { tmuxSocketPath?: string; tmuxServerIdentity?: () => Promise<string | null>; supervisor?: Supervisor; runtimeSpec?: (conversation: Conversation, input: { resumeSessionId?: string; model?: string; allowMissingResumeSession?: boolean }) => Promise<RuntimeLaunchSpec> | RuntimeLaunchSpec } = {}) {
+async function fixture(options: { paths?: WorkspacePathPolicy; tmuxSocketPath?: string; tmuxServerIdentity?: () => Promise<string | null>; supervisor?: Supervisor; runtimeSpec?: (conversation: Conversation, input: { resumeSessionId?: string; model?: string; allowMissingResumeSession?: boolean }) => Promise<RuntimeLaunchSpec> | RuntimeLaunchSpec } = {}) {
   const dir = await mkdtemp(join(tmpdir(), "caw-app-")); dirs.push(dir);
   const auth = createAuthenticationService({ stateDir: dir, setupOutput: () => undefined }); await auth.initAuth();
   const config: ServerConfig = { host: "127.0.0.1", port: 8791, stateDir: dir, allowedRoots: [dir], relayPort: 8792, relayAllowedOrigins: [], maxActiveAgents: 3, authTokenTtlHours: 720, trustTailscaleOrigin: false, logLevel: "silent", insecureCookies: false };
@@ -29,8 +29,7 @@ describe("Fastify API security", () => {
     const requests: Array<{ method: "GET" | "POST" | "PATCH" | "DELETE"; url: string }> = [
       { method: "POST", url: "/api/auth/logout" }, { method: "GET", url: "/api/auth/me" },
       { method: "GET", url: "/api/capabilities" }, { method: "GET", url: "/api/projects" },
-      { method: "POST", url: "/api/projects" }, { method: "PATCH", url: "/api/projects/id" },
-      { method: "DELETE", url: "/api/projects/id" }, { method: "GET", url: "/api/browse" },
+      { method: "POST", url: "/api/projects" }, { method: "POST", url: "/api/directories" }, { method: "PATCH", url: "/api/projects/id" },
       { method: "GET", url: "/api/projects/id/conversations" }, { method: "POST", url: "/api/projects/id/conversations" },
       { method: "GET", url: "/api/conversations/id/events" }, { method: "PATCH", url: "/api/conversations/id/model" },
       { method: "POST", url: "/api/conversations/id/actions" }, { method: "GET", url: "/api/runtime" },
@@ -77,6 +76,83 @@ describe("Fastify API security", () => {
     await app.close();
   });
 
+  it("creates exactly one directory under an allowed parent", async () => {
+    const { app, headers, dir } = await fixture();
+    const parent = join(dir, "workspace");
+    await mkdir(parent);
+    const response = await app.inject({ method: "POST", url: "/api/directories", headers, payload: { path: parent, name: "new-folder" } });
+    const createdPath = join(parent, "new-folder");
+    expect(response.statusCode).toBe(201);
+    expect(response.json().data.path).toBe(createdPath);
+    expect((await stat(createdPath)).isDirectory()).toBe(true);
+    await app.close();
+  });
+
+  it("rejects invalid names, unsafe parents, and existing targets without creating anything", async () => {
+    const { app, headers, dir } = await fixture();
+    const parent = join(dir, "workspace");
+    await mkdir(parent);
+    const outsideParent = await mkdtemp(join(tmpdir(), "caw-outside-")); dirs.push(outsideParent);
+    const fileParent = join(parent, "parent-file");
+    await writeFile(fileParent, "file");
+    const existing = join(parent, "occupied");
+    await mkdir(existing);
+    const before = await readdir(parent);
+    const invalidNames = ["..", ".", "", "   ", "sub/name", "sub\\name", "/etc/foo", "x".repeat(65), "control\nname"];
+
+    for (const name of invalidNames) {
+      const response = await app.inject({ method: "POST", url: "/api/directories", headers, payload: { path: parent, name } });
+      expect(response.statusCode, JSON.stringify(name)).toBe(400);
+      expect(response.json().error.code).toBe("bad_request");
+      expect(await readdir(parent)).toEqual(before);
+    }
+
+    const outside = await app.inject({ method: "POST", url: "/api/directories", headers, payload: { path: outsideParent, name: "outside" } });
+    expect(outside.statusCode).toBe(403);
+    expect(await stat(join(outsideParent, "outside")).then(() => true, () => false)).toBe(false);
+
+    const nonDirectory = await app.inject({ method: "POST", url: "/api/directories", headers, payload: { path: fileParent, name: "child" } });
+    expect(nonDirectory.statusCode).toBe(400);
+    expect(nonDirectory.json().error.code).toBe("not_a_directory");
+    expect(await readdir(parent)).toEqual(before);
+
+    const conflict = await app.inject({ method: "POST", url: "/api/directories", headers, payload: { path: parent, name: "occupied" } });
+    expect(conflict.statusCode).toBe(409);
+    expect(conflict.json().error.code).toBe("already_exists");
+    expect(await readdir(parent)).toEqual(before);
+
+    const nfdName = "cafe\u0301";
+    await mkdir(join(parent, nfdName));
+    const countBefore = (await readdir(parent)).length;
+    const nfcConflict = await app.inject({ method: "POST", url: "/api/directories", headers, payload: { path: parent, name: "café" } });
+    expect(nfcConflict.statusCode).toBe(409);
+    expect(nfcConflict.json().error.code).toBe("already_exists");
+    expect((await readdir(parent)).length).toBe(countBefore);
+    await app.close();
+  });
+
+  it("reports filesystem permission failures as internal errors, not missing paths", async () => {
+    const paths = {
+      listDirectory: async () => { throw Object.assign(new Error("permission denied"), { code: "EACCES" }); },
+    } as unknown as WorkspacePathPolicy;
+    const { app, headers } = await fixture({ paths });
+    const response = await app.inject({ method: "GET", url: "/api/browse", headers });
+    expect(response.statusCode).toBe(500);
+    expect(response.json().error).toEqual({ code: "internal", message: "Permission denied while accessing workspace path" });
+    await app.close();
+  });
+
+  it("reports filesystem I/O failures as internal errors with honest message", async () => {
+    const paths = {
+      listDirectory: async () => { throw Object.assign(new Error("io error"), { code: "EIO" }); },
+    } as unknown as WorkspacePathPolicy;
+    const { app, headers } = await fixture({ paths });
+    const response = await app.inject({ method: "GET", url: "/api/browse", headers });
+    expect(response.statusCode).toBe(500);
+    expect(response.json().error).toEqual({ code: "internal", message: "Filesystem I/O error while accessing workspace path" });
+    await app.close();
+  });
+
   it("SEC-6: two conversations with identical titles get distinct launch names and neither is refused", async () => {
     const { dir, app, store } = await fixture();
     const runtimeSpec = createRuntimeSpec({
@@ -104,6 +180,39 @@ describe("Fastify API security", () => {
 
     expect(() => fakeTmuxLaunch(specA.name)).not.toThrow();
     expect(() => fakeTmuxLaunch(specB.name)).not.toThrow();
+    await app.close();
+  });
+
+  it("forwards a native-session resume request into an independent conversation", async () => {
+    let getConversation: (id: string) => Promise<Conversation | null> = async () => null;
+    let launchedSpec: RuntimeLaunchSpec | undefined;
+    const supervisor = {
+      start: async (_id: string, spec: RuntimeLaunchSpec) => (await getConversation(spec.conversationId))!,
+    } as unknown as Supervisor;
+    const { app, headers, dir, store } = await fixture({
+      supervisor,
+      runtimeSpec: (conversation, input) => {
+        const spec: RuntimeLaunchSpec = {
+          conversationId: conversation.id,
+          name: `resume-${conversation.id}`,
+          cwd: dir,
+          resumeSessionPath: input.resumeSessionId ? join(dir, "existing.jsonl") : undefined,
+        };
+        launchedSpec = spec;
+        return spec;
+      },
+    });
+    getConversation = (id) => store.getConversation(id);
+    const project = await store.createProject({ path: dir, label: "resume-test" });
+    const existing = await store.createConversation({ projectId: project.id, title: "Existing native session", nativeSessionId: "native-session-id" });
+    const response = await app.inject({
+      method: "POST", url: `/api/projects/${project.id}/conversations`, headers,
+      payload: { title: "Resumed session", resumeSessionId: "native-session-id" },
+    });
+    expect(response.statusCode).toBe(201);
+    expect(response.json().data.id).not.toBe(existing.id);
+    expect(response.json().data.nativeSessionId).toBe("native-session-id");
+    expect(launchedSpec?.resumeSessionPath).toBe(join(dir, "existing.jsonl"));
     await app.close();
   });
   it("persists a model preference, rejects invalid models, and restarts with chosen model", async () => {

@@ -12,6 +12,12 @@ export function FolderBrowser({ onSelect, onCancel }: FolderBrowserProps) {
   const [listing, setListing] = useState<DirectoryListing | null>(null);
   const [loading, setLoading] = useState(true);
   const [errorText, setErrorText] = useState<string | null>(null);
+  const [selectedPath, setSelectedPath] = useState<string | null>(null);
+  const [showNewFolder, setShowNewFolder] = useState(false);
+  const [newFolderName, setNewFolderName] = useState("");
+  const [newFolderError, setNewFolderError] = useState<string | null>(null);
+  const [creatingFolder, setCreatingFolder] = useState(false);
+  const [refreshVersion, setRefreshVersion] = useState(0);
 
   useEffect(() => {
     let active = true;
@@ -39,9 +45,36 @@ export function FolderBrowser({ onSelect, onCancel }: FolderBrowserProps) {
     return () => {
       active = false;
     };
-  }, [currentPath]);
+  }, [currentPath, refreshVersion]);
 
   const pathParts = listing?.path ? listing.path.split("/").filter(Boolean) : [];
+  const activeRoot = listing && listing.roots.find((root) => listing.path === root || listing.path.startsWith(`${root.replace(/\/$/u, "")}/`));
+  const rootParts = activeRoot?.split("/").filter(Boolean) ?? [];
+  const breadcrumbs = activeRoot
+    ? [
+        { part: rootParts.at(-1) ?? activeRoot, path: activeRoot },
+        ...pathParts.slice(rootParts.length).map((part, index) => ({
+          part,
+          path: `/${pathParts.slice(0, rootParts.length + index + 1).join("/")}`,
+        })),
+      ]
+    : [];
+  const handleCreateFolder = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!listing?.path || creatingFolder) return;
+    setCreatingFolder(true);
+    setNewFolderError(null);
+    const result = await api.createDirectory(listing.path, newFolderName);
+    setCreatingFolder(false);
+    if (!result.ok) {
+      setNewFolderError(result.error.message);
+      return;
+    }
+    setSelectedPath(result.data.path);
+    setNewFolderName("");
+    setShowNewFolder(false);
+    setRefreshVersion((version) => version + 1);
+  };
 
   return (
     <div className="modal-overlay">
@@ -60,27 +93,56 @@ export function FolderBrowser({ onSelect, onCancel }: FolderBrowserProps) {
             type="button"
             className="ghost"
             style={{ padding: "4px 6px", fontSize: "0.85rem" }}
-            onClick={() => setCurrentPath(undefined)}
+          onClick={() => { setSelectedPath(null); setCurrentPath(undefined); }}
           >
             Roots
           </button>
-          {pathParts.map((part, index) => {
-            const reconstructed = "/" + pathParts.slice(0, index + 1).join("/");
-            return (
-              <span key={reconstructed} style={{ display: "inline-flex", alignItems: "center" }}>
-                <span>/</span>
-                <button
-                  type="button"
-                  className="ghost"
-                  style={{ padding: "4px 6px", fontSize: "0.85rem" }}
-                  onClick={() => setCurrentPath(reconstructed)}
-                >
-                  {part}
-                </button>
-              </span>
-            );
-          })}
+          {breadcrumbs.map(({ part, path }) => (
+            <span key={path} style={{ display: "inline-flex", alignItems: "center" }}>
+              <span>/</span>
+              <button
+                type="button"
+                className="ghost"
+                style={{ padding: "4px 6px", fontSize: "0.85rem" }}
+                onClick={() => { setSelectedPath(null); setCurrentPath(path); }}
+              >
+                {part}
+              </button>
+            </span>
+          ))}
         </div>
+
+        {!currentPath && listing?.roots && listing.roots.length > 1 && (
+          <div aria-label="Workspace roots" style={{ display: "flex", flexWrap: "wrap", gap: "6px", margin: "8px 0" }}>
+            {listing.roots.map((root) => (
+              <button type="button" key={root} className="ghost" onClick={() => { setSelectedPath(null); setCurrentPath(root); }}>
+                {root}
+              </button>
+            ))}
+          </div>
+        )}
+
+        {listing?.path && (
+          <div style={{ margin: "10px 0" }}>
+            {!showNewFolder ? (
+              <button type="button" className="ghost" onClick={() => { setShowNewFolder(true); setNewFolderError(null); }}>
+                + New Folder
+              </button>
+            ) : (
+              <form onSubmit={handleCreateFolder}>
+                <label htmlFor="new-folder-name">New folder in {listing.path}</label>
+                <div style={{ display: "flex", gap: "8px", marginTop: "6px" }}>
+                  <input id="new-folder-name" value={newFolderName} maxLength={64} onChange={(event) => setNewFolderName(event.target.value)} autoFocus />
+                  <button type="submit" className="primary" disabled={creatingFolder || !newFolderName.trim()}>
+                    {creatingFolder ? "Creating…" : "Create folder"}
+                  </button>
+                  <button type="button" onClick={() => { setShowNewFolder(false); setNewFolderError(null); }}>Cancel</button>
+                </div>
+                {newFolderError && <div role="alert" style={{ color: "var(--danger)", marginTop: "6px" }}>{newFolderError}</div>}
+              </form>
+            )}
+          </div>
+        )}
 
         {loading ? (
           <div style={{ padding: "24px", textAlign: "center", color: "var(--text-muted)" }}>Loading…</div>
@@ -90,7 +152,7 @@ export function FolderBrowser({ onSelect, onCancel }: FolderBrowserProps) {
               <div
                 className="folder-item"
                 style={{ cursor: "pointer" }}
-                onClick={() => setCurrentPath(listing.parent!)}
+                onClick={() => { setSelectedPath(null); setCurrentPath(listing.parent!); }}
               >
                 <span>📁 .. (Up)</span>
               </div>
@@ -98,19 +160,22 @@ export function FolderBrowser({ onSelect, onCancel }: FolderBrowserProps) {
 
             {listing?.entries.filter((entry) => entry.isDirectory).map((entry) => {
               const disabled = !entry.allowed || !entry.isDirectory;
+              const selected = selectedPath === entry.path;
               return (
                 <div
                   key={entry.path}
-                  className={`folder-item ${disabled ? "disabled" : ""}`}
-                  style={{ cursor: disabled ? "not-allowed" : "pointer" }}
+                  className={`folder-item ${disabled ? "disabled" : ""} ${selected ? "selected" : ""}`}
+                  style={{ cursor: disabled ? "not-allowed" : "pointer", borderColor: selected ? "var(--primary)" : undefined }}
                   onClick={() => {
                     if (!disabled) {
+                      setSelectedPath(null);
                       setCurrentPath(entry.path);
                     }
                   }}
                 >
                   <span>📁 {entry.name}</span>
                   {entry.hasProject && <span className="badge" style={{ fontSize: "0.7rem" }}>Project</span>}
+                  {selected && <span className="badge">Selected</span>}
                 </div>
               );
             })}
@@ -130,9 +195,8 @@ export function FolderBrowser({ onSelect, onCancel }: FolderBrowserProps) {
             className="primary"
             disabled={!listing?.path || loading}
             onClick={() => {
-              if (listing?.path) {
-                onSelect(listing.path);
-              }
+              if (selectedPath) onSelect(selectedPath);
+              else if (listing?.path) onSelect(listing.path);
             }}
           >
             Use this folder

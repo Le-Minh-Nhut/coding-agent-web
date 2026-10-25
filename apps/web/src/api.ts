@@ -124,6 +124,13 @@ export const api = {
     });
   },
 
+  async createDirectory(path: string, name: string): Promise<ApiResult<{ path: string }>> {
+    return request<{ path: string }>("/api/directories", {
+      method: "POST",
+      body: JSON.stringify({ path, name }),
+    });
+  },
+
   async updateProject(id: string, updates: { label?: string; favorite?: boolean }): Promise<ApiResult<ProjectWithStats>> {
     return request<ProjectWithStats>(`/api/projects/${encodeURIComponent(id)}`, {
       method: "PATCH",
@@ -146,10 +153,10 @@ export const api = {
     return request<Conversation[]>(`/api/projects/${encodeURIComponent(projectId)}/conversations`);
   },
 
-  async createConversation(projectId: string, title?: string): Promise<ApiResult<Conversation>> {
+  async createConversation(projectId: string, title?: string, resumeSessionId?: string): Promise<ApiResult<Conversation>> {
     return request<Conversation>(`/api/projects/${encodeURIComponent(projectId)}/conversations`, {
       method: "POST",
-      body: JSON.stringify({ title: title ?? "New conversation" }),
+      body: JSON.stringify({ title: title ?? "New conversation", ...(resumeSessionId ? { resumeSessionId } : {}) }),
     });
   },
 

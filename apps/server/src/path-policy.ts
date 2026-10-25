@@ -1,9 +1,9 @@
-import { lstat, realpath, readdir } from "node:fs/promises";
+import { lstat, mkdir, realpath, readdir } from "node:fs/promises";
 import { isAbsolute, join, parse, relative, resolve, sep } from "node:path";
 import type { DirectoryEntry, DirectoryListing } from "@caw/contracts";
 
 export class PathPolicyError extends Error {
-  constructor(readonly code: "path_forbidden" | "path_not_found" | "not_a_directory", message: string) {
+  constructor(readonly code: "path_forbidden" | "path_not_found" | "not_a_directory" | "already_exists", message: string) {
     super(message);
     this.name = "PathPolicyError";
   }
@@ -22,8 +22,10 @@ export class WorkspacePathPolicy {
         return canonical;
       } catch (error) {
         if (error instanceof PathPolicyError) throw error;
-        if ((error as NodeJS.ErrnoException).code === "ELOOP") throw new PathPolicyError("path_forbidden", "Workspace root contains a symlink loop");
-        throw new PathPolicyError("path_not_found", `Workspace root does not exist: ${root}`);
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code === "ELOOP") throw new PathPolicyError("path_forbidden", "Workspace root contains a symlink loop");
+        if (code === "ENOENT") throw new PathPolicyError("path_not_found", `Workspace root does not exist: ${root}`);
+        throw error;
       }
     }));
   }
@@ -110,6 +112,72 @@ export class WorkspacePathPolicy {
       if (["ELOOP", "ENOENT"].includes((error as NodeJS.ErrnoException).code ?? "")) return { name: displayName, path: candidate, isDirectory: false, allowed: false, hasProject: false };
       throw error;
     }
+  }
+
+  protected async makeDirectory(target: string): Promise<void> {
+    await mkdir(target, { recursive: false });
+  }
+
+  async createDirectory(parentPath: string, name: string): Promise<string> {
+    if (!name || name === "." || name === ".." || name.includes("/") || name.includes("\\") || name.includes("\0") || /[\u0000-\u001f\u007f]/u.test(name)) {
+      throw new PathPolicyError("path_forbidden", "Invalid directory name");
+    }
+    const parent = await this.assertInsideRoots(parentPath, true);
+
+    let existingEntries: string[];
+    try {
+      existingEntries = await readdir(parent);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") throw new PathPolicyError("path_not_found", "Parent directory does not exist");
+      if ((error as NodeJS.ErrnoException).code === "ENOTDIR") throw new PathPolicyError("not_a_directory", "Parent path is not a directory");
+      if ((error as NodeJS.ErrnoException).code === "ELOOP") throw new PathPolicyError("path_forbidden", "Path contains a symlink loop");
+      throw error;
+    }
+    const normalizedTargetName = name.normalize("NFC");
+    if (existingEntries.some((entry) => entry.normalize("NFC") === normalizedTargetName)) {
+      throw new PathPolicyError("already_exists", "A file or directory with that name already exists");
+    }
+
+    let currentParent: string;
+    try {
+      currentParent = await realpath(parent);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ELOOP") throw new PathPolicyError("path_forbidden", "Path contains a symlink loop");
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") throw new PathPolicyError("path_not_found", "Parent directory does not exist");
+      throw error;
+    }
+    if (currentParent !== parent) {
+      throw new PathPolicyError("path_forbidden", "Parent directory changed during creation");
+    }
+
+    const target = join(parent, name);
+    try {
+      await this.makeDirectory(target);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+        throw new PathPolicyError("already_exists", "A file or directory with that name already exists");
+      }
+      throw error;
+    }
+
+    // why: races a local actor who already has shell on the machine; detect-and-refuse rather than
+    // guarantee atomicity, because there is no portable mkdirat here. State residual ceiling: leaves
+    // created directory in place if outside roots (no deletion attempt).
+    // ponytail: detect-and-refuse; native openat/mkdirat binding needed if true atomicity required.
+    let canonicalTarget: string;
+    try {
+      canonicalTarget = await realpath(target);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ELOOP") throw new PathPolicyError("path_forbidden", "Path contains a symlink loop");
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") throw new PathPolicyError("path_not_found", "Path does not exist");
+      throw error;
+    }
+    const roots = await this.roots();
+    if (!this.inside(canonicalTarget, roots)) {
+      throw new PathPolicyError("path_forbidden", "Created directory is outside configured workspace roots");
+    }
+
+    return canonicalTarget;
   }
 
   async listDirectory(path?: string): Promise<DirectoryListing> {

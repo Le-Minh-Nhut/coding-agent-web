@@ -1,6 +1,6 @@
 import type { Server as HttpServer } from "node:http";
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest, type RouteGenericInterface } from "fastify";
-import { browseQuerySchema, conversationActionSchema, conversationModelSchema, createConversationSchema, createProjectSchema, ERROR_CODES, fail, listEventsQuerySchema, loginSchema, ok, updateProjectSchema } from "@caw/contracts";
+import { browseQuerySchema, conversationActionSchema, conversationModelSchema, createConversationSchema, createDirectorySchema, createProjectSchema, ERROR_CODES, fail, listEventsQuerySchema, loginSchema, ok, updateProjectSchema } from "@caw/contracts";
 import { z } from "zod";
 import type { Capabilities, CollabLinkResponse, Conversation, ErrorCode, NativeSessionSummary } from "@caw/contracts";
 import type { CapabilityService } from "@caw/omp-adapter";
@@ -214,6 +214,13 @@ export function buildApp(deps: AppDependencies): FastifyInstance<HttpServer> {
     if (!parsed.success) return reply.code(400).send(fail("bad_request", "Invalid browse query"));
     try { return ok(await paths.listDirectory(parsed.data.path)); } catch (error) { return pathError(reply, error); }
   });
+  app.post("/api/directories", { preHandler: protectedHook }, async (request, reply) => {
+    const parsed = createDirectorySchema.safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send(fail("bad_request", parsed.error.issues.map((issue) => issue.message).join("; ") || "Invalid directory request"));
+    try {
+      return reply.code(201).send(ok({ path: await paths.createDirectory(parsed.data.path, parsed.data.name) }));
+    } catch (error) { return pathError(reply, error); }
+  });
   app.get("/api/projects/:id/conversations", { preHandler: protectedHook }, async (request, reply) => {
     const params = idParams.safeParse(request.params);
     if (!params.success) return reply.code(400).send(fail("bad_request", "Invalid project ID"));
@@ -381,10 +388,14 @@ export function buildApp(deps: AppDependencies): FastifyInstance<HttpServer> {
 
 function pathError(reply: HttpReply, error: unknown) {
   if (error instanceof PathPolicyError) {
-    const status = error.code === "path_forbidden" ? 403 : error.code === "path_not_found" ? 404 : 400;
+    const status = error.code === "path_forbidden" ? 403 : error.code === "path_not_found" ? 404 : error.code === "already_exists" ? 409 : 400;
     return reply.code(status).send(fail(error.code, error.message));
   }
-  return reply.code(400).send(fail("path_not_found", "Unable to resolve workspace path"));
+  const code = error && typeof error === "object" && "code" in error ? error.code : undefined;
+  const message = code === "EACCES" || code === "EPERM"
+    ? "Permission denied while accessing workspace path"
+    : code === "EIO" ? "Filesystem I/O error while accessing workspace path" : "Unable to access workspace path";
+  return reply.code(500).send(fail("internal", message));
 }
 
 function runtimeErrorCode(error: unknown): ErrorCode {

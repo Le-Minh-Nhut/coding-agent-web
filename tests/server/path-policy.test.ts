@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readdir, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -64,5 +64,77 @@ describe("WorkspacePathPolicy", () => {
     const error = await new WorkspacePathPolicy([]).listDirectory().catch((value: unknown) => value);
     expect(error).toBeInstanceOf(PathPolicyError);
     expect((error as PathPolicyError).code).toBe("path_forbidden");
+  });
+
+  it("creates directory inside allowed root and returns the created absolute path", async () => {
+    const root = await tempDir();
+    const parent = join(root, "parent");
+    await mkdir(parent);
+    const policy = new WorkspacePathPolicy([root]);
+    const created = await policy.createDirectory(parent, "child");
+    expect(created).toBe(join(parent, "child"));
+    expect((await stat(created)).isDirectory()).toBe(true);
+  });
+
+  it("refuses directory creation and leaves directory in place when parent is swapped to an outside symlink during mkdir", async () => {
+    const base = await tempDir();
+    const root = join(base, "root");
+    const outside = join(base, "outside");
+    const parent = join(root, "parent");
+    await mkdir(root);
+    await mkdir(outside);
+    await mkdir(parent);
+
+    class SwappedParentPolicy extends WorkspacePathPolicy {
+      protected override async makeDirectory(target: string): Promise<void> {
+        await rm(parent, { recursive: true });
+        await symlink(outside, parent);
+        await super.makeDirectory(target);
+      }
+    }
+
+    const policy = new SwappedParentPolicy([root]);
+    await expectCode(policy.createDirectory(parent, "swapped-child"), "path_forbidden");
+    // Directory was created outside root and must remain in place (no cleanup delete)
+    expect((await stat(join(outside, "swapped-child"))).isDirectory()).toBe(true);
+  });
+
+  it("refuses directory creation when parent realpath mismatches before mkdir", async () => {
+    const base = await tempDir();
+    const root = join(base, "root");
+    const outside = join(base, "outside");
+    const parent = join(root, "parent");
+    await mkdir(root);
+    await mkdir(outside);
+    await mkdir(parent);
+
+    class PreMkdirSwapPolicy extends WorkspacePathPolicy {
+      override async assertInsideRoots(path: string, requireDirectory = false): Promise<string> {
+        const canonical = await super.assertInsideRoots(path, requireDirectory);
+        await rm(canonical, { recursive: true });
+        await symlink(outside, canonical);
+        return canonical;
+      }
+    }
+
+    const policy = new PreMkdirSwapPolicy([root]);
+    await expectCode(policy.createDirectory(parent, "child"), "path_forbidden");
+    expect(await stat(join(outside, "child")).then(() => true, () => false)).toBe(false);
+  });
+
+  it("rejects Unicode-equivalent directory creation when an NFD-equivalent entry exists without modifying on-disk count", async () => {
+    const root = await tempDir();
+    const parent = join(root, "parent");
+    await mkdir(parent);
+    const decomposed = "cafe\u0301";
+    await mkdir(join(parent, decomposed));
+    const before = await readdir(parent);
+    expect(before).toHaveLength(1);
+
+    const policy = new WorkspacePathPolicy([root]);
+    await expectCode(policy.createDirectory(parent, "café"), "already_exists");
+
+    const after = await readdir(parent);
+    expect(after).toEqual(before);
   });
 });
