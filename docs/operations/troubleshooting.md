@@ -50,11 +50,14 @@ one is an error, and the app refuses to translate it into "stopped".
 
 ## A double prompt / the agent got the same message twice
 
-Prompts carry a UUID idempotency key inside the sealed Collab frame. If you
-saw a duplicate, capture: the conversation id, roughly when, and whether the
-network dropped mid-send. Then look for two command rows with different keys —
-different keys mean two genuine submissions (for example a double-tap before the
-composer disabled), which is a UI defect worth reporting.
+Prompts carry no idempotency key on the Collab wire. The browser's local
+monotonic id (`user-${++localIdRef.current}`) labels only its optimistic row; it
+is not sent to the host. Automatic reconnect does not resend an accepted prompt,
+but manually resending after an ambiguous disconnect can enqueue duplicate work.
+`MetadataStore.recordCommandOnce()` exists but has no production caller, so command
+rows cannot distinguish Collab prompt deliveries. Compare the transcript and
+native session history; if delivery was ambiguous, report the conversation ID and
+approximate time.
 
 ## The agent is running but the app shows `stopped`
 

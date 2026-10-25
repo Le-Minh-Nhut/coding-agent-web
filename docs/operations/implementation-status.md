@@ -1,10 +1,10 @@
 # Implementation status
 
-Updated: 2026-10-25. Honest ledger. Raw evidence: `docs/operations/evidence.md`.
+Updated: 2026-10-26. Honest ledger. Raw evidence: `docs/operations/evidence.md`.
 Audits: `docs/audits/round-1-architecture.md` (architecture/concurrency),
 `docs/audits/round-2-security.md` (security),
 `docs/audits/reconciliation-verification.md` (real-process reconciliation),
-`docs/audits/round-3-post-fix-verification.md` (post-fix pass).
+`docs/audits/round-3-post-fix-verification.md` (post-fix pass), and the round-eight evidence listed below.
 
 Legend: **verified** = ran it and saw it work · **built** = code + tests pass,
 integration not exercised · **pending** · **blocked**.
@@ -21,40 +21,31 @@ forks rather than corrupting, which is why the pre-launch lease guard exists.
 
 ## M1 — foundation: verified
 
-`pnpm -r typecheck` clean; capability probe 18/18; the whole suite green (count
-below). Contracts, adapters, relay, runtime, vendored guest client, web app and
-server all exist as real code with tests.
+Round-eight worker report: fresh-clone `pnpm -r typecheck` passed. Capability
+probe now reports **17 ok / 1 warn / 0 fail**; the warning is correct when no
+Collab hosts are running, because per-host shape cannot be checked without a
+host. The previous 18/18 count is stale. Contracts, adapters, relay, runtime,
+vendored guest client, web app and server exist as real code with tests.
 
 ## M2 — native session lifecycle: verified against real processes
 
-`CAW_COMPAT=1 npx vitest run tests/compat` → **8 passed**: managed launch with a
-recorded `$N`, terminal attach showing the agent's own TUI, duplicate-writer
-refusal with exactly one session left, stop by recorded id, and six reconciliation
-scenarios (adopt a live agent; a dead process with surviving history becomes
-`stopped`; never kill what we did not record; a foreign writer is `unknown`; an
-unreadable registry never yields a clean slate; an unowned room is `external`).
+Round-eight worker report: `CAW_COMPAT=1 npx vitest run tests/compat` →
+**8 passed**. Managed launch with recorded `$N`, terminal attach, duplicate-writer
+refusal, stop by recorded ID, and six reconciliation cases are covered. The
+worker reported the clean process baseline restored after the run.
 
 Qualification recorded honestly in the reconciliation audit: OMP does not write a
 journal without a prompt, so one scenario seeded an OMP-shaped header, leaving
-survival of a *real* OMP-written journal **UNVERIFIED**.
-
+survival of a *real* OMP-written journal through failure **UNVERIFIED**.
 ## M3 — live chat integration: verified end to end
 
-`node scripts/acceptance-ui-drives-agent.mjs` against a live server → **7/7 PASS**
-at a 390×844 viewport:
+Round-eight worker report: `node scripts/acceptance-ui-drives-agent.mjs` against
+a live server → **7/7 PASS**. The run drove a real agent through the UI, minted
+a live link, and opened the guest socket; the worker reported a clean process
+baseline afterwards. Exact evidence and cleanup record: `docs/operations/acceptance-run-plan.md`.
 
-```
-PASS  login through the UI lands on the projects screen
-PASS  conversation created (launches a real agent) — tmux $1
-PASS  the agent published its native session — 01a16fce-…
-PASS  state reflects a live agent — idle
-PASS  a live session link is minted — 200, access "full", 109-byte secret
-PASS  our UI opened a guest socket to the relay — (open, not looping)
-PASS  the conversation screen reports a live session — "Connected — no turn in flight"
-```
-
-A visual inspection of the screenshot confirmed: composer bottom-anchored, no
-clipping, agent identity and state legible, nothing misleading.
+The earlier 390×844 visual review remains a separate historical observation; it
+does not establish physical-iPhone behavior.
 
 ## M4 — security: audit complete, P1s closed
 
@@ -73,27 +64,72 @@ reachable via `?access=view`; login throttling no longer locks the owner out;
 duplicate launch names are impossible because the name is derived from the
 conversation id.
 
-## M5 — QA, audits, release: audits and final verification complete
 
-- `npx vitest run` → **334 passed | 8 skipped** (the skips are the opt-in real-OMP
-  suite).
-- `CAW_COMPAT=1 npx vitest run tests/compat` → **8 passed**.
-- Playwright E2E, Chromium at 390×844 → **24 passed**, including: a prompt reaches
-  a live host exactly once; a dropped connection is reported as reconnecting and
-  recovers without resubmitting; a prompt sent while the host is gone never becomes
-  a silent success; `unknown` is its own state; renaming or deleting a project
-  never touches the directory on disk.
-- Seven independent audit passes delivered, plus a dedicated reconciliation
-  verification: architecture and concurrency (`round-1`), security (`round-2`),
-  post-fix (`round-3`), final (`round-4`), verification of round 4 (`round-5`), of
-  the P0 fixes (`round-6`), and of the ownership fixes (`round-7`). Each later pass
-  ran against code the earlier one had changed, and each found something the
-  previous one had not — which is the argument for doing them sequentially rather
-  than once.
-- `node scripts/acceptance-ui-drives-agent.mjs` → **7/7 PASS** against a live server,
-  with the credential invariant checked independently: the minted link's secret
-  decodes to 48 bytes (32-byte key + 16-byte write token), the room path appears
-  **only in the URL fragment**, and the host is registered with `relayConnected: true`.
+## M5 — QA, audits, release: round-one-to-seven evidence retained
+
+The earlier suite counts and audit-round summary are historical, not current
+verification; round-eight evidence and current gaps follow. Round-eight checks
+were run by separate workers and are attributed as reports below, not as runs by
+the ledger editor.
+
+## Round 8 — clean checkout, integration, and delivered work
+
+### Clean checkout and CI
+
+Round-eight worker report: a fresh clone passed `pnpm install --frozen-lockfile`,
+`pnpm -r typecheck`, `npx vitest run`, `node scripts/build-guest.mjs`,
+`pnpm --filter @caw/web build`, the CI bundle-origin grep, `pnpm --filter
+@caw/server build`, and Playwright Chromium (**24 passed**). The Vitest report
+recorded **334 passed | 8 skipped**. Nine `packages/guest/src/lib/` files had
+been untracked because the Python-template `lib/` ignore rule swallowed them; the
+ignore rule was fixed and all nine files are tracked. `tsx` was promoted to a
+root devDependency so a clean clone can start the E2E launcher. The clean clone
+reported in the worker run used these fixes.
+
+Hosted CI: **NOT VERIFIED** for current HEAD. `gh` was unavailable; the only
+observable hosted run was for an old, pre-fix commit. See
+`docs/audits/round-8-build-ci-and-test-inventory.md` for the recorded run and
+clean-checkout evidence; its earlier E2E-blocked observation predates the root
+`tsx` fix and is superseded by the later worker report above.
+
+### Real OMP and acceptance
+
+Round-eight worker report: `CAW_COMPAT=1 npx vitest run tests/compat` →
+**8 passed**; the acceptance script → **7/7 PASS**. Both runs reported a clean
+process baseline afterwards. The machine capability probe reports **17 ok / 1
+warn / 0 fail**; the warning is the correct “no collab hosts running; per-host
+shape unverifiable” case, not a failure. Details: `docs/operations/acceptance-run-plan.md`.
+
+### Delivered
+
+Round-eight work delivered directory creation and hardening, multi-root browsing,
+resume-in-app for confirmed-free untracked native sessions, honest browse errors,
+lifecycle detail, transcript snapshot restore and deduplication, upstream-correct
+approval shapes, `isStreaming`, `toolResult`/`displayName`, transcript `reqId`
+correlation, mobile reading-UX changes, slash-command honesty, and model-catalog
+enumeration through the `omp models --json` adapter. Evidence and scope notes:
+`docs/audits/round-8-*.md`, `docs/research/slash-command-feasibility.md`,
+`docs/research/model-catalog.md`, `docs/assets/screens/manifest.md`, and
+`docs/operations/acceptance-run-plan.md`.
+
+### Known gaps — round eight
+
+- No join/adoption of a live untracked native session; refusal remains fail-closed
+  by design. Resume-in-app is for confirmed-free sessions only.
+- Transcript snapshot buffering/reconciliation remains quadratic for very large
+  histories; no large-history scale run was performed.
+- `bus`, notice, compaction, and retry frames are intentionally ignored or only
+  minimally represented; `readDir` pagination is absent; `welcome.readOnly` is
+  not surfaced.
+- Physical-iPhone behavior (keyboard, safe area, lock/unlock, PWA) is **UNVERIFIED**.
+- The browser's local monotonic `user-${++localIdRef.current}` identifies only an
+  optimistic row; no ID travels on the prompt wire. `recordCommandOnce()` exists
+  but has no production caller; manual resend after ambiguous delivery can enqueue
+  duplicate work. See the idempotency notes in architecture and troubleshooting.
+- Hosted CI for current HEAD is **NOT VERIFIED**.
+- Directory creation detects and refuses parent/containment changes but has a
+  TOCTOU ceiling: portable Node `mkdir` cannot bind atomically to the validated
+  parent with `mkdirat`; the race is not claimed closed.
 
 ### Closed after being re-opened by round 6
 
@@ -190,9 +226,9 @@ were verified against a live server:
   server-side (trimmed, non-empty, bounded) and applied through
   `RuntimeLaunchSpec.model` on the next launch. The UI keeps the *effective*
   model the registry reports distinct from the *saved preference* and states that
-  a change applies on restart. Enumeration of OMP's model list would need
-  `ModelCatalogService.listModels(): Promise<string[]>` in the adapter, which was
-  out of scope; the documented free-text fallback shipped instead.
+  a change applies on restart. Round 8 added adapter model-catalog enumeration via
+  `omp models --json` (`docs/research/model-catalog.md`); searchable server/API/UI
+  catalog wiring remains absent. The existing free-text model field remains.
 
 Verifying the restart path found and fixed a second real defect: a restart after a
 stop failed with a 500 when no journal existed yet, which is exactly the
@@ -209,8 +245,7 @@ dropped.
 | Any local process can claim a relay host role | The host listener is loopback-only, which closes the network path, but OMP cannot present a per-launch credential, so this is not agent authentication | Documented in the relay README, the code comment, and the release notes. Acceptable only under the single-owner trust model that already assumes the machine is yours. |
 | Non-Linux lease detection | Returns `unknown`, which blocks launch rather than guessing | Out of scope (Ubuntu target), documented not faked |
 | `tailscale serve` needs a one-time privileged grant | Remote access depends on it | Documented; degrades to loopback-only |
-| Physical iPhone validation | Keyboard, safe-area, tab-suspend behaviours unproven | Manual checklist in the iPhone setup doc |
-| Real OMP-written journal through a failure scenario | One reconciliation qualification | Recorded UNVERIFIED |
+| Physical iPhone validation | Keyboard, safe-area, lock/unlock, and PWA behavior unproven | Manual checklist in `docs/operations/acceptance-run-plan.md` |
 | Approval (`ui-request`) against a live host that asks a question | Untested end to end — the queue and exactly-once answer are covered by unit tests, but no real host has raised one | Notifications and approval polish deferred by design |
 | Single-process launch guard | A second backend on the same machine would need a cross-process lease | Named as a ceiling in the code |
 | OMP upstream drift | `collab.*` is not a stability guarantee | `scripts/compat-check.mjs`, recorded baseline, upgrade procedure |

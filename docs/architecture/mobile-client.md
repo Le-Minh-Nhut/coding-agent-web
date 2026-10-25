@@ -63,6 +63,8 @@ the UI as unavailable rather than faked:
   replaying its own buffer, so a missed window is repaired authoritatively.
 - A dropped socket is reported as `disconnected`, which is distinct from
   `stopped`. We never infer completion from a closed connection.
-- Prompts carry a UUID idempotency key inside the sealed Collab frame: the
-  agent host validates it, so a retry after a flaky network cannot queue the
-  same prompt twice.
+- Prompt frames carry no request ID or idempotency key. The browser keeps a
+  local monotonic id (`user-${++localIdRef.current}`) only for the optimistic
+  transcript row; it is not sent on the wire. A manual resend after an ambiguous
+  disconnect can enqueue duplicate work; automatic reconnect does not resend an
+  accepted prompt.

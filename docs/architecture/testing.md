@@ -28,8 +28,7 @@ The compatibility layer is gated by environment variable on purpose: a normal
   bytes, NFC/NFD, and non-directories. Each is an attack we claim to stop.
 - **Session bucket encoding.** A wrong cwd bucket means we look for a
   conversation in a directory it will never be written to.
-- **Idempotency.** The same command key twice must produce one command row and
-  one agent-visible effect.
+- **Metadata command storage.** `recordCommandOnce()` stores one command row per key; `tests/server/store.test.ts` proves that store-level behavior only. No prompt route calls it, and no test proves one agent-visible effect.
 - **Event ordering.** Per-conversation sequence numbers are monotonic, and a
   replay after a cursor returns exactly the missing suffix.
 
