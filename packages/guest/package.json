@@ -1,0 +1,21 @@
+{
+  "name": "@caw/guest",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node ../../scripts/build-guest.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "katex": "0.18.7",
+    "lucide-react": "1.47.0",
+    "react": "19.2.7",
+    "react-dom": "19.2.7"
+  },
+  "devDependencies": {
+    "@types/katex": "0.16.7",
+    "@types/react": "19.2.7",
+    "@types/react-dom": "19.2.7"
+  }
+}

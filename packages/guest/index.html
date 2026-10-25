@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover"
+    />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self' ws: wss:; font-src 'self' data:; manifest-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self';"
+    />
+    <meta name="color-scheme" content="light dark" />
+    <meta
+      name="theme-color"
+      media="(prefers-color-scheme: light)"
+      content="#f2f2f3"
+    />
+    <meta
+      name="theme-color"
+      media="(prefers-color-scheme: dark)"
+      content="#000000"
+    />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta
+      name="apple-mobile-web-app-status-bar-style"
+      content="black-translucent"
+    />
+    <meta name="apple-mobile-web-app-title" content="Coding Agent" />
+
+    <title>Coding Agent — live mobile workspace</title>
+    <meta
+      name="description"
+      content="Mobile guest client for live coding agent sessions: watch real-time transcripts, tool calls, and prompt the host agent."
+    />
+    <meta name="robots" content="noindex, nofollow" />
+
+    <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
+    <link rel="icon" type="image/x-icon" href="./favicon.ico" sizes="any" />
+    <link rel="icon" type="image/png" sizes="256x256" href="./favicon.png" />
+    <link
+      rel="icon"
+      type="image/png"
+      sizes="32x32"
+      href="./favicon-32x32.png"
+    />
+    <link
+      rel="icon"
+      type="image/png"
+      sizes="16x16"
+      href="./favicon-16x16.png"
+    />
+    <link rel="apple-touch-icon" sizes="180x180" href="./favicon-180x180.png" />
+    <link rel="manifest" href="./manifest.webmanifest" />
+
+    <!-- Open Graph -->
+    <meta property="og:site_name" content="Coding Agent" />
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="Coding Agent — live mobile workspace" />
+    <meta
+      property="og:description"
+      content="Watch a live agent session and prompt the host agent from mobile."
+    />
+    <meta property="og:image" content="./og-image.png" />
+    <meta property="og:image:type" content="image/png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta
+      property="og:image:alt"
+      content="Coding Agent — live mobile workspace"
+    />
+
+    <!-- Twitter / X -->
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Coding Agent — live mobile workspace" />
+    <meta
+      name="twitter:description"
+      content="Watch a live agent session and prompt the host agent from mobile."
+    />
+    <meta name="twitter:image" content="./og-image.png" />
+  </head>
+  <body>
+    <div id="root"></div>
+    <script>
+      (function () {
+        try {
+          var s = localStorage.getItem("omp-collab-theme");
+          var sys = matchMedia("(prefers-color-scheme: dark)").matches
+            ? "dark"
+            : "light";
+          var t = s === "light" || s === "dark" ? s : sys;
+          document.documentElement.dataset.theme = t;
+          document.documentElement.style.colorScheme = t;
+        } catch (e) {}
+      })();
+    </script>
+    <script type="module" src="./src/main.tsx"></script>
+  </body>
+</html>

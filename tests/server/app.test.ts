@@ -1,0 +1,236 @@
+import { mkdtemp, mkdir, rm, stat } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
+import { createAuthenticationService } from "../../apps/server/src/auth.js";
+import { createRuntimeSpec } from "../../apps/server/src/server.js";
+import { buildApp } from "../../apps/server/src/app.js";
+import type { Conversation } from "@caw/contracts";
+import type { RuntimeLaunchSpec, Supervisor } from "@caw/runtime";
+import type { ServerConfig } from "../../apps/server/src/config.js";
+import { createMetadataStore } from "../../apps/server/src/store.js";
+
+const dirs: string[] = [];
+afterEach(async () => { await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true }))); });
+async function fixture(options: { tmuxSocketPath?: string; tmuxServerIdentity?: () => Promise<string | null>; supervisor?: Supervisor; runtimeSpec?: (conversation: Conversation, input: { resumeSessionId?: string; model?: string; allowMissingResumeSession?: boolean }) => Promise<RuntimeLaunchSpec> | RuntimeLaunchSpec } = {}) {
+  const dir = await mkdtemp(join(tmpdir(), "caw-app-")); dirs.push(dir);
+  const auth = createAuthenticationService({ stateDir: dir, setupOutput: () => undefined }); await auth.initAuth();
+  const config: ServerConfig = { host: "127.0.0.1", port: 8791, stateDir: dir, allowedRoots: [dir], relayPort: 8792, relayAllowedOrigins: [], maxActiveAgents: 3, authTokenTtlHours: 720, trustTailscaleOrigin: false, logLevel: "silent", insecureCookies: false };
+  const store = createMetadataStore(dir);
+  const app = buildApp({ config, auth, store, originAllowlist: ["https://workspace.test"], ...options });
+  const session = auth.createSession();
+  const headers = { cookie: `__Host-caw_session=${session.token}`, origin: "https://workspace.test", "x-caw-csrf": session.csrfToken };
+  return { app, headers, dir, store };
+}
+
+describe("Fastify API security", () => {
+  it("returns 401 for every protected API route without a session", async () => {
+    const { app } = await fixture();
+    const requests: Array<{ method: "GET" | "POST" | "PATCH" | "DELETE"; url: string }> = [
+      { method: "POST", url: "/api/auth/logout" }, { method: "GET", url: "/api/auth/me" },
+      { method: "GET", url: "/api/capabilities" }, { method: "GET", url: "/api/projects" },
+      { method: "POST", url: "/api/projects" }, { method: "PATCH", url: "/api/projects/id" },
+      { method: "DELETE", url: "/api/projects/id" }, { method: "GET", url: "/api/browse" },
+      { method: "GET", url: "/api/projects/id/conversations" }, { method: "POST", url: "/api/projects/id/conversations" },
+      { method: "GET", url: "/api/conversations/id/events" }, { method: "PATCH", url: "/api/conversations/id/model" },
+      { method: "POST", url: "/api/conversations/id/actions" }, { method: "GET", url: "/api/runtime" },
+    ];
+    for (const request of requests) expect((await app.inject(request)).statusCode, `${request.method} ${request.url}`).toBe(401);
+    await app.close();
+  });
+
+  it("accepts browser-style authenticated GET requests without Origin, content type, or CSRF", async () => {
+    const { app, headers } = await fixture();
+    const browserHeaders = { cookie: headers.cookie };
+    for (const url of ["/api/projects", "/api/capabilities", "/api/runtime"]) {
+      const response = await app.inject({ method: "GET", url, headers: browserHeaders });
+      expect(response.statusCode, url).toBe(200);
+      expect(response.json().ok, url).toBe(true);
+    }
+    await app.close();
+  });
+
+  it("rejects missing and disallowed Origin on state-changing requests", async () => {
+    const { app, headers } = await fixture();
+    expect((await app.inject({ method: "POST", url: "/api/projects", headers: { cookie: headers.cookie, "x-caw-csrf": headers["x-caw-csrf"] }, payload: { path: "/tmp" } })).statusCode).toBe(403);
+    expect((await app.inject({ method: "POST", url: "/api/projects", headers: { ...headers, origin: "https://evil.test" }, payload: { path: "/tmp" } })).statusCode).toBe(403);
+    await app.close();
+  });
+
+  it("rejects bodies over 64 KiB", async () => {
+    const { app, headers } = await fixture();
+    const response = await app.inject({ method: "POST", url: "/api/projects", headers, payload: { path: "/tmp/project", label: "x".repeat(70 * 1024) } });
+    expect(response.statusCode).toBe(413);
+    expect(response.json().ok).toBe(false);
+    await app.close();
+  });
+
+  it("deletes project metadata but never removes filesystem paths", async () => {
+    const { app, headers, dir } = await fixture();
+    const projectDir = join(dir, "project"); await mkdir(projectDir);
+    const created = await app.inject({ method: "POST", url: "/api/projects", headers, payload: { path: projectDir } });
+    expect(created.statusCode).toBe(201);
+    const id: string = created.json().data.id;
+    const deleted = await app.inject({ method: "DELETE", url: `/api/projects/${id}`, headers });
+    expect(deleted.json().data.filesRemoved).toBe(false);
+    expect((await stat(projectDir)).isDirectory()).toBe(true);
+    await app.close();
+  });
+
+  it("SEC-6: two conversations with identical titles get distinct launch names and neither is refused", async () => {
+    const { dir, app, store } = await fixture();
+    const runtimeSpec = createRuntimeSpec({
+      store,
+      paths: { assertInsideRoots: async (p) => p },
+      catalog: { findBySessionId: async () => null, readHeader: async () => null },
+    });
+
+    const project = await store.createProject({ path: dir, label: "test-project" });
+    const convA = await store.createConversation({ projectId: project.id, title: "Fix the bug" });
+    const convB = await store.createConversation({ projectId: project.id, title: "Fix the bug" });
+
+    const specA = await runtimeSpec(convA, {});
+    const specB = await runtimeSpec(convB, {});
+    // Distinct launch names derived from conversation ID
+    expect(specA.name).not.toBe(specB.name);
+
+    // Simulate tmux launch with duplicate name detection
+    const launched = new Set<string>();
+    const fakeTmuxLaunch = (name: string) => {
+      if (launched.has(name)) throw new Error(`duplicate session: ${name}`);
+      launched.add(name);
+      return { id: `$${launched.size}`, name, alive: true, panePid: 1234 };
+    };
+
+    expect(() => fakeTmuxLaunch(specA.name)).not.toThrow();
+    expect(() => fakeTmuxLaunch(specB.name)).not.toThrow();
+    await app.close();
+  });
+  it("persists a model preference, rejects invalid models, and restarts with chosen model", async () => {
+    let conversation: Conversation;
+    let launchedModel: string | undefined;
+    const runtimeSpec = (_current: Conversation, input: { resumeSessionId?: string; model?: string }): RuntimeLaunchSpec => ({
+      conversationId: conversation.id,
+      name: "model-test",
+      cwd: "/tmp/model-test",
+      model: input.model,
+    });
+    const supervisor = {
+      start: async (_id: string, spec: RuntimeLaunchSpec) => {
+        launchedModel = spec.model;
+        return conversation;
+      },
+      stop: async () => conversation,
+    } as unknown as Supervisor;
+    const { app, headers, dir, store } = await fixture({ runtimeSpec, supervisor });
+    const project = await store.createProject({ path: dir });
+    conversation = await store.createConversation({ projectId: project.id });
+    const saved = await app.inject({ method: "PATCH", url: `/api/conversations/${conversation.id}/model`, headers, payload: { model: "  provider/model-x  " } });
+    expect(saved.statusCode).toBe(200);
+    expect(saved.json().data.modelPreference).toBe("provider/model-x");
+    expect((await createMetadataStore(dir).getConversation(conversation.id))?.modelPreference).toBe("provider/model-x");
+    for (const model of ["   ", "m".repeat(129)]) {
+      expect((await app.inject({ method: "PATCH", url: `/api/conversations/${conversation.id}/model`, headers, payload: { model } })).statusCode).toBe(400);
+    }
+    const restarted = await app.inject({ method: "POST", url: `/api/conversations/${conversation.id}/actions`, headers, payload: { action: "restart" } });
+    expect(restarted.statusCode).toBe(200);
+    expect(launchedModel).toBe("provider/model-x");
+    await app.close();
+  });
+  it("restarts fresh when journal is absent, resumes existing journal, and rejects unknown explicit session", async () => {
+    let conversation: Conversation;
+    let launched: RuntimeLaunchSpec | undefined;
+    let journalPath: string | null = null;
+    let runtimeSpec: (conversation: Conversation, input: { resumeSessionId?: string; model?: string; allowMissingResumeSession?: boolean }) => Promise<RuntimeLaunchSpec>;
+    const supervisor = {
+      start: async (_id: string, spec: RuntimeLaunchSpec) => {
+        launched = spec;
+        conversation = (await store.updateConversation(conversation.id, { state: "idle", tmuxSessionId: "$2" }))!;
+        return conversation;
+      },
+      stop: async (id: string) => {
+        conversation = (await store.updateConversation(id, { state: "stopped", tmuxSessionId: null }))!;
+        return conversation;
+      },
+    } as unknown as Supervisor;
+    const { app, headers, dir, store } = await fixture({
+      supervisor,
+      runtimeSpec: (...args) => runtimeSpec(...args),
+    });
+    runtimeSpec = createRuntimeSpec({
+      store,
+      paths: { assertInsideRoots: async (path) => path },
+      catalog: {
+        findBySessionId: async (id) => id === "journal-session" ? journalPath : null,
+        readHeader: async (path) => path === journalPath ? { sessionId: "journal-session", cwd: dir } : null,
+      },
+    });
+    const project = await store.createProject({ path: dir });
+    conversation = await store.createConversation({ projectId: project.id, nativeSessionId: "missing-journal" });
+    await store.updateConversation(conversation.id, { modelPreference: "provider/chosen-model", tmuxSessionId: "$1" });
+    const stopped = await app.inject({ method: "POST", url: `/api/conversations/${conversation.id}/actions`, headers, payload: { action: "stop" } });
+    expect(stopped.statusCode).toBe(200);
+    const freshRestart = await app.inject({ method: "POST", url: `/api/conversations/${conversation.id}/actions`, headers, payload: { action: "restart" } });
+    expect(freshRestart.statusCode).toBe(200);
+    expect(launched).toMatchObject({ model: "provider/chosen-model", resumeSessionPath: undefined });
+
+    journalPath = `${dir}/journal.jsonl`;
+    conversation = await store.createConversation({ projectId: project.id, nativeSessionId: "journal-session" });
+    const resumedRestart = await app.inject({ method: "POST", url: `/api/conversations/${conversation.id}/actions`, headers, payload: { action: "restart" } });
+    expect(resumedRestart.statusCode).toBe(200);
+    expect(launched?.resumeSessionPath).toBe(journalPath);
+
+    const unknown = await app.inject({
+      method: "POST",
+      url: `/api/projects/${project.id}/conversations`,
+      headers,
+      payload: { resumeSessionId: "unknown-session" },
+    });
+    expect(unknown.statusCode).toBe(404);
+    expect(unknown.json().error.code).toBe("not_found");
+    await app.close();
+  });
+  it("ARCH-2: attach command uses private socket only for matching server identity", async () => {
+    const { app, headers, store } = await fixture({ tmuxSocketPath: "/private/caw/tmux.sock", tmuxServerIdentity: async () => "start:123" });
+    const project = await store.createProject({ path: "/tmp/p" });
+    const conversation = await store.createConversation({ projectId: project.id });
+    await store.updateConversation(conversation.id, { ownership: "managed", tmuxSessionId: "$17", tmuxSessionName: "caw-test", tmuxServerIdentity: "start:123" });
+    const response = await app.inject({ method: "GET", url: `/api/conversations/${conversation.id}/attach`, headers });
+    expect(response.json().data).toMatchObject({ available: true, command: "tmux -S '/private/caw/tmux.sock' attach -t '$17'", reason: null });
+    await app.close();
+  });
+
+  it("ARCH-2: attach refuses a reused tmux id when server identity differs or is absent", async () => {
+    const { app, headers, store } = await fixture({ tmuxSocketPath: "/private/caw/tmux.sock", tmuxServerIdentity: async () => "live:456" });
+    const project = await store.createProject({ path: "/tmp/p" });
+    const mismatched = await store.createConversation({ projectId: project.id });
+    await store.updateConversation(mismatched.id, { ownership: "managed", tmuxSessionId: "$4", tmuxServerIdentity: "old:123" });
+    const mismatchResponse = await app.inject({ method: "GET", url: `/api/conversations/${mismatched.id}/attach`, headers });
+    expect(mismatchResponse.json().data).toMatchObject({ available: false, command: null, reason: expect.stringContaining("does not match") });
+
+    const missing = await store.createConversation({ projectId: project.id });
+    await store.updateConversation(missing.id, { ownership: "managed", tmuxSessionId: "$4" });
+    const missingResponse = await app.inject({ method: "GET", url: `/api/conversations/${missing.id}/attach`, headers });
+    expect(missingResponse.json().data).toMatchObject({ available: false, command: null, reason: expect.stringContaining("cannot be verified") });
+    await app.close();
+  });
+  it("reports unknown active count without claiming zero agents", async () => {
+    const { app, headers } = await fixture({ supervisor: { activeCount: async () => ({ count: 0, known: false, reason: "tmux enumeration failed" }) } as unknown as Supervisor });
+    const response = await app.inject({ method: "GET", url: "/api/runtime", headers });
+    expect(response.json().data).toMatchObject({ activeCount: null, activeCountReason: "tmux enumeration failed" });
+    await app.close();
+  });
+
+  it("SEC-11: 404 does not echo query string or request.url", async () => {
+    const { app, headers } = await fixture();
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/nonexistent-route?token=SECRET_BEARER_TOKEN_12345",
+      headers,
+    });
+    expect(response.statusCode).toBe(404);
+    expect(response.body).not.toContain("SECRET_BEARER_TOKEN_12345");
+    expect(response.json().message).toBe("Route GET:/api/nonexistent-route not found");
+    await app.close();
+  });
+});

@@ -1,0 +1,23 @@
+{
+  "name": "@caw/server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/server.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "dev": "tsx watch src/server.ts",
+    "//start": "Not `node dist/server.js`: the workspace packages publish their TypeScript source as their entry (they are consumed by this app and the tests, never published), and Node cannot load a .ts file. Verified: `node dist/server.js` fails with ERR_UNKNOWN_FILE_EXTENSION. tsx resolves them, so the real entrypoint is the source. `build` still typechecks and emits declarations.",
+    "start": "tsx src/server.ts"
+  },
+  "dependencies": {
+    "@caw/contracts": "workspace:*",
+    "@caw/omp-adapter": "workspace:*",
+    "@caw/runtime": "workspace:*",
+    "fastify": "^5.2.1",
+    "zod": "^3.24.1",
+    "@caw/relay": "workspace:*",
+    "tsx": "^4.19.3"
+  }
+}

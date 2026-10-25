@@ -1,0 +1,19 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "jsx": "react-jsx",
+    "lib": ["ES2024", "DOM", "DOM.Iterable"],
+    "noEmit": true,
+    "noUncheckedIndexedAccess": false,
+    "baseUrl": ".",
+    "paths": {
+      "@oh-my-pi/pi-wire": ["./src/vendor/wire/index.ts"],
+      "@oh-my-pi/pi-utils/marked": ["./src/vendor/utils/marked.ts"],
+      "@oh-my-pi/pi-utils/marked-list": ["./src/vendor/utils/marked-list.ts"],
+      "@oh-my-pi/pi-utils/math-delimiters": [
+        "./src/vendor/utils/math-delimiters.ts"
+      ]
+    }
+  },
+  "include": ["src/**/*"]
+}

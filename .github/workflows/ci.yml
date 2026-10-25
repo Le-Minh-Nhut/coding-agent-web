@@ -1,0 +1,107 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.32.1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20.19"
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck every package
+        run: pnpm -r typecheck
+
+      # Unit, integration and protocol/component tests. This tier must stay free:
+      # it spawns no agent and spends no provider credits.
+      - name: Tests (unit, integration, web)
+        run: npx vitest run
+
+      # The browser client is a build artifact the relay serves, and its build is
+      # not a formality: a regression here ships an off-origin asset or a broken UI.
+      - name: Build vendored guest client
+        run: node scripts/build-guest.mjs
+
+      - name: Build web app
+        run: pnpm --filter @caw/web build
+
+      - name: Assert no off-origin assets in the shipped bundles
+        run: |
+          set -eu
+          if grep -rIl "um\.can\.ac\|my\.omp\.sh" apps/web/dist packages/guest/dist; then
+            echo "::error::A shipped bundle references a third-party or upstream origin."
+            exit 1
+          fi
+          echo "bundles clean"
+
+      - name: Build server
+        run: pnpm --filter @caw/server build
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+
+      # E2E drives the real server with hermetic state. It launches no LLM-backed
+      # agent: the harness pre-seeds the project and conversation it asserts on.
+      - name: Browser E2E (Chromium, mobile viewport)
+        run: npx playwright test --project=chromium
+        env:
+          CI: "true"
+
+      - name: Upload Playwright report on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: playwright-report/
+          retention-days: 7
+
+  # Real-OMP compatibility is opt-in and never runs on a pull request, because it
+  # launches agent processes. The scheduled run exists so upstream drift is noticed
+  # even when nobody is pushing; a failure there is a signal, not a broken build.
+  compat:
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.32.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20.19"
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
+      - name: Machine capability probe (spawns nothing)
+        run: node scripts/compat-check.mjs
+
+      - name: Install OMP
+        run: |
+          # Upstream ships a single binary; the runner is a clean image, so fetch it
+          # rather than assuming a preinstalled omp.
+          curl -fsSL https://raw.githubusercontent.com/can1357/oh-my-pi/main/install.sh | bash || {
+            echo "::warning::OMP install script unavailable on this upstream revision; skipping the real-agent suite."
+            exit 0
+          }
+
+      - name: Real-OMP compatibility suite
+        run: CAW_COMPAT=1 npx vitest run tests/compat

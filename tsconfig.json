@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    // Tests span Node-side code and browser-side protocol/web code, so both lib
+    // sets are available here. Each package narrows its own lib in its tsconfig.
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "jsx": "react-jsx",
+    "types": ["node"],
+    "paths": {
+      "@caw/contracts": ["./packages/contracts/src/index.ts"],
+      "@caw/runtime": ["./packages/runtime/src/index.ts"],
+      "@caw/omp-adapter": ["./packages/omp-adapter/src/index.ts"],
+      "@caw/collab-protocol": ["./packages/collab-protocol/src/index.ts"],
+      "@caw/relay": ["./packages/relay/src/index.ts"]
+    }
+  },
+  "include": ["scripts/**/*", "tests/**/*", "vitest.config.ts", "playwright.config.ts"],
+  // Vendored third-party sources keep upstream's own compiler settings and are
+  // typechecked by their own package (packages/guest runs tsc itself). Applying
+  // this repo's stricter flags to code we did not write produces noise, not signal.
+  "exclude": ["node_modules", "**/dist/**", "packages/guest/src/vendor/**"]
+}

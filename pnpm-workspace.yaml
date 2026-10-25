@@ -1,0 +1,9 @@
+packages:
+  - "apps/*"
+  - "packages/*"
+
+# esbuild is the bundler for the vendored browser guest client; its postinstall
+# picks the platform binary. pnpm 10 blocks build scripts by default, so it is
+# allowlisted explicitly rather than left to a blanket approval.
+onlyBuiltDependencies:
+  - esbuild

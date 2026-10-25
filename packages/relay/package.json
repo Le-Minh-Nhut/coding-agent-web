@@ -1,0 +1,25 @@
+{
+  "name": "@caw/relay",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Private, content-blind Collab relay and static host for the browser guest client",
+  "license": "MIT",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./relay": "./src/relay.ts",
+    "./static": "./src/static.ts"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json --noEmit",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.5.12"
+  }
+}

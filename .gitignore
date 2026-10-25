@@ -218,3 +218,28 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# ─── Node / TypeScript ────────────────────────────────────────────────────────
+node_modules/
+dist/
+*.tsbuildinfo
+.pnpm-store/
+.npm/
+coverage/
+.vitest/
+
+# ─── Local runtime state (never commit credentials or user data) ──────────────
+.env
+.env.*
+!.env.example
+caw.config.json
+*.local.json
+data/
+var/
+
+# ─── OMP overlay configs generated at runtime ────────────────────────────────
+.omp-run/
+
+# ─── Playwright ──────────────────────────────────────────────────────────────
+test-results/
+playwright-report/
