@@ -54,7 +54,7 @@ so a chat started on the phone is usable from the CLI afterwards.
 | Closing the browser does not stop the agent | M0 PoC: page closed mid-turn, agent finished with no viewer attached, a fresh page adopted the same room without resubmitting |
 | Terminal continuity | `CAW_COMPAT=1 npx vitest run tests/compat` → managed launch, `capture-pane` shows the agent's own TUI, duplicate-writer refusal, stop by recorded id, six reconciliation scenarios |
 | Mobile UI behaves at phone size | Playwright, Chromium 390×844 → 24 passed, incl. composer bottom-anchored, touch targets ≥40 px, no horizontal scroll, keyboard-shrink survival |
-| No silent duplicate prompt | e2e: a prompt reaches a live host exactly once; a prompt sent while the host is gone never becomes a silent success |
+| Prompt and reconnect behavior | Mock-host E2E: one prompt reaches the host, then reconnect does not resubmit it; disconnected sends are refused. The Collab wire has no request ID, so a manual retry after ambiguous delivery can enqueue duplicate work. |
 | Status never invents success | `busy === null` renders as unknown, not idle; a dropped socket is "reconnecting", never "stopped"; a failed observation is never a negative one |
 | Path policy holds | sibling-prefix, symlink escape, traversal, NUL, NFC/NFD, non-directory all refused; live check: `/etc` → 403, traversal → 403 |
 | Relay host role is not network-reachable | probe: app-port `role=host` → **401**, app-port `route=guest` → accepted, loopback relay-port host → accepted |

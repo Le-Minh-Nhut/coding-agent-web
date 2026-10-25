@@ -52,10 +52,11 @@ Chromium at 390×844 (and WebKit where the runner has it):
 - login, wrong password, logout, cookie flags;
 - project create → folder browse → new chat;
 - live streaming render, tool card expansion, long-history scroll;
-- **reconnect**: kill the socket, assert the UI reports a disconnected state and
-  then recovers without resubmitting the last prompt;
-- **no duplicate submission**: double-tap send under a stalled network produces
-  one prompt on the agent side;
+- **Reconnect**: the mock-host E2E sends a prompt, drops the socket, and asserts
+  recovery does not automatically resubmit it. The composer unit test double-clicks
+  one draft and asserts one prompt frame. Neither test exercises a manual resend
+  after ambiguous delivery; the wire has no request ID, so duplicate work remains
+  possible.
 - forbidden path is refused with a visible error, not a blank screen.
 
 ### Real-OMP compatibility — opt-in
