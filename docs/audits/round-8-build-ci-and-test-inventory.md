@@ -149,7 +149,9 @@ Command/script availability checked against root `package.json`, `pnpm-workspace
 | `curl ... install.sh` | Inline workflow command; not a package script. |
 | `CAW_COMPAT=1 npx vitest run tests/compat` | Yes; Vitest is installed and `tests/compat` exists; this exact command is not a package script. |
 
-CI status: **NOT VERIFIED**. `command -v gh` printed `gh not installed`; the attempted `gh auth status && gh run list --limit 5` therefore did not run. No provider/compat tests or real agent launches were run.
+Latest hosted CI status checked against the public GitHub Actions API: one run exists, and it failed on pre-fix commit `81c430f04ca42199e4908e1fec4d7d67326671e5` (`Typecheck every package` failed; later `verify` steps were skipped; `compat` was skipped). This run predates the local fix; no hosted result exists for the fixed commit because it was not pushed. `gh` is not installed and no GitHub PAT/token was available; public run data: https://api.github.com/repos/Le-Minh-Nhut/coding-agent-web/actions/runs?per_page=5. Hosted CI status for the fixed commit remains unverified.
+
+Clean-checkout hazard audit after the ignore fix: `git check-ignore` found no ignored source inputs under `.github/workflows`, `scripts`, `apps`, `packages`, or `tests` (generated `dist/` outputs excluded). CI's checkout inputs include tracked workflow/config/manifests/lockfile, package source and TypeScript configs, `vitest.config.ts` and `tests/**`, guest build script/source/index/public assets, web/server source, and `playwright.config.ts` plus `scripts/e2e-server.mjs` and `tests/e2e/**`; all are tracked. Workflow-generated `apps/web/dist` and `packages/guest/dist` are produced before their grep scan. `packages/guest/src/lib/` is now tracked, so `pnpm -r typecheck` before the explicit guest build no longer sees missing modules. The Vitest guest smoke/static tests build the guest themselves when needed. No remaining clean-checkout ignore or step-order hazard was found. Full hosted CI for the fixed commit remains unverified; Playwright E2E was not run.
 
 ## Full local suite and typecheck
 
