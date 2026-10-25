@@ -239,3 +239,34 @@ The 46 automated test files (`*.test.*` and `*.spec.*`) under `tests/**`:
 - `tests/guest/static-assertions.test.ts` inspects generated asset strings/manifest properties; it is useful as a static policy check but does not execute client behavior.
 - `tests/web/touch-targets.test.ts` checks CSS text with regex, not computed dimensions in a browser. `tests/e2e/mobile.spec.ts` separately provides browser-level viewport/touch checks.
 - The explicit call assertions found in `tests/web/activity-panel.test.tsx` and `tests/web/folder-browser.test.tsx` are accompanied by rendered-item/selection assertions; neither is only a function-called or mock-echo test. No standalone call-only test was identified.
+
+## Resolution
+
+Root cause: the Python template's bare `lib/` ignore rule also matched `packages/guest/src/lib/`, hiding required TypeScript source from Git. Before the fix, `git ls-files | grep -c '^.*/lib/'` printed `0` (no tracked lib paths); `find . -type d -name lib -not -path './.git/*' -not -path '*/node_modules/*'` found only `./packages/guest/src/lib`. No other `lib/` build-output directory or legitimate ignored `lib/` directory exists in this checkout. Removed only the `lib/` line; kept `lib64/`.
+
+Committed fix and audit report in `ff3052e9e1d9d1ed4619a5df987d6e9c5fb771f2` (`Track guest library source files`). Exact change: delete `.gitignore` line `lib/`; add these 9 previously ignored source files; add this audit report:
+
+```text
+packages/guest/src/lib/client.ts
+packages/guest/src/lib/codec.ts
+packages/guest/src/lib/format.ts
+packages/guest/src/lib/jsonl.ts
+packages/guest/src/lib/link.ts
+packages/guest/src/lib/socket.ts
+packages/guest/src/lib/theme.ts
+packages/guest/src/lib/transcript-poll.ts
+packages/guest/src/lib/use-guest.ts
+```
+
+Before commit, `git status --short` showed `.gitignore` modified, the report added, and all 9 source paths added; `git ls-files packages/guest/src/lib | wc -l` printed `9`. The ignore fix requires no negation rule.
+
+Fresh post-commit clone: `git clone /home/heheboiz/data/coding-agent-web /tmp/caw-round8-fixed-ff3052e` succeeded (`Cloning into '/tmp/caw-round8-fixed-ff3052e'...` / `done.`). In that clone, commands and observed outcomes:
+
+| Command | Result |
+|---|---|
+| `pnpm install --frozen-lockfile` | Passed: `Scope: all 9 workspace projects`, `Packages: +214`, `Done in 923ms using pnpm v10.32.1`. |
+| `node scripts/build-guest.mjs` | Passed: `[build-guest] built guest client in 244ms -> packages/guest/dist/`; JS `assets/app.ZUJJ5YZL.js`, CSS `assets/app.JQF725ON.css`. |
+| `pnpm -r typecheck` | Passed: 8 of 9 workspace projects; all package `typecheck: Done`, including `packages/guest`, `apps/web`, and `apps/server`. |
+| `npx vitest run` | Passed: `Test Files  38 passed | 2 skipped (40)`; `Tests  334 passed | 8 skipped (342)`; zero failures. Skipped only `tests/compat/omp-lifecycle.test.ts` (2) and `tests/compat/reconciliation.test.ts` (6). No real-OMP suite was run. |
+
+Post-fix clean-clone verdict: PASS for install, guest build, recursive typecheck, and non-compat Vitest suite. No push performed.
