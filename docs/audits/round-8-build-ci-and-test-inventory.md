@@ -11,8 +11,7 @@ git ls-files | wc -l
 git status --porcelain
 [no output]
 ```
-
-At current committed HEAD after policy update, `git ls-files | wc -l` returned `262`. The shared worktree later accumulated other agent changes; the clean-clone results below validate committed HEAD independently.
+At latest HEAD `dda2731db903d9fb3405d4f0c12a932a1049ffd6`, `git ls-files | wc -l` returned `345`; `git status --porcelain` returned no output before the clean-clone verification below.
 
 ### Historical pre-fix clean clone
 
@@ -99,28 +98,28 @@ Exit status 2
 
 The ignore-rule fix and all nine source files were committed in `ff3052e` (`Track guest library source files`).
 
-### Fresh clean clone at current commit
+### Fresh clean clone at latest HEAD
 
-`git clone /home/heheboiz/data/coding-agent-web /tmp/caw-final-clean.nKEepx/clean` succeeded (`Cloning into '/tmp/caw-final-clean.nKEepx/clean'...` / `done.`). Clone HEAD was `bb60b43891ff8b70e6b0793f8d9a57f9e421d1a5`, matching source HEAD; it has 262 tracked files and all nine `packages/guest/src/lib/*.ts` paths are tracked.
+Before cloning, `git status --porcelain` returned no output. `git clone /home/heheboiz/data/coding-agent-web /tmp/caw-round8-current.yapB1A/clean` succeeded (`Cloning into '/tmp/caw-round8-current.yapB1A/clean'...` / `done.`). Clone HEAD was `dda2731db903d9fb3405d4f0c12a932a1049ffd6`, with 345 tracked files. The nine guest library files listed in the historical section are tracked.
 
 ```text
 pnpm install --frozen-lockfile
 Scope: all 9 workspace projects
 Lockfile is up to date, resolution step is skipped
 Packages: +214
-Done in 1.2s using pnpm v10.32.1
+Done in 866ms using pnpm v10.32.1
 
 node scripts/build-guest.mjs
-[build-guest] built guest client in 279ms -> packages/guest/dist/
+[build-guest] built guest client in 217ms -> packages/guest/dist/
   JS: assets/app.ZUJJ5YZL.js
   CSS: assets/app.JQF725ON.css
 
 pnpm --filter @caw/web build
-✓ 45 modules transformed.
-dist/index.html                   0.97 kB │ gzip:  0.46 kB
-dist/assets/index-Dp6SWPTi.css    7.30 kB │ gzip:  1.98 kB
-dist/assets/index-M8I_kLZi.js   240.69 kB │ gzip: 73.34 kB
-✓ built in 833ms
+✓ 47 modules transformed.
+dist/index.html                   0.97 kB │ gzip:  0.45 kB
+dist/assets/index-CaVL03Tm.css    9.32 kB │ gzip:  2.42 kB
+dist/assets/index-czf-uwOo.js   259.49 kB │ gzip: 79.23 kB
+✓ built in 758ms
 
 pnpm typecheck
 Scope: 8 of 9 workspace projects
@@ -132,24 +131,9 @@ packages/runtime typecheck: Done
 packages/omp-adapter typecheck: Done
 apps/web typecheck: Done
 apps/server typecheck: Done
-
-pnpm --filter @caw/server build
-> @caw/server@0.1.0 build /tmp/caw-final-clean.nKEepx/clean/apps/server
-> tsc -p tsconfig.json
 ```
 
-Clean-clone Playwright launcher prerequisite was also checked after web/server builds:
-
-```text
-node scripts/e2e-server.mjs
-[e2e-server] cannot start: no TypeScript runner found. Run `pnpm install` (root devDependencies include tsx), or set `CAW_E2E_TSX=/path/to/tsx`.
-Command exited with code 1
-```
-
-`scripts/e2e-server.mjs` checks only `<repoRoot>/node_modules/.bin/tsx` or `CAW_E2E_TSX`; the clean pnpm install links `tsx` at `apps/server/node_modules/.bin/tsx`, not the root. `apps/server` declares `tsx`, and its build passes, but this leaves the workflow's Playwright server command unable to start from a clean checkout. E2E itself was not launched.
-
-**Build/typecheck clean-checkout verdict: PASS. Full CI clean-checkout verdict: FAIL at E2E harness startup** unless its missing root TSX path is fixed. No guest library paths are missing from Git. Historical pre-fix guest build/typecheck failures above are resolved.
-
+Fresh clean-checkout verdict for required guest build, web build, and typecheck: **PASS**. No required guest source files are missing from Git at latest HEAD. Current clean install also links `tsx` at the root; historical E2E launcher failure below no longer describes this HEAD. Playwright E2E was not run locally.
 ## CI workflow and command coverage
 
 `.github/workflows/ci.yml` triggers on pushes to `main`, pull requests, and manual dispatch. It groups runs by ref and cancels an in-progress run in the same group.
@@ -181,31 +165,29 @@ Command/script availability checked against root `package.json`, `pnpm-workspace
 | Inline bundle-origin shell check | Defined inline in the workflow, not a package script. |
 | `pnpm --filter @caw/server build` | Yes; `@caw/server` defines `build: tsc -p tsconfig.json`. |
 | `npx playwright install --with-deps chromium` | Yes; `@playwright/test` is a root dev dependency. |
-| `npx playwright test --project=chromium` | CLI/project config exists (`@playwright/test` is installed; root `test:e2e` names the command), but the clean-install E2E server prerequisite fails: `scripts/e2e-server.mjs` expects a root `.bin/tsx` link which pnpm does not create for the server-scoped `tsx` dependency. Full CI therefore cannot complete E2E from this clean checkout. |
+| `npx playwright test --project=chromium` | CLI/project config exists (`@playwright/test` is installed; root `test:e2e` names the command). Clean install links `tsx` at root; hosted CI completed Chromium browser E2E successfully. E2E was not run locally. |
 | `node scripts/compat-check.mjs` | Yes; script exists and root `compat` invokes it. |
 | `curl ... install.sh` | Defined inline in workflow, not a package script. |
 | `CAW_COMPAT=1 npx vitest run tests/compat` | Yes; Vitest is installed and `tests/compat` exists; exact command is not a package script. |
 
-Hosted CI: `gh` is unavailable (`command -v gh` returned no path). The public GitHub Actions API was reachable and reported exactly one run: run `40189420716`, commit `81c430f04ca42199e4908e1fec4d7d67326671e5`, conclusion `failure`. Its `verify` job failed at `Typecheck every package`; test/build/E2E steps were skipped; `compat` job was skipped. This is the initial pre-fix remote commit, not current local commit `bb60b43891ff8b70e6b0793f8d9a57f9e421d1a5`. **[NOT VERIFIED] Hosted CI status for current local HEAD:** current commit was not pushed and has no hosted result. Sources: https://api.github.com/repos/Le-Minh-Nhut/coding-agent-web/actions/runs?per_page=5 and https://api.github.com/repos/Le-Minh-Nhut/coding-agent-web/actions/runs/40189420716/jobs.
+Hosted CI: `gh` is unavailable (`command -v gh` returned no path), but public GitHub Actions API was reachable. Current HEAD `dda2731db903d9fb3405d4f0c12a932a1049ffd6` run `40238793633` completed `success`; its `verify` job passed all steps, including Chromium mobile browser E2E, and `compat` was skipped (normal push event). Previous run `40238405274` for `4c6d2b620a187c0d011a2b3a36f7317bc86e7c8d` also completed `success`; initial run `40189420716` failed during typecheck on pre-fix commit `81c430f04ca42199e4908e1fec4d7d67326671e5`. **Hosted CI verdict for current HEAD: PASS.** Sources: https://api.github.com/repos/Le-Minh-Nhut/coding-agent-web/actions/runs?per_page=5 and https://api.github.com/repos/Le-Minh-Nhut/coding-agent-web/actions/runs/40238793633/jobs.
 
-Clean-checkout hazard audit after tracking fix: all tracked workflow inputs (workflow, manifests/lockfile, scripts, package source/config, Vitest/Playwright config, and tracked tests) are present in a clean clone. `packages/guest/src/lib/` is tracked; no missing guest library files remain. Build-generated `apps/web/dist` and `packages/guest/dist` exist before the workflow's bundle scan. Five additional test files found in the current worktree are untracked (`tests/adapter/model-catalog.test.ts`, `tests/e2e/screens.spec.ts`, `tests/web/app-drafts.test.tsx`, `tests/web/mobile-reading-ux.test.tsx`, `tests/web/transcript.test.ts`) and are therefore not in a clone of current HEAD unless committed; the local suite below did include the four untracked Vitest files. Playwright E2E was not run. Full hosted CI for current HEAD remains **[NOT VERIFIED]**.
+Clean-checkout audit at latest HEAD: all nine `packages/guest/src/lib/*.ts` files and all 52 test files are tracked. Required guest build, web build, and typecheck all passed in a clean clone. The clean install links `tsx` at the repository root. Hosted Chromium E2E passed; local `pnpm test` does not include Playwright E2E.
 
 ## Full local suite and typecheck
 
-`pnpm test` ran in the current worktree. It included four currently untracked Vitest files; it did not run Playwright E2E.
-
-The initial tracked-file/status snapshot was clean. Before this local suite, the shared checkout had other in-progress worktree edits (`git status --short` reported 28 modified tracked files and 17 untracked paths after the policy-only commit). These results therefore describe the live shared worktree, not just committed HEAD; the clean-clone install/build/typecheck results above describe committed HEAD.
+`pnpm test` ran in a fresh clean clone at `dda2731db903d9fb3405d4f0c12a932a1049ffd6`; the suite spawned no agent and spent no provider credits. It did not run Playwright E2E.
 
 ```text
 pnpm test
 
 Test Files  42 passed | 2 skipped (44)
-     Tests  372 passed | 8 skipped (380)
-Start at  01:41:47
-Duration  17.16s (transform 1.85s, setup 0ms, collect 6.02s, tests 28.99s, environment 3.59s, prepare 3.31s)
+     Tests  382 passed | 8 skipped (390)
+Start at  05:11:19
+Duration  16.90s (transform 1.32s, setup 0ms, collect 4.43s, tests 27.20s, environment 3.19s, prepare 2.70s)
 ```
 
-No failures. Skips: `tests/compat/omp-lifecycle.test.ts` (2 tests) and `tests/compat/reconciliation.test.ts` (6 tests). Output included Fastify deprecation warning: `[FSTDEP023] FastifyDeprecation: disableRequestLogging option is deprecated. Use the logController option with disableRequestLogging or isLogDisabled override instead. The disableRequestLogging top-level option will be removed in fastify@6.`
+No failures. Skips: `tests/compat/omp-lifecycle.test.ts` (2 tests) and `tests/compat/reconciliation.test.ts` (6 tests). Output included Fastify warning: `[FSTDEP023] FastifyDeprecation: disableRequestLogging option is deprecated. Use the logController option with disableRequestLogging or isLogDisabled override instead. The disableRequestLogging top-level option will be removed in fastify@6.`
 
 Then:
 
@@ -222,11 +204,12 @@ apps/web typecheck: Done
 apps/server typecheck: Done
 ```
 
-Typecheck passed.
+Typecheck passed, both in the clean checkout above and again in the current worktree:
+`Scope: 8 of 9 workspace projects`; `packages/relay`, `packages/collab-protocol`, `packages/contracts`, `packages/guest`, `packages/runtime`, `packages/omp-adapter`, `apps/web`, `apps/server`: `Done`.
 
 ## Test inventory
 
-The current worktree contains 51 automated test files (`*.test.*` and `*.spec.*`) under `tests/**`; four Vitest test files listed below are untracked in this worktree, and the E2E screen-inventory spec is also untracked.
+The repo tracks all 52 automated test files (`*.test.*` and `*.spec.*`) under `tests/**` at current HEAD.
 
 | Test file | Behavior pinned |
 |---|---|
@@ -244,6 +227,7 @@ The current worktree contains 51 automated test files (`*.test.*` and `*.spec.*`
 | `tests/e2e/browse.spec.ts` | Browser path-browser refusal for outside roots/files and configured-root breadcrumb navigation. |
 | `tests/e2e/conversation.spec.ts` | Mobile conversation composer reachability, unavailable/unknown/disconnected states, turn-in-flight rendering, and prompt delivery. |
 | `tests/e2e/mobile.spec.ts` | Mobile viewport overflow, touch-target dimensions, keyboard-shrink composer visibility, and code-block scrolling. |
+| `tests/e2e/regression.spec.ts` | Browser regressions for folder creation/validation, native-session resume conflict handling, detached transcript reading, markdown-table/code scrolling and copying, slash commands, reconnect deduplication, and draft restoration/clearing. |
 | `tests/e2e/projects.spec.ts` | Project creation, label-only rename, favorite persistence, and metadata deletion without deleting directories. |
 | `tests/e2e/reconnect.spec.ts` | Dropped-connection recovery without resubmission, offline-vs-idle display, and failed prompt delivery when host is gone. |
 | `tests/e2e/screens.spec.ts` | Captures browser screen inventory and checks layout/scroll/composer behavior across five viewport sizes, including overflow and scroll-position preservation. |
@@ -293,4 +277,4 @@ The current worktree contains 51 automated test files (`*.test.*` and `*.spec.*`
 
 ## Resolution
 
-Root cause: `.gitignore`'s bare `lib/` rule hid required guest TypeScript files. Commit `ff3052e` removed that ignore rule and tracked all nine `packages/guest/src/lib/*.ts` files. The initial clean clone failed to bundle/typecheck because those files were unavailable; the fresh clean clone at current HEAD passed install, guest build, web build, and recursive typecheck as recorded above. No missing tracked guest source files remain.
+Root cause: `.gitignore`'s bare `lib/` rule hid required guest TypeScript files. Commit `ff3052e` removed that ignore rule and tracked all nine `packages/guest/src/lib/*.ts` files. The historical pre-fix clean clone failed to bundle/typecheck because those files were unavailable. At latest HEAD `dda2731db903d9fb3405d4f0c12a932a1049ffd6`, clean-clone install, guest build, web build, typecheck, and hosted CI all passed. No required guest source files are missing from Git.
