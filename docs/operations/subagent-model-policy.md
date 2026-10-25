@@ -7,29 +7,21 @@ several times during the project and an unrecorded reversal gets re-litigated.
 
 | Priority | Agent definition | Model | Use for |
 | --- | --- | --- | --- |
-| 1 | `caw-luna`, `caw-luna-scout` | `cx/gpt-6-luna:xhigh` | **Default for everything**, including reading images |
-| 2 | `caw-deepseek` | `wdb/deepseek-ai/DeepSeek-V4.1-Flash:high` | Parallel volume work, tests, documentation, second-opinion review |
-| — | `caw-gemini` | `ag/gemini-3.8-flash-high:high` | **Do not use** — quota is exhausted |
+| 1 | `caw-gemini` | `ag/gemini-3.8-flash-high:high` | Everything, including reading images |
+| 2 | `caw-luna`, `caw-luna-scout` | `cx/gpt-6-luna:xhigh` | Parallel volume work and any task Gemini refuses |
+| 3 | `caw-deepseek` | `wdb/deepseek-ai/DeepSeek-V4.1-Flash:high` | Tests, documentation, second-opinion review |
 
-### Why Gemini is out
+### Why Gemini is first again
 
-Gemini 3.8 Flash was first choice for throughput for most of the project. Its
-quota is now spent, so delegation moved to `cx/gpt-6-luna:xhigh`, which is also the
-stronger reasoning model here. Do not reach for Gemini; if a task seems to need it,
-use Luna.
-
-The advisor role was also moved off Gemini's lane earlier, so nothing else depends
-on that quota.
+The owner restored Gemini quota and asked for Gemini-first. If Gemini refuses an
+image payload, say so plainly instead of silently falling back; use Luna for that
+specific read.
 
 ## Image reading
 
-The main agent cannot put image bytes into its own context: once multimodal data
-entered that session, every later turn in that model lane failed with
-`Received multimodal data but multimodal processing is not enabled`. Screenshot
-inspection is therefore always delegated — **now to `caw-luna`, not Gemini**.
-
-If Luna ever refuses the image payload, stop and say so rather than burning the
-turn; do not silently fall back to Gemini.
+The main agent must never put image bytes in its own context. Screenshot
+inspection is always delegated; use `caw-gemini` first, and if it refuses the
+image payload, say so plainly and use `caw-luna` for that specific read.
 
 ## Effort: never pass the coarse `effort` hint
 
@@ -45,6 +37,5 @@ State the level in the model id (`cx/gpt-6-luna:xhigh`) and do not pass `effort`
 
 ## History
 
-The policy was Gemini-first, then Gemini-last, then Gemini-first again, and is now
-Luna-first because Gemini's quota is spent. If Gemini's quota is restored and Luna
-becomes the scarce resource, revise this file rather than relying on memory.
+History: Gemini-first → Luna-first → Gemini-first again. The last reversal records
+the quota restoration and the owner's renewed Gemini-first instruction.
