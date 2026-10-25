@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { WebSocketServer, WebSocket as WsWebSocket } from "ws";
 import type { AddressInfo } from "node:net";
 import {
@@ -6,7 +6,10 @@ import {
   importRoomKey,
   generateRoomKey,
   seal,
+  open,
   packEnvelope,
+  unpackEnvelope,
+  type GuestFrame,
   type HostFrame,
 } from "../../packages/collab-protocol/src/index.js";
 
@@ -177,5 +180,102 @@ describe("CollabSocket against real WebSocket server", () => {
     expect(connectionCount).toBeGreaterThanOrEqual(2);
     expect(closes).toBeGreaterThanOrEqual(1);
     expect(opens).toBe(2);
+  });
+
+  it("refuses sends before open and until hello is acknowledged", async () => {
+    const rawKey = generateRoomKey();
+    const { key } = await importRoomKey(rawKey);
+    const started = await startServer();
+    wss = started.server;
+    const { port } = started;
+    const received: GuestFrame[] = [];
+    const welcomeFrame: HostFrame = {
+      t: "welcome",
+      proto: 3,
+      header: { type: "session", id: "native", cwd: "/workspace", timestamp: "2026-01-01T00:00:00Z" },
+      state: { isStreaming: false, queuedMessageCount: 0, cwd: "/workspace", participants: [] },
+      agents: [],
+      entryCount: 0,
+    };
+    wss.on("connection", (serverWs) => {
+      serverWs.on("message", async (data) => {
+        const envelope = data instanceof Uint8Array ? data : new Uint8Array(data as ArrayBuffer);
+        const parsed = unpackEnvelope(envelope)!;
+        const frame = await open<GuestFrame>(key, parsed.payload);
+        received.push(frame);
+        if (frame.t === "hello") serverWs.send(packEnvelope(0, await seal(key, welcomeFrame)));
+      });
+    });
+    const client = new CollabSocket({ wsUrl: `ws://127.0.0.1:${port}/r/testroom`, role: "guest", key, WebSocketClass: WS });
+    activeSockets.push(client);
+    expect(await client.send({ t: "prompt", text: "too early" })).toBe(false);
+    const opened = withResolvers<void>();
+    client.onOpen = () => opened.resolve();
+    client.connect();
+    await opened.promise;
+    expect(await client.send({ t: "prompt", text: "before hello" })).toBe(false);
+    expect(await client.send({ t: "hello", proto: 3, name: "test" })).toBe(true);
+    const welcomed = withResolvers<void>();
+    client.onFrame = (frame) => { if (frame.t === "welcome") welcomed.resolve(); };
+    await welcomed.promise;
+    expect(await client.send({ t: "prompt", text: "after hello" })).toBe(true);
+    await vi.waitFor(() => expect(received.map((frame) => frame.t)).toEqual(["hello", "prompt"]));
+    expect(received[1]).toEqual({ t: "prompt", text: "after hello" });
+  });
+  it("reports pre-hello sends as unsent after reconnect", async () => {
+    const rawKey = generateRoomKey();
+    const { key } = await importRoomKey(rawKey);
+    const started = await startServer();
+    wss = started.server;
+    const received: GuestFrame[] = [];
+    let firstConnection: WsWebSocket | undefined;
+    const welcomeFrame: HostFrame = {
+      t: "welcome",
+      proto: 3,
+      header: { type: "session", id: "native", cwd: "/workspace", timestamp: "2026-01-01T00:00:00Z" },
+      state: { isStreaming: false, queuedMessageCount: 0, cwd: "/workspace", participants: [] },
+      agents: [],
+      entryCount: 0,
+    };
+    wss.on("connection", (serverWs) => {
+      if (!firstConnection) firstConnection = serverWs;
+      serverWs.on("message", async (data) => {
+        const envelope = data instanceof Uint8Array ? data : new Uint8Array(data as ArrayBuffer);
+        const frame = await open<GuestFrame>(key, unpackEnvelope(envelope)!.payload);
+        received.push(frame);
+        if (frame.t === "hello") serverWs.send(packEnvelope(0, await seal(key, welcomeFrame)));
+      });
+    });
+
+    const client = new CollabSocket({ wsUrl: `ws://127.0.0.1:${started.port}/r/testroom`, role: "guest", key, WebSocketClass: WS });
+    activeSockets.push(client);
+    const firstWelcome = withResolvers<void>();
+    const secondWelcome = withResolvers<void>();
+    const secondOpen = withResolvers<Promise<boolean>>();
+    let openCount = 0;
+    client.onOpen = () => {
+      openCount++;
+      if (openCount === 2) {
+        const unsent = client.send({ t: "prompt", text: "must not vanish" });
+        void client.send({ t: "hello", proto: 3, name: "test" });
+        secondOpen.resolve(unsent);
+      } else {
+        void client.send({ t: "hello", proto: 3, name: "test" });
+      }
+    };
+    client.onFrame = (frame) => {
+      if (frame.t !== "welcome") return;
+      if (openCount === 1) firstWelcome.resolve();
+      else secondWelcome.resolve();
+    };
+
+    client.connect();
+    await firstWelcome.promise;
+    firstConnection!.terminate();
+    expect(await (await secondOpen.promise)).toBe(false);
+    await secondWelcome.promise;
+    expect(await client.send({ t: "prompt", text: "sent after welcome" })).toBe(true);
+    await vi.waitFor(() => expect(received.map((frame) => frame.t)).toEqual(["hello", "hello", "prompt"]));
+    expect(received.at(-1)).toEqual({ t: "prompt", text: "sent after welcome" });
   });
 });

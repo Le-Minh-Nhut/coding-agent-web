@@ -1,10 +1,10 @@
 // @vitest-environment jsdom
 import React from "react";
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, act, fireEvent } from "@testing-library/react";
-import { ConversationView } from "../../apps/web/src/components/ConversationView.js";
+import { autosizeComposer, ConversationView } from "../../apps/web/src/components/ConversationView.js";
 import { api } from "../../apps/web/src/api.js";
-import { CollabSocket } from "@caw/collab-protocol";
+import { CollabSocket, type GuestFrame, type HostFrame } from "@caw/collab-protocol";
 
 vi.mock("../../apps/web/src/api.js", () => ({
   api: {
@@ -54,66 +54,35 @@ describe("Composer behaviour", () => {
     });
   });
 
-  it("disables during flight and produces exactly one idempotency key per submit", async () => {
-    const sentFrames: unknown[] = [];
-    const socketSendSpy = vi.spyOn(CollabSocket.prototype, "send").mockImplementation((frame) => {
-      sentFrames.push(frame);
+  it("sends one prompt per draft, including follow-up while running", async () => {
+    const sentFrames: GuestFrame[] = [];
+    const sendSpy = vi.spyOn(CollabSocket.prototype, "send").mockImplementation((frame) => { sentFrames.push(frame); return Promise.resolve(true); });
+    let activeSocket: CollabSocket | null = null;
+    vi.spyOn(CollabSocket.prototype, "connect").mockImplementation(function (this: CollabSocket) {
+      activeSocket = this;
+      this.onOpen?.();
     });
-
-    const uuidSpy = vi.spyOn(crypto, "randomUUID");
-
-    let containerEl: HTMLElement | null = null;
-    await act(async () => {
-      const { container } = render(<ConversationView conversationId="c-1" onBack={() => {}} />);
-      containerEl = container;
-    });
-
-    // Simulate socket onOpen to make status idle
-    const textarea = containerEl?.querySelector("textarea") as HTMLTextAreaElement;
-    const sendButton = containerEl?.querySelector('button[type="submit"]') as HTMLButtonElement;
-
-    expect(textarea).not.toBeNull();
-    expect(sendButton).not.toBeNull();
-
-    // Type prompt
-    fireEvent.change(textarea, { target: { value: "Please refactor the auth service" } });
-    expect(textarea.value).toBe("Please refactor the auth service");
-
-    // Clear frame history before prompt
-    const initialUuidCallCount = uuidSpy.mock.calls.length;
-
-    // Submit form
-    act(() => {
-      fireEvent.click(sendButton);
-    });
-
-    // Assert: Exactly one randomUUID generated for this submit
-    expect(uuidSpy.mock.calls.length).toBe(initialUuidCallCount + 1);
-    const generatedKey = uuidSpy.mock.results[initialUuidCallCount]?.value;
-
-    // Assert: Input and button are now disabled during flight
-    expect(textarea.disabled).toBe(true);
-    expect(sendButton.disabled).toBe(true);
-
-    // Attempt second click (double-tap prevention)
-    act(() => {
-      fireEvent.click(sendButton);
-    });
-
-    // Assert: No additional UUID generated
-    expect(uuidSpy.mock.calls.length).toBe(initialUuidCallCount + 1);
-
-    // Verify sent prompt frame
-    const promptFrame = sentFrames.find(
-      (f): f is { t: string; text: string; idempotencyKey: string } =>
-        Boolean(f && typeof f === "object" && "t" in f && (f as { t: string }).t === "prompt")
-    );
-
-    expect(promptFrame).toBeDefined();
-    expect(promptFrame?.text).toBe("Please refactor the auth service");
-    expect(promptFrame?.idempotencyKey).toBe(generatedKey);
-
-    socketSendSpy.mockRestore();
-    uuidSpy.mockRestore();
+    let container: HTMLElement | null = null;
+    await act(async () => { container = render(<ConversationView conversationId="c-1" onBack={() => {}} />).container; });
+    const textarea = container!.querySelector("textarea.composer-input") as HTMLTextAreaElement;
+    const send = container!.querySelector('button[type="submit"]') as HTMLButtonElement;
+    const welcome: HostFrame = {
+      t: "welcome", proto: 3,
+      header: { type: "session", id: "s1", cwd: "/", timestamp: new Date().toISOString() },
+      state: { isStreaming: false, queuedMessageCount: 0, cwd: "/", participants: [] }, agents: [], entryCount: 0,
+    };
+    await act(async () => { activeSocket?.onFrame?.(welcome); });
+    fireEvent.change(textarea, { target: { value: "first" } });
+    act(() => { fireEvent.click(send); fireEvent.click(send); });
+    expect(sentFrames.filter((frame) => frame.t === "prompt")).toEqual([{ t: "prompt", text: "first" }]);
+    expect(container!.textContent).toContain("first");
+    await act(async () => { activeSocket?.onFrame?.({ t: "state", state: { ...welcome.state, isStreaming: true } }); });
+    fireEvent.change(textarea, { target: { value: "follow-up" } });
+    act(() => { fireEvent.click(send); fireEvent.click(send); });
+    const prompts = sentFrames.filter((frame) => frame.t === "prompt");
+    expect(prompts).toEqual([{ t: "prompt", text: "first" }, { t: "prompt", text: "follow-up" }]);
+    expect(container!.textContent).toContain("follow-up");
+    expect(prompts.every((frame) => !("idempotencyKey" in frame))).toBe(true);
+    sendSpy.mockRestore();
   });
 });

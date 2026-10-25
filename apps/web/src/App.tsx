@@ -13,6 +13,7 @@ export function App() {
   const [currentView, setCurrentView] = useState<View>("projects");
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [selectedConversationId, setSelectedConversationId] = useState<string | null>(null);
+  const [conversationDrafts, setConversationDrafts] = useState<Record<string, string>>({});
 
   useEffect(() => {
     api.getMe().then((res) => {
@@ -68,6 +69,10 @@ export function App() {
       {currentView === "conversation" && selectedConversationId && (
         <ConversationView
           conversationId={selectedConversationId}
+          draft={conversationDrafts[selectedConversationId] ?? ""}
+          onDraftChange={(draft) => {
+            setConversationDrafts((prev) => ({ ...prev, [selectedConversationId]: draft }));
+          }}
           onBack={() => {
             setSelectedConversationId(null);
             setCurrentView(selectedProjectId ? "project-detail" : "projects");

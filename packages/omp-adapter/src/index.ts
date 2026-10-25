@@ -5,6 +5,7 @@ export * from "./session-catalog.js";
 export * from "./session-lease.js";
 export * from "./tmux.js";
 export * from "./collab-registry.js";
+export * from "./model-catalog.js";
 
 export { DefaultCapabilityService, parseOmpVersion, parseTmuxVersion } from "./capabilities.js";
 export type { CapabilityOptions } from "./capabilities.js";
@@ -35,6 +36,8 @@ export {
 } from "./collab-registry.js";
 export type { CollabRegistryOptions } from "./collab-registry.js";
 
+export { DefaultModelCatalogService, parseOmpModelsOutput } from "./model-catalog.js";
+export type { ModelCatalogOptions } from "./model-catalog.js";
 export {
   AdapterError,
   RegistryUnreadableError,

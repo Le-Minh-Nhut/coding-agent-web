@@ -6,8 +6,8 @@ describe("Mobile touch targets CSS specification", () => {
   const cssPath = resolve(__dirname, "../../apps/web/src/styles.css");
   const css = readFileSync(cssPath, "utf8");
 
-  it("defines the --touch-min token at 40px", () => {
-    expect(css).toMatch(/--touch-min:\s*40px;/);
+  it("defines the --touch-min token at 44px", () => {
+    expect(css).toMatch(/--touch-min:\s*44px;/);
   });
 
   it("enforces minimum touch dimensions on all buttons", () => {

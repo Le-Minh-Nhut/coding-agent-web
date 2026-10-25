@@ -33,6 +33,15 @@ export interface CapabilityService {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Available OMP models
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface ModelCatalogService {
+  /** Provider-qualified OMP selectors; empty when catalog is empty or unavailable. */
+  listModels(): Promise<string[]>;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Native session catalog
 // ─────────────────────────────────────────────────────────────────────────────
 

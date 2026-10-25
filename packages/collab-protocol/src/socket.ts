@@ -18,7 +18,6 @@ const RELAY_CLOSE_REASONS: Record<number, string> = {
 
 const BACKOFF_BASE_MS = 1_000;
 const BACKOFF_MAX_MS = 30_000;
-const MAX_PENDING_SENDS = 256;
 
 export interface CollabSocketOptions {
   wsUrl: string;
@@ -41,8 +40,8 @@ export class CollabSocket {
   #closed = false;
   #retryMissingRoom = false;
   #sendChain: Promise<void> = Promise.resolve();
+  #helloAcknowledged = false;
   #recvChain: Promise<void> = Promise.resolve();
-  #pendingSends: Uint8Array[] = [];
 
   constructor(opts: CollabSocketOptions) {
     this.#opts = opts;
@@ -50,7 +49,7 @@ export class CollabSocket {
   }
 
   get isOpen(): boolean {
-    return this.#ws !== null && this.#ws.readyState === WebSocket.OPEN;
+    return this.#ws !== null && this.#ws.readyState === 1;
   }
 
   connect(role?: "host" | "guest"): void {
@@ -62,24 +61,18 @@ export class CollabSocket {
     this.#openSocket();
   }
 
-  send(frame: GuestFrame, targetPeer = 0): void {
-    this.#sendChain = this.#sendChain
-      .then(async () => {
-        if (this.#closed) return;
-        const sealed = await seal(await this.#opts.key, frame);
-        const envelope = packEnvelope(targetPeer, sealed);
-        const ws = this.#ws;
-        if (ws && ws.readyState === WebSocket.OPEN) {
-          ws.send(envelope);
-          return;
-        }
-        if (this.#pendingSends.length < MAX_PENDING_SENDS) {
-          this.#pendingSends.push(envelope);
-        }
-      })
-      .catch(() => {
-        // Dropped frame; socket-level close path reports actionable failures
-      });
+  send(frame: GuestFrame, targetPeer = 0): Promise<boolean> {
+    const send = this.#sendChain.then(async () => {
+      const ws = this.#ws;
+      if (this.#closed || !ws || ws.readyState !== 1) return false;
+      if (frame.t !== "hello" && !this.#helloAcknowledged) return false;
+      const envelope = packEnvelope(targetPeer, await seal(await this.#opts.key, frame));
+      if (ws !== this.#ws || ws.readyState !== 1) return false;
+      ws.send(envelope);
+      return true;
+    });
+    this.#sendChain = send.then(() => undefined, () => undefined);
+    return send.catch(() => false);
   }
 
   close(): void {
@@ -88,7 +81,7 @@ export class CollabSocket {
     const wasClosed = this.#closed;
     this.#closed = true;
     this.#retryMissingRoom = false;
-    this.#pendingSends.length = 0;
+    this.#helloAcknowledged = false;
     const ws = this.#ws;
     this.#ws = null;
     if (ws) {
@@ -98,9 +91,7 @@ export class CollabSocket {
         // Already closing/closed
       }
     }
-    if (hadActivity && !wasClosed) {
-      this.onClose?.("closed", false);
-    }
+    if (hadActivity && !wasClosed) this.onClose?.("closed", false);
   }
 
   #openSocket(): void {
@@ -112,14 +103,11 @@ export class CollabSocket {
     const ws = new WS(`${this.#opts.wsUrl}?role=${this.#role}`);
     ws.binaryType = "arraybuffer";
     this.#ws = ws;
+    this.#helloAcknowledged = false;
 
     ws.onopen = () => {
       if (this.#ws !== ws) return;
       if (!this.#retryMissingRoom) this.#attempt = 0;
-      for (let i = 0; i < this.#pendingSends.length; i++) {
-        ws.send(this.#pendingSends[i]!);
-      }
-      this.#pendingSends.length = 0;
       this.onOpen?.();
     };
 
@@ -172,6 +160,7 @@ export class CollabSocket {
           return;
         }
         if (this.#ws !== ws) return;
+        if (frame.t === "welcome") this.#helloAcknowledged = true;
         this.#retryMissingRoom = false;
         this.#attempt = 0;
         this.onFrame?.(frame, envelope.peerId);
@@ -197,7 +186,6 @@ export class CollabSocket {
 
     if (fatalReason !== undefined) {
       this.#closed = true;
-      this.#pendingSends.length = 0;
       this.onClose?.(fatalReason, false);
       return;
     }
@@ -210,7 +198,6 @@ export class CollabSocket {
     if (this.#closed) return;
     this.#closed = true;
     this.#clearRetry();
-    this.#pendingSends.length = 0;
     const ws = this.#ws;
     this.#ws = null;
     if (ws) {

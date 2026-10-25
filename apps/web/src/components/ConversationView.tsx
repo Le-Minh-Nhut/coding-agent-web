@@ -1,21 +1,22 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { memo, useMemo, useState, useEffect, useRef, useCallback, useLayoutEffect } from "react";
 import { api } from "../api.js";
-import { renderMarkdown } from "../sanitize.js";
+import { MarkdownCodeBlock, renderMarkdown } from "../sanitize.js";
 import { SubagentPanel } from "./SubagentPanel.js";
 import { ActivityPanel } from "./ActivityPanel.js";
 import {
   CollabSocket,
   parseCollabLink,
   importRoomKey,
-  type AgentSnapshot,
-  type CollabUiRequest,
+  encodeBase64Url,
   type HostFrame,
-  type SessionEntry,
 } from "@caw/collab-protocol";
+import { clearTranscriptRequests, createTranscriptState, forgetTranscriptRequest, reduceHostFrame, setConnectionStatus, trackTranscriptRequest, type TranscriptState } from "../transcript.js";
+import { findSlashCommand, slashCommands, type SlashCommand } from "../commands.js";
 import type { AttachInstructions, Conversation } from "@caw/contracts";
-
 interface ConversationViewProps {
   conversationId: string;
+  draft?: string;
+  onDraftChange?: (draft: string) => void;
   onBack: () => void;
 }
 
@@ -25,56 +26,212 @@ interface DisplayMessage {
   text: string;
   toolName?: string;
   isError?: boolean;
+  isRunning?: boolean;
+  awaitingHost?: boolean;
+  hostEchoCount?: number;
 }
+
+const TAIL_THRESHOLD_PX = 80;
+const MAX_TRANSCRIPT_REQUESTS = 64;
+const TRANSCRIPT_REQUEST_TIMEOUT_MS = 15_000;
+
+export function autosizeComposer(element: HTMLTextAreaElement | null): void {
+  if (!element) return;
+  element.style.height = "0px";
+  const height = element.scrollHeight;
+  element.style.height = `${Math.min(140, Math.max(44, height))}px`;
+  element.style.overflowY = height > 140 ? "auto" : "hidden";
+}
+
+export function shouldSubmitOnEnter(
+  event: Pick<React.KeyboardEvent<HTMLTextAreaElement>, "key" | "shiftKey" | "nativeEvent">,
+  composing: boolean,
+): boolean {
+  return event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing && !composing;
+}
+
+const MessageRow = memo(function MessageRow({ message }: { message: DisplayMessage }) {
+  return (
+    <div className={`message-card ${message.role}`}>
+      <div style={{ fontSize: "0.75rem", color: "var(--text-muted)", marginBottom: "4px", textTransform: "capitalize" }}>
+        {message.role} {message.toolName ? `(${message.toolName})` : ""}
+        {message.awaitingHost ? " · sent while active; awaiting host" : ""}
+      </div>
+      {message.role === "tool" ? (
+        <details open={message.isRunning}>
+          <summary>{message.toolName ?? "Tool Result"} {message.isRunning ? "(Running…)" : message.isError ? "(Error)" : ""}</summary>
+          <div className="message-content"><MarkdownCodeBlock code={message.text} language="" /></div>
+        </details>
+      ) : (
+        <div className="message-content">{renderMarkdown(message.text)}</div>
+      )}
+    </div>
+  );
+});
 
 export type ConnectionStatus = "connecting" | "idle" | "running" | "reconnecting" | "disconnected" | "unknown";
 
-export function ConversationView({ conversationId, onBack }: ConversationViewProps) {
+export function ConversationView({ conversationId, draft = "", onDraftChange, onBack }: ConversationViewProps) {
+
+
   const [conversation, setConversation] = useState<Conversation | null>(null);
+  const [transcript, setTranscript] = useState<TranscriptState>(createTranscriptState);
+  const transcriptRef = useRef(transcript);
   const [status, setStatus] = useState<ConnectionStatus>("connecting");
-  const [messages, setMessages] = useState<DisplayMessage[]>([]);
-  const [streamingText, setStreamingText] = useState<string>("");
-  const [inputText, setInputText] = useState("");
-  const [isSending, setIsSending] = useState(false);
+  const [sendError, setSendError] = useState<string | null>(null);
+  const [inputText, setInputText] = useState(draft);
+  const [isDetached, setIsDetached] = useState(false);
   const [attachInfo, setAttachInfo] = useState<AttachInstructions | null>(null);
   const [linkUnavailable, setLinkUnavailable] = useState(false);
+  const [interceptedCommand, setInterceptedCommand] = useState<SlashCommand | null>(null);
   const [modelDraft, setModelDraft] = useState("");
   const [modelMessage, setModelMessage] = useState("");
   const [modelBusy, setModelBusy] = useState(false);
-
-  // Subagents
-  const [agents, setAgents] = useState<AgentSnapshot[]>([]);
   const [showSubagents, setShowSubagents] = useState(false);
-  const [transcripts, setTranscripts] = useState<Record<string, string>>({});
-
-  // Activity Timeline
   const [showActivity, setShowActivity] = useState(false);
-
-  // UI Request (Approvals) & FIFO Queue
-  const [uiRequests, setUiRequests] = useState<{
-    current: CollabUiRequest | null;
-    queue: CollabUiRequest[];
-  }>({ current: null, queue: [] });
-  const [uiRequestTimedOut, setUiRequestTimedOut] = useState(false);
-  const settledReqIdsRef = useRef<Set<number>>(new Set());
-
-  const activeUiRequest = uiRequests.current;
-  const uiRequestQueue = uiRequests.queue;
-
-  // Hold socket & bearer credentials in React ref/closure ONLY
+  const [transcriptErrors, setTranscriptErrors] = useState<Record<string, string>>({});
+  const [optimisticMessages, setOptimisticMessages] = useState<DisplayMessage[]>([]);
+  const [uiEditorValue, setUiEditorValue] = useState("");
+  const inputValueRef = useRef(draft);
+  const messagesScrollRef = useRef<HTMLDivElement | null>(null);
+  const messagesContentRef = useRef<HTMLDivElement | null>(null);
+  const followTailRef = useRef(true);
+  const renderTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingStreamFrameRef = useRef<Extract<HostFrame, { t: "event" }> | null>(null);
+  const composingRef = useRef(false);
+  const composerRef = useRef<HTMLTextAreaElement | null>(null);
+  const modelControlsRef = useRef<HTMLDetailsElement | null>(null);
+  const modelInputRef = useRef<HTMLInputElement | null>(null);
   const socketRef = useRef<CollabSocket | null>(null);
+  const pendingUiResponsesRef = useRef(new Set<number>());
+  const localIdRef = useRef(0);
+  const sendGuardRef = useRef<string | null>(null);
+  const reqIdCounterRef = useRef(1);
+  const transcriptRequestsRef = useRef(new Map<number, { agentId: string; timer: ReturnType<typeof setTimeout> }>());
   const rawUrlRef = useRef<string | null>(null);
-  const reqIdCounterRef = useRef<number>(1);
-  const messagesEndRef = useRef<HTMLDivElement | null>(null);
 
-  // Auto-scroll messages
+  const streamingText = transcript.streamingMessage?.content
+    .filter((part) => part.type === "text")
+    .map((part) => part.text)
+    .join("") ?? "";
+  const commandSuggestions = inputText.startsWith("/") && !/\s/.test(inputText)
+    ? slashCommands.filter((command) => command.name.startsWith(inputText)).slice(0, 5)
+    : [];
+  const agents = transcript.agents;
+  const transcripts = useMemo(() => Object.fromEntries(Object.entries(transcript.transcripts).map(([id, reply]) => [id, reply.text])), [transcript.transcripts]);
+  const loadingAgentIds = useMemo(() => [...new Set(Object.values(transcript.transcriptRequests))], [transcript.transcriptRequests]);
+  const activeUiRequest = transcript.uiRequests.current;
+  const uiRequestQueue = transcript.uiRequests.queue;
   useEffect(() => {
-    if (typeof messagesEndRef.current?.scrollIntoView === "function") {
-      messagesEndRef.current.scrollIntoView({ behavior: "smooth" });
+    if (activeUiRequest?.kind === "editor") setUiEditorValue(activeUiRequest.prefill ?? "");
+  }, [activeUiRequest?.reqId]);
+  const messages: DisplayMessage[] = useMemo(() => {
+    const hostCounts = new Map<string, number>();
+    for (const message of transcript.messages) {
+      if (message.role === "user") hostCounts.set(message.text, (hostCounts.get(message.text) ?? 0) + 1);
     }
+    return [
+      ...transcript.messages,
+      ...optimisticMessages.filter((pending) => (hostCounts.get(pending.text) ?? 0) <= (pending.hostEchoCount ?? 0)),
+    ];
+  }, [transcript.messages, optimisticMessages]);
+  useEffect(() => {
+    const hostCounts = new Map<string, number>();
+    for (const message of transcript.messages) {
+      if (message.role === "user") hostCounts.set(message.text, (hostCounts.get(message.text) ?? 0) + 1);
+    }
+    setOptimisticMessages((prev) => {
+      const pending = prev.filter((message) => (hostCounts.get(message.text) ?? 0) <= (message.hostEchoCount ?? 0));
+      return pending.length === prev.length ? prev : pending;
+    });
+  }, [transcript.messages]);
+
+  const updateTranscript = (frame: HostFrame): void => {
+    const next = reduceHostFrame(transcriptRef.current, frame);
+    transcriptRef.current = next;
+    setTranscript(next);
+    setStatus(next.connectionStatus === "live" ? next.turnStatus : next.connectionStatus);
+    if (frame.t === "welcome") sendGuardRef.current = null;
+  };
+
+  const flushPendingStream = (): void => {
+    if (renderTimerRef.current !== null) clearTimeout(renderTimerRef.current);
+    renderTimerRef.current = null;
+    const frame = pendingStreamFrameRef.current;
+    pendingStreamFrameRef.current = null;
+    if (frame) updateTranscript(frame);
+  };
+
+  const handleHostFrameRef = useRef<(frame: HostFrame) => void>(() => {});
+  handleHostFrameRef.current = (frame) => {
+    if (frame.t === "event" && frame.event.type === "message_update" && frame.event.message.role === "assistant") {
+      pendingStreamFrameRef.current = frame;
+      if (renderTimerRef.current === null) renderTimerRef.current = setTimeout(flushPendingStream, 100);
+      return;
+    }
+    flushPendingStream();
+    updateTranscript(frame);
+    if (frame.t === "transcript") {
+      const request = transcriptRequestsRef.current.get(frame.reqId);
+      if (request) {
+        clearTimeout(request.timer);
+        transcriptRequestsRef.current.delete(frame.reqId);
+        setTranscriptErrors((prev) => {
+          const next = { ...prev };
+          if (frame.error) next[request.agentId] = frame.error;
+          else delete next[request.agentId];
+          return next;
+        });
+      }
+    }
+  };
+
+  const updateTailLock = useCallback(() => {
+    const element = messagesScrollRef.current;
+    if (!element) return;
+    const nearTail = element.scrollHeight - element.clientHeight - element.scrollTop <= TAIL_THRESHOLD_PX;
+    followTailRef.current = nearTail;
+    setIsDetached((previous) => previous === !nearTail ? previous : !nearTail);
+  }, []);
+
+  useLayoutEffect(() => {
+    const element = messagesScrollRef.current;
+    if (element && followTailRef.current) element.scrollTop = Math.max(0, element.scrollHeight - element.clientHeight);
   }, [messages, streamingText]);
 
-  // Load conversation metadata & attach instructions
+  useEffect(() => {
+    const element = messagesScrollRef.current;
+    const content = messagesContentRef.current;
+    if (!element || !content) return;
+    element.addEventListener("scroll", updateTailLock, { passive: true });
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(() => {
+      if (followTailRef.current) element.scrollTop = Math.max(0, element.scrollHeight - element.clientHeight);
+    });
+    observer?.observe(element);
+    observer?.observe(content);
+    return () => {
+      element.removeEventListener("scroll", updateTailLock);
+      observer?.disconnect();
+    };
+  }, [updateTailLock]);
+
+  useEffect(() => () => {
+    if (renderTimerRef.current !== null) clearTimeout(renderTimerRef.current);
+    for (const request of transcriptRequestsRef.current.values()) clearTimeout(request.timer);
+    transcriptRequestsRef.current.clear();
+  }, []);
+
+  useLayoutEffect(() => autosizeComposer(composerRef.current), [inputText]);
+
+  const goToLatest = (): void => {
+    const element = messagesScrollRef.current;
+    if (!element) return;
+    followTailRef.current = true;
+    element.scrollTop = Math.max(0, element.scrollHeight - element.clientHeight);
+    setIsDetached(false);
+  };
+
+
   useEffect(() => {
     api.getConversation(conversationId).then((res) => {
       if (res.ok) {
@@ -87,171 +244,14 @@ export function ConversationView({ conversationId, onBack }: ConversationViewPro
     });
   }, [conversationId]);
 
-  /**
-   * Latest frame handler, held in a ref.
-   *
-   * The connection effect must not depend on a callback that changes when state
-   * changes: `connectToCollab` would be recreated on every render, the effect would
-   * re-run, and each re-run closes the socket and opens a new one. That produced a
-   * hot reconnect loop — 44 sockets in 9 seconds, each accepted by the relay and
-   * dropped before a welcome could arrive — instead of a live session.
-   */
-  const handleHostFrameRef = useRef<(frame: HostFrame) => void>(() => {});
-
-  const handleHostFrame = useCallback((frame: HostFrame) => {
-    switch (frame.t) {
-      case "welcome":
-        setStatus(frame.state.busy ? "running" : "idle");
-        if (frame.agents) setAgents(frame.agents);
-        break;
-
-      case "state":
-        setStatus(frame.state.busy ? "running" : "idle");
-        break;
-
-      case "entry": {
-        const entry: SessionEntry = frame.entry;
-        if (entry.type === "message") {
-          const msg = entry.message;
-          if (msg.role === "user") {
-            const userText = typeof msg.content === "string"
-              ? msg.content
-              : msg.content.map((c) => (c.type === "text" ? c.text : "")).join("\n");
-            setMessages((prev) => [
-              ...prev,
-              { id: entry.id, role: "user", text: userText },
-            ]);
-          } else if (msg.role === "assistant") {
-            const textParts = msg.content
-              .filter((c) => c.type === "text")
-              .map((c) => (c as { text: string }).text)
-              .join("\n");
-            setMessages((prev) => [
-              ...prev,
-              { id: entry.id, role: "assistant", text: textParts },
-            ]);
-            setStreamingText("");
-          } else if (msg.role === "tool") {
-            const resultStr = typeof msg.result === "string" ? msg.result : JSON.stringify(msg.result, null, 2);
-            setMessages((prev) => [
-              ...prev,
-              { id: entry.id, role: "tool", text: resultStr, isError: msg.isError },
-            ]);
-          }
-        }
-        break;
-      }
-
-      case "event": {
-        const ev = frame.event;
-        if (ev.type === "turn_start" || ev.type === "agent_start") {
-          setStatus("running");
-        } else if (ev.type === "turn_end" || ev.type === "agent_end") {
-          setStatus("idle");
-          setIsSending(false);
-        } else if (ev.type === "message_update") {
-          if (ev.message.role === "assistant") {
-            const text = ev.message.content
-              .filter((c) => c.type === "text")
-              .map((c) => (c as { text: string }).text)
-              .join("");
-            setStreamingText(text);
-          }
-        } else if (ev.type === "message_end") {
-          if (ev.message.role === "assistant") {
-            const text = ev.message.content
-              .filter((c) => c.type === "text")
-              .map((c) => (c as { text: string }).text)
-              .join("");
-            if (text) {
-              setMessages((prev) => [
-                ...prev,
-                { id: `assistant-${Date.now()}`, role: "assistant", text },
-              ]);
-            }
-            setStreamingText("");
-          }
-        } else if (ev.type === "tool_execution_start") {
-          // Tool start
-        } else if (ev.type === "tool_execution_end") {
-          const resText = typeof ev.result === "string" ? ev.result : JSON.stringify(ev.result, null, 2);
-          setMessages((prev) => [
-            ...prev,
-            { id: `tool-${ev.toolCallId}`, role: "tool", text: resText, toolName: ev.toolName, isError: ev.isError },
-          ]);
-        }
-        break;
-      }
-
-      case "agents":
-        setAgents(frame.agents);
-        break;
-
-      case "ui-request":
-        setUiRequests((prev) => {
-          if (!prev.current) {
-            return { current: frame.request, queue: [] };
-          }
-          return { current: prev.current, queue: [...prev.queue, frame.request] };
-        });
-        setUiRequestTimedOut(false);
-        break;
-
-      case "ui-request-end":
-        settledReqIdsRef.current.add(frame.reqId);
-        setUiRequests((prev) => {
-          if (prev.current?.reqId === frame.reqId) {
-            const [next, ...rest] = prev.queue;
-            return { current: next ?? null, queue: rest };
-          }
-          return {
-            current: prev.current,
-            queue: prev.queue.filter((r) => r.reqId !== frame.reqId),
-          };
-        });
-        setUiRequestTimedOut(true);
-        break;
-
-      case "transcript":
-        if (frame.text) {
-          const text = frame.text;
-          setTranscripts((prev) => {
-            const updated = { ...prev };
-            for (let i = 0; i < agents.length; i++) {
-              const a = agents[i]!;
-              if (!updated[a.id]) {
-                updated[a.id] = text;
-                break;
-              }
-            }
-            return updated;
-          });
-        }
-        break;
-
-      case "error":
-        setStatus("unknown");
-        break;
-
-      case "bye":
-        setStatus("disconnected");
-        break;
-    }
-  }, [agents]);
-
-  // Point the ref at the current handler after every render, so the socket path can
-  // read it without listing it as a dependency.
-  useEffect(() => {
-    handleHostFrameRef.current = handleHostFrame;
-  }, [handleHostFrame]);
-
-  // Connect to collab relay
   const connectToCollab = useCallback(async (retryStale = true) => {
     const linkRes = await api.getConversationLink(conversationId);
     if (!linkRes.ok) {
       if (linkRes.error.code === "link_unavailable") {
         setLinkUnavailable(true);
         setStatus("unknown");
+        transcriptRef.current = setConnectionStatus(transcriptRef.current, "unknown");
+        setTranscript(transcriptRef.current);
         return;
       }
       if (linkRes.error.code === "stale_generation" && retryStale) {
@@ -264,39 +264,25 @@ export function ConversationView({ conversationId, onBack }: ConversationViewPro
 
     setLinkUnavailable(false);
     rawUrlRef.current = linkRes.data.url;
-
     const parsed = parseCollabLink(rawUrlRef.current);
     if ("error" in parsed) {
       setStatus("disconnected");
       return;
     }
-
     try {
       const { key, writeToken } = await importRoomKey(parsed.key);
-      const socket = new CollabSocket({
-        wsUrl: parsed.wsUrl,
-        role: "guest",
-        key,
-      });
-
+      const socket = new CollabSocket({ wsUrl: parsed.wsUrl, role: "guest", key });
       socket.onOpen = () => {
-        setStatus("idle");
-        socket.send({
-          t: "hello",
-          proto: 3,
-          name: "Mobile Web Controller",
-          writeToken,
-        });
+        setStatus("connecting");
+        socket.send({ t: "hello", proto: 3, name: "Mobile Web Controller", ...(writeToken ? { writeToken: encodeBase64Url(writeToken) } : {}) });
       };
-
-      socket.onFrame = (frame) => {
-        handleHostFrameRef.current(frame);
-      };
-
+      socket.onFrame = (frame) => handleHostFrameRef.current(frame);
       socket.onClose = (_reason, willReconnect) => {
-        setStatus(willReconnect ? "reconnecting" : "disconnected");
+        const connection = willReconnect ? "reconnecting" : "disconnected";
+        setStatus(connection);
+        transcriptRef.current = setConnectionStatus(transcriptRef.current, connection);
+        setTranscript(transcriptRef.current);
       };
-
       socketRef.current = socket;
       socket.connect();
     } catch {
@@ -306,45 +292,85 @@ export function ConversationView({ conversationId, onBack }: ConversationViewPro
 
   useEffect(() => {
     connectToCollab(true);
-
     return () => {
-      if (socketRef.current) {
-        socketRef.current.close();
-        socketRef.current = null;
-      }
+      socketRef.current?.close();
+      socketRef.current = null;
       rawUrlRef.current = null;
     };
   }, [connectToCollab]);
 
-  // Send prompt with idempotency key
-  const handleSendPrompt = (e: React.FormEvent) => {
-    e.preventDefault();
-    const text = inputText.trim();
-    if (!text || isSending || !socketRef.current) return;
+  const sendPrompt = (text: string, allowSlashCommand = false): void => {
+    const trimmed = text.trim();
+    if (!trimmed || !socketRef.current || (status !== "idle" && status !== "running")) return;
+    const command = findSlashCommand(trimmed);
+    if (command && !allowSlashCommand) {
+      setInterceptedCommand(command);
+      return;
+    }
+    if (sendGuardRef.current === trimmed) return;
+    sendGuardRef.current = trimmed;
+    const hostEchoCount = transcript.messages.filter((message) => message.role === "user" && message.text === trimmed).length;
+    const echoAllowance = hostEchoCount + optimisticMessages.filter((message) => message.text === trimmed && hostEchoCount <= (message.hostEchoCount ?? 0)).length;
+    const socket = socketRef.current;
+    const submitted = allowSlashCommand ? text : trimmed;
+    setSendError(null);
+    void socket.send({ t: "prompt", text: submitted }).then((sent) => {
+      if (sent) {
+        setOptimisticMessages((prev) => [...prev, {
+          id: `user-${++localIdRef.current}`,
+          role: "user",
+          text: submitted,
+          awaitingHost: status === "running",
+          hostEchoCount: echoAllowance,
+        }]);
+        inputValueRef.current = "";
+        setInputText("");
+        onDraftChange?.("");
+        setInterceptedCommand(null);
+        return;
+      }
+      sendGuardRef.current = null;
+      setSendError("Not connected — prompt not sent. Draft kept; retry when connected.");
+    });
 
-    setIsSending(true);
-    const idempotencyKey = crypto.randomUUID();
+  };
+  const handleSendPrompt = (event: React.FormEvent): void => {
+    event.preventDefault();
+    sendPrompt(inputValueRef.current);
+  };
 
-    // Optimistically render user message
-    setMessages((prev) => [
-      ...prev,
-      { id: `user-${idempotencyKey}`, role: "user", text },
-    ]);
-    setInputText("");
+  const updateDraft = (value: string): void => {
+    inputValueRef.current = value;
+    setInputText(value);
+    sendGuardRef.current = null;
+    setSendError(null);
+    setInterceptedCommand(null);
+    onDraftChange?.(value);
+  };
+  const sendSlashAsText = (): void => sendPrompt(inputValueRef.current, true);
 
-    socketRef.current.send({
-      t: "prompt",
-      text,
-      idempotencyKey,
+  const openCommandAction = (): void => {
+    setInterceptedCommand(null);
+    if (modelControlsRef.current) modelControlsRef.current.open = true;
+    modelInputRef.current?.focus();
+  };
+
+  const handleUiResponse = (value: string | undefined, reqId?: number): void => {
+    const targetReqId = reqId ?? transcriptRef.current.uiRequests.current?.reqId;
+    if (targetReqId === undefined || !socketRef.current || pendingUiResponsesRef.current.has(targetReqId)) return;
+    const requests = transcriptRef.current.uiRequests;
+    if (requests.current?.reqId !== targetReqId && !requests.queue.some((request) => request.reqId === targetReqId)) return;
+    pendingUiResponsesRef.current.add(targetReqId);
+    const socket = socketRef.current;
+    void socket.send({ t: "ui-response", reqId: targetReqId, value }).then((sent) => {
+      pendingUiResponsesRef.current.delete(targetReqId);
+      if (sent) updateTranscript({ t: "ui-request-end", reqId: targetReqId });
+      else setSendError("Not connected — approval response not sent. Request remains open; retry when connected.");
     });
   };
 
-  // Send stop / abort
   const handleStop = () => {
-    if (socketRef.current) {
-      socketRef.current.send({ t: "abort" });
-    }
-    setIsSending(false);
+    socketRef.current?.send({ t: "abort" });
   };
 
   const handleSaveModel = async () => {
@@ -378,44 +404,43 @@ export function ConversationView({ conversationId, onBack }: ConversationViewPro
     } else setModelMessage(result.error.message);
   };
 
-  // Answer UI approval
-  const handleUiResponse = (value: string | undefined, reqId?: number) => {
-    const targetReqId = reqId ?? activeUiRequest?.reqId;
-    if (targetReqId === undefined || !socketRef.current) return;
 
-    // Latch: exactly one response per reqId; never answer a settled request
-    if (settledReqIdsRef.current.has(targetReqId)) return;
-    settledReqIdsRef.current.add(targetReqId);
-
-    socketRef.current.send({
-      t: "ui-response",
-      reqId: targetReqId,
-      value,
-    });
-
-    setUiRequestTimedOut(false);
-    setUiRequests((prev) => {
-      if (prev.current?.reqId === targetReqId) {
-        const [next, ...rest] = prev.queue;
-        return { current: next ?? null, queue: rest };
+  const handleFetchTranscript = (agentId: string) => {
+    if (!socketRef.current || [...transcriptRequestsRef.current.values()].some((request) => request.agentId === agentId)) return;
+    const reqId = reqIdCounterRef.current++;
+    if (transcriptRequestsRef.current.size >= MAX_TRANSCRIPT_REQUESTS) {
+      const oldestId = transcriptRequestsRef.current.keys().next().value;
+      if (oldestId !== undefined) {
+        const request = transcriptRequestsRef.current.get(oldestId)!;
+        clearTimeout(request.timer);
+        transcriptRequestsRef.current.delete(oldestId);
+        transcriptRef.current = forgetTranscriptRequest(transcriptRef.current, oldestId);
       }
-      return {
-        current: prev.current,
-        queue: prev.queue.filter((r) => r.reqId !== targetReqId),
-      };
+    }
+    transcriptRef.current = trackTranscriptRequest(transcriptRef.current, reqId, agentId);
+    setTranscript(transcriptRef.current);
+    setTranscriptErrors((prev) => {
+      if (!(agentId in prev)) return prev;
+      const next = { ...prev };
+      delete next[agentId];
+      return next;
     });
+    const timer = setTimeout(() => {
+      transcriptRequestsRef.current.delete(reqId);
+      transcriptRef.current = forgetTranscriptRequest(transcriptRef.current, reqId);
+      setTranscript(transcriptRef.current);
+      setTranscriptErrors((prev) => ({ ...prev, [agentId]: "Transcript request timed out." }));
+    }, TRANSCRIPT_REQUEST_TIMEOUT_MS);
+    transcriptRequestsRef.current.set(reqId, { agentId, timer });
+    socketRef.current.send({ t: "fetch-transcript", reqId, agentId, fromByte: 0 });
   };
 
-  // Fetch subagent transcript
-  const handleFetchTranscript = (agentId: string) => {
-    if (!socketRef.current) return;
-    const reqId = reqIdCounterRef.current++;
-    socketRef.current.send({
-      t: "fetch-transcript",
-      reqId,
-      agentId,
-      fromByte: 0,
-    });
+  const handleCloseSubagents = () => {
+    for (const request of transcriptRequestsRef.current.values()) clearTimeout(request.timer);
+    transcriptRequestsRef.current.clear();
+    transcriptRef.current = clearTranscriptRequests(transcriptRef.current);
+    setTranscript(transcriptRef.current);
+    setShowSubagents(false);
   };
 
   return (
@@ -460,25 +485,29 @@ export function ConversationView({ conversationId, onBack }: ConversationViewPro
           )}
         </div>
       </div>
-      <section className="model-controls" aria-label="Conversation model">
-        <label htmlFor="conversation-model">Model</label>
-        <input
-          id="conversation-model"
-          value={modelDraft}
-          maxLength={128}
-          onChange={(event) => setModelDraft(event.target.value)}
-          placeholder="Enter OMP model"
-          aria-describedby="model-launch-note"
-        />
-        <button type="button" onClick={handleSaveModel} disabled={modelBusy || !modelDraft.trim()}>
-          Save model
-        </button>
-        <button type="button" className="ghost" onClick={handleRestart} disabled={modelBusy || !modelDraft.trim()}>
-          Save &amp; restart agent
-        </button>
-        <span id="model-launch-note">Model changes apply on the next launch of this conversation, not immediately.</span>
-        {modelMessage && <span role="status">{modelMessage}</span>}
-      </section>
+      <details className="model-controls-disclosure" ref={modelControlsRef}>
+        <summary>Conversation model settings</summary>
+        <section className="model-controls" aria-label="Conversation model">
+          <label htmlFor="conversation-model">Model</label>
+          <input
+            id="conversation-model"
+            ref={modelInputRef}
+            value={modelDraft}
+            maxLength={128}
+            onChange={(event) => setModelDraft(event.target.value)}
+            placeholder="Enter OMP model"
+            aria-describedby="model-launch-note"
+          />
+          <button type="button" onClick={handleSaveModel} disabled={modelBusy || !modelDraft.trim()}>
+            Save model
+          </button>
+          <button type="button" className="ghost" onClick={handleRestart} disabled={modelBusy || !modelDraft.trim()}>
+            Save &amp; restart agent
+          </button>
+          <span id="model-launch-note">Model changes apply on the next launch of this conversation, not immediately.</span>
+          {modelMessage && <span role="status">{modelMessage}</span>}
+        </section>
+      </details>
 
       {/* Accessible Status Banners */}
       {status === "disconnected" && (
@@ -514,9 +543,14 @@ export function ConversationView({ conversationId, onBack }: ConversationViewPro
           <span>Connecting to the agent…</span>
         </div>
       )}
+      {transcript.notice && (
+        <div className={`banner ${transcript.notice.level}`} role="status">
+          <span>{transcript.notice.message}</span>
+        </div>
+      )}
 
-      {/* Messages area */}
-      <div className="messages-scroll">
+      <div className="messages-scroll" ref={messagesScrollRef} role="region" aria-label="Conversation transcript">
+        <div className="messages-content" ref={messagesContentRef}>
         {/* Honest link_unavailable / Attach instructions card */}
         {linkUnavailable && (
           <div className="card" style={{ borderColor: "var(--warning)", backgroundColor: "#1e180d" }}>
@@ -558,21 +592,7 @@ export function ConversationView({ conversationId, onBack }: ConversationViewPro
           </div>
         )}
 
-        {messages.map((msg) => (
-          <div key={msg.id} className={`message-card ${msg.role}`}>
-            <div style={{ fontSize: "0.75rem", color: "var(--text-muted)", marginBottom: "4px", textTransform: "capitalize" }}>
-              {msg.role} {msg.toolName ? `(${msg.toolName})` : ""}
-            </div>
-            {msg.role === "tool" ? (
-              <details>
-                <summary>{msg.toolName ?? "Tool Result"} {msg.isError ? "(Error)" : ""}</summary>
-                <pre><code>{msg.text}</code></pre>
-              </details>
-            ) : (
-              <div>{renderMarkdown(msg.text)}</div>
-            )}
-          </div>
-        ))}
+        {messages.map((message) => <MessageRow key={message.id} message={message} />)}
 
         {/* Streaming assistant message */}
         {streamingText && (
@@ -580,7 +600,7 @@ export function ConversationView({ conversationId, onBack }: ConversationViewPro
             <div style={{ fontSize: "0.75rem", color: "var(--primary)", marginBottom: "4px" }}>
               Assistant (streaming…)
             </div>
-            <div>{renderMarkdown(streamingText)}</div>
+            <div className="message-content">{renderMarkdown(streamingText)}</div>
           </div>
         )}
 
@@ -595,77 +615,96 @@ export function ConversationView({ conversationId, onBack }: ConversationViewPro
                 </span>
               )}
             </div>
-            <p style={{ marginBottom: "12px", fontSize: "0.95rem" }}>{activeUiRequest.prompt}</p>
+            <p style={{ marginBottom: "12px", fontSize: "0.95rem" }}>{activeUiRequest.title}</p>
 
-            {activeUiRequest.type === "select" && activeUiRequest.options && (
-              <div style={{ display: "flex", flexWrap: "wrap", gap: "8px", marginBottom: "12px" }}>
-                {activeUiRequest.options.map((opt) => {
-                  const label = typeof opt === "string" ? opt : opt.label;
-                  return (
-                    <button
-                      key={label}
-                      type="button"
-                      className="primary"
-                      onClick={() => handleUiResponse(label, activeUiRequest.reqId)}
-                    >
-                      {label}
-                    </button>
-                  );
-                })}
-              </div>
+            {activeUiRequest.kind === "select" ? (
+              <>
+                {activeUiRequest.helpText && <p style={{ marginBottom: "8px", color: "var(--text-muted)" }}>{activeUiRequest.helpText}</p>}
+                <div style={{ display: "flex", flexWrap: "wrap", gap: "8px", marginBottom: "12px" }}>
+                  {activeUiRequest.options.map((option, index) => {
+                    const label = typeof option === "string" ? option : option.label;
+                    const checked = activeUiRequest.checkedIndices?.includes(index) ?? false;
+                    const selected = activeUiRequest.initialIndex === index || checked;
+                    return (
+                      <button key={`${activeUiRequest.reqId}-${index}-${label}`} type="button" className={/\b(deny|reject|decline|refuse|disallow|cancel|no)\b/i.test(label) ? "ghost" : "primary"} onClick={() => handleUiResponse(label, activeUiRequest.reqId)}>
+                        {activeUiRequest.selectionMarker === "checkbox" ? (checked ? "☑ " : "☐ ") : (selected ? "◉ " : "○ ")}
+                        {label}
+                        {typeof option !== "string" && option.description && <><br /><small>{option.description}</small></>}
+                      </button>
+                    );
+                  })}
+                </div>
+                {activeUiRequest.markableCount !== undefined && <p style={{ color: "var(--text-muted)" }}>Choose up to {activeUiRequest.markableCount} options.</p>}
+              </>
+            ) : (
+              <>
+                <textarea value={uiEditorValue} onChange={(event) => setUiEditorValue(event.target.value)} rows={4} />
+                <button type="button" className="primary" onClick={() => handleUiResponse(uiEditorValue, activeUiRequest.reqId)}>Submit</button>
+              </>
             )}
-
-            <div style={{ display: "flex", gap: "8px" }}>
-              <button
-                type="button"
-                className="primary"
-                onClick={() => handleUiResponse("approve", activeUiRequest.reqId)}
-              >
-                Approve
-              </button>
-              <button
-                type="button"
-                onClick={() => handleUiResponse("reject", activeUiRequest.reqId)}
-              >
-                Reject
-              </button>
-            </div>
           </div>
         )}
 
-        {uiRequestTimedOut && (
-          <div role="status" style={{ padding: "8px 12px", backgroundColor: "#222", borderRadius: "var(--radius)", fontSize: "0.85rem", color: "var(--text-muted)" }}>
-            Previous approval request timed out.
-          </div>
-        )}
 
-        <div ref={messagesEndRef} />
+        </div>
       </div>
+      {isDetached && commandSuggestions.length === 0 && !interceptedCommand && <button type="button" className="latest-button" onClick={goToLatest}>↓ Latest</button>}
 
       {/* Composer */}
+      {commandSuggestions.length > 0 && !interceptedCommand && (
+        <div className="composer-suggestions" aria-label="Slash command suggestions">
+          {commandSuggestions.map((command) => (
+            <button
+              key={command.name}
+              type="button"
+              className="command-suggestion"
+              onClick={() => { updateDraft(command.name); composerRef.current?.focus(); }}
+            >
+              <span><code>{command.name}</code> — {command.description}</span>
+              {command.availability !== "app_action" && <small>{command.availability === "terminal_only" ? "Terminal only" : "Not a command"}</small>}
+            </button>
+          ))}
+        </div>
+      )}
+      {interceptedCommand && (
+        <div className="slash-command-intercept">
+          <strong>{interceptedCommand.name}</strong>
+          <p>{interceptedCommand.explanation}</p>
+          {interceptedCommand.availability === "terminal_only" && <p>Terminal only — not sent to the live session.</p>}
+          {interceptedCommand.availability === "app_action" && (
+            <button type="button" onClick={openCommandAction}>Open model controls</button>
+          )}
+          <button type="button" className="primary" onClick={sendSlashAsText}>Send as plain text anyway</button>
+          <button type="button" className="ghost" onClick={() => setInterceptedCommand(null)}>Cancel</button>
+        </div>
+      )}
       <form onSubmit={handleSendPrompt} className="composer-container">
         <textarea
           className="composer-input"
-          placeholder={isSending ? "Turn in flight…" : "Send instructions to agent…"}
+          placeholder={status === "running" ? "Turn in flight — send a follow-up…" : "Send instructions to agent…"}
           value={inputText}
-          onChange={(e) => setInputText(e.target.value)}
-          disabled={isSending || status === "disconnected"}
+          ref={composerRef}
+          onChange={(event) => updateDraft(event.target.value)}
+          disabled={status === "disconnected" || status === "unknown" || status === "connecting" || status === "reconnecting"}
           rows={1}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey) {
-              e.preventDefault();
-              handleSendPrompt(e);
+          onCompositionStart={() => { composingRef.current = true; }}
+          onCompositionEnd={() => { setTimeout(() => { composingRef.current = false; }, 0); }}
+          onKeyDown={(event) => {
+            if (shouldSubmitOnEnter(event, composingRef.current)) {
+              event.preventDefault();
+              handleSendPrompt(event);
             }
           }}
         />
         <button
           type="submit"
           className="primary"
-          disabled={isSending || !inputText.trim() || status === "disconnected"}
+          disabled={!inputText.trim() || status === "disconnected" || status === "unknown" || status === "connecting" || status === "reconnecting"}
           style={{ minHeight: "44px", minWidth: "64px" }}
         >
-          {isSending ? "…" : "Send"}
+          Send
         </button>
+      {sendError && <div className="banner unknown" role="alert">{sendError}</div>}
       </form>
 
       {/* Subagent Panel Modal */}
@@ -674,7 +713,9 @@ export function ConversationView({ conversationId, onBack }: ConversationViewPro
           agents={agents}
           onFetchTranscript={handleFetchTranscript}
           transcripts={transcripts}
-          onClose={() => setShowSubagents(false)}
+          transcriptErrors={transcriptErrors}
+          loadingAgentIds={loadingAgentIds}
+          onClose={handleCloseSubagents}
         />
       )}
       {/* Activity Timeline Modal */}

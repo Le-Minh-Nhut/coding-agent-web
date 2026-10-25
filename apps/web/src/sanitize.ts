@@ -137,93 +137,122 @@ export function parseInline(text: string): React.ReactNode[] {
 }
 
 export function renderMarkdown(markdown: string): React.ReactNode {
-  // Normalize newlines
-  const text = markdown.replace(/\r\n/g, "\n");
-  const lines = text.split("\n");
+  const lines = markdown.replace(/\r\n/g, "\n").split("\n");
   const blocks: React.ReactNode[] = [];
-  let inCodeBlock = false;
-  let codeBlockLines: string[] = [];
   let blockIndex = 0;
 
-  for (let i = 0; i < lines.length; i++) {
+  const isUnorderedItem = (line: string): boolean => /^\s*[-*+]\s+/.test(line);
+  const isOrderedItem = (line: string): boolean => /^\s*\d+[.)]\s+/.test(line);
+  const isTableSeparator = (line: string): boolean =>
+    line.split("|").some((cell) => cell.trim() !== "") &&
+    line.split("|").filter((cell) => cell.trim() !== "").every((cell) => /^:?-{3,}:?$/.test(cell.trim()));
+  const tableCells = (line: string): string[] => {
+    const trimmed = line.trim().replace(/^\|/, "").replace(/\|$/, "");
+    return trimmed.split("|").map((cell) => cell.trim());
+  };
+  const isTable = (index: number): boolean =>
+    index + 1 < lines.length && lines[index]!.includes("|") && isTableSeparator(lines[index + 1]!);
+  const isBlockStart = (index: number): boolean => {
+    const line = lines[index]!;
+    return line.trim() === "" || /^\s{0,3}#{1,6}\s+/.test(line) ||
+      /^\s*```/.test(line) || isUnorderedItem(line) || isOrderedItem(line) || isTable(index);
+  };
+
+  for (let i = 0; i < lines.length;) {
     const line = lines[i]!;
-
-    // Code block toggle ```
-    if (line.trim().startsWith("```")) {
-      if (inCodeBlock) {
-        // End of code block
-        const codeContent = codeBlockLines.join("\n");
-        blocks.push(
-          React.createElement(
-            "pre",
-            { key: blockIndex++ },
-            React.createElement("code", null, codeContent)
-          )
-        );
-        codeBlockLines = [];
-        inCodeBlock = false;
-      } else {
-        inCodeBlock = true;
-      }
-      continue;
-    }
-
-    if (inCodeBlock) {
-      codeBlockLines.push(line);
-      continue;
-    }
-
-    // Blank line
     if (line.trim() === "") {
+      i++;
       continue;
     }
 
-    // Heading: # H1, ## H2, ### H3
-    if (line.startsWith("# ")) {
-      blocks.push(React.createElement("h2", { key: blockIndex++ }, parseInline(line.slice(2))));
-      continue;
-    }
-    if (line.startsWith("## ")) {
-      blocks.push(React.createElement("h3", { key: blockIndex++ }, parseInline(line.slice(3))));
-      continue;
-    }
-    if (line.startsWith("### ")) {
-      blocks.push(React.createElement("h4", { key: blockIndex++ }, parseInline(line.slice(4))));
-      continue;
-    }
-
-    // Unordered list item: - item or * item
-    if (line.startsWith("- ") || line.startsWith("* ")) {
-      blocks.push(
-        React.createElement(
-          "li",
-          { key: blockIndex++, style: { marginLeft: "20px" } },
-          parseInline(line.slice(2))
-        )
-      );
+    const fence = line.match(/^\s{0,3}```\s*([^\s`]*)?.*$/);
+    if (fence) {
+      const language = fence[1] ?? "";
+      const codeLines: string[] = [];
+      i++;
+      while (i < lines.length && !/^\s{0,3}```/.test(lines[i]!)) codeLines.push(lines[i++]!);
+      if (i < lines.length) i++;
+      blocks.push(React.createElement(MarkdownCodeBlock, {
+        key: blockIndex++, code: codeLines.join("\n"), language,
+      }));
       continue;
     }
 
-    // Default paragraph
-    blocks.push(
-      React.createElement(
-        "p",
-        { key: blockIndex++, style: { marginBottom: "8px" } },
-        parseInline(line)
-      )
-    );
-  }
+    const heading = line.match(/^\s{0,3}(#{1,6})\s+(.*)$/);
+    if (heading) {
+      const level = heading[1]!.length;
+      blocks.push(React.createElement(`h${level}`, { key: blockIndex++ }, parseInline(heading[2]!)));
+      i++;
+      continue;
+    }
 
-  // Handle unclosed code block
-  if (inCodeBlock && codeBlockLines.length > 0) {
-    blocks.push(
-      React.createElement(
-        "pre",
-        { key: blockIndex++ },
-        React.createElement("code", null, codeBlockLines.join("\n"))
-      )
-    );
+    if (isTable(i)) {
+      const headers = tableCells(line);
+      i += 2;
+      const rows: string[][] = [];
+      while (i < lines.length && lines[i]!.includes("|") && lines[i]!.trim() !== "") {
+        rows.push(tableCells(lines[i]!));
+        i++;
+      }
+      const table = React.createElement(
+        "table",
+        null,
+        React.createElement("thead", null,
+          React.createElement("tr", null, headers.map((cell, cellIndex) =>
+            React.createElement("th", { key: cellIndex }, parseInline(cell))))),
+        React.createElement("tbody", null, rows.map((row, rowIndex) =>
+          React.createElement("tr", { key: rowIndex }, headers.map((_, cellIndex) =>
+            React.createElement("td", { key: cellIndex }, parseInline(row[cellIndex] ?? "")))))));
+      blocks.push(React.createElement("div", { key: blockIndex++, className: "markdown-table-scroll" }, table));
+      continue;
+    }
+
+    if (isUnorderedItem(line) || isOrderedItem(line)) {
+      const ordered = isOrderedItem(line);
+      const tag = ordered ? "ol" : "ul";
+      const itemPattern = ordered ? /^\s*\d+[.)]\s+/ : /^\s*[-*+]\s+/;
+      const items: React.ReactNode[] = [];
+      while (i < lines.length && (ordered ? isOrderedItem(lines[i]!) : isUnorderedItem(lines[i]!))) {
+        items.push(React.createElement("li", { key: items.length }, parseInline(lines[i]!.replace(itemPattern, ""))));
+        i++;
+      }
+      blocks.push(React.createElement(tag, { key: blockIndex++ }, items));
+      continue;
+    }
+
+    const paragraph: string[] = [];
+    while (i < lines.length && !isBlockStart(i)) paragraph.push(lines[i++]!);
+    if (paragraph.length === 0) paragraph.push(lines[i++]!);
+    blocks.push(React.createElement("p", { key: blockIndex++ }, parseInline(paragraph.join(" "))));
   }
 
   return React.createElement(React.Fragment, null, blocks);
+}
+
+export function MarkdownCodeBlock({ code, language }: { code: string; language: string }): React.ReactElement {
+  const [copyState, setCopyState] = React.useState<"idle" | "copied" | "failed">("idle");
+
+  const copyCode = async (): Promise<void> => {
+    try {
+      if (!navigator.clipboard?.writeText) throw new Error("Clipboard unavailable");
+      await navigator.clipboard.writeText(code);
+      setCopyState("copied");
+    } catch {
+      setCopyState("failed");
+    }
+  };
+
+  return React.createElement(
+    "div",
+    { className: "markdown-code-block" },
+    React.createElement("div", { className: "markdown-code-toolbar" },
+      React.createElement("span", null, language || "Code"),
+      React.createElement("button", {
+        type: "button",
+        className: "markdown-code-copy",
+        onClick: copyCode,
+        "aria-label": "Copy code",
+      }, copyState === "copied" ? "Copied" : copyState === "failed" ? "Copy failed" : "Copy")),
+    React.createElement("pre", null, React.createElement("code", null, code)),
+  );
 }

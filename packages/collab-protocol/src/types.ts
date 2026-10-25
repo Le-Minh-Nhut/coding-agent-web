@@ -30,64 +30,79 @@ export interface ThinkingContent {
 }
 
 export interface RedactedThinkingContent {
-  type: "redacted_thinking";
+  type: "redactedThinking";
   data: string;
 }
 
 export interface ToolCallContent {
-  type: "tool_call";
+  type: "toolCall";
   id: string;
   name: string;
-  args: unknown;
+  arguments: Record<string, unknown>;
   intent?: string;
 }
 
 export type AssistantContent = TextContent | ThinkingContent | RedactedThinkingContent | ToolCallContent;
 
 export interface WireUsage {
-  inputTokens?: number;
-  outputTokens?: number;
-  totalTokens?: number;
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  totalTokens: number;
+  cost: { total: number };
 }
 
 // Messages
 export interface UserMessage {
   role: "user";
   content: string | (TextContent | ImageContent)[];
+  synthetic?: boolean;
+  timestamp: number;
 }
 
 export interface DeveloperMessage {
   role: "developer";
-  content: string;
+  content: string | (TextContent | ImageContent)[];
+  timestamp: number;
 }
 
 export interface AssistantMessage {
   role: "assistant";
   content: AssistantContent[];
-  stopReason?: "stop" | "length" | "toolUse" | "error" | "aborted";
-  usage?: WireUsage;
+  model: string;
+  usage: WireUsage;
+  stopReason: "stop" | "length" | "toolUse" | "error" | "aborted";
+  errorMessage?: string;
+  timestamp: number;
 }
 
+// why: upstream wire uses this persisted role and payload shape, not `tool`/`result` (`packages/wire/src/index.ts:91-99`).
+// Upstream wire calls tool outputs `toolResult`; `tool` is not a Collab role.
 export interface ToolResultMessage {
-  role: "tool";
+  role: "toolResult";
   toolCallId: string;
-  result: unknown;
-  isError?: boolean;
+  toolName: string;
+  content: (TextContent | ImageContent)[];
+  details?: unknown;
+  isError: boolean;
+  timestamp: number;
 }
 
 export type WireMessage = UserMessage | DeveloperMessage | AssistantMessage | ToolResultMessage;
 
 // Session entries
 export interface SessionHeader {
-  sessionId: string;
-  cwd: string;
+  type: "session";
+  id: string;
   title?: string;
-  createdAt?: string;
+  timestamp: string;
+  cwd: string;
 }
 
 export interface EntryBase {
   id: string;
-  parentId?: string | null;
+  parentId: string | null;
   timestamp: string;
 }
 
@@ -99,28 +114,34 @@ export interface MessageEntry extends EntryBase {
 export interface CustomMessageEntry extends EntryBase {
   type: "custom_message";
   customType: string;
-  content: unknown;
-  details?: Record<string, unknown>;
+  content: string | (TextContent | ImageContent)[];
+  details?: unknown;
+  display: boolean;
 }
 
 export interface CompactionEntry extends EntryBase {
   type: "compaction";
   summary: string;
+  shortSummary?: string;
+  firstKeptEntryId: string;
+  tokensBefore: number;
 }
 
 export interface BranchSummaryEntry extends EntryBase {
   type: "branch_summary";
+  fromId: string;
   summary: string;
 }
 
 export interface ModelChangeEntry extends EntryBase {
   type: "model_change";
   model: string;
+  role?: string;
 }
 
 export interface ThinkingLevelChangeEntry extends EntryBase {
   type: "thinking_level_change";
-  thinkingLevel: string;
+  thinkingLevel?: string | null;
 }
 
 export type SessionEntry =
@@ -154,32 +175,45 @@ export type AgentEvent =
 export interface WireModel {
   id: string;
   name: string;
+  provider: string;
+  contextWindow: number | null;
 }
 
 export interface ContextUsage {
-  usedTokens: number;
-  maxTokens: number;
+  tokens: number | null;
+  contextWindow: number | null;
+  percent: number | null;
 }
 
 export interface Participant {
-  peer: number;
   name: string;
+  role: "host" | "guest";
+  readOnly?: boolean;
 }
 
+// why: Collab state exposes `isStreaming`; it does not carry a `busy` alias (`packages/wire/src/index.ts:266-278`).
 export interface SessionState {
+  isStreaming: boolean;
+  queuedMessageCount: number;
+  sessionName?: string;
+  cwd: string;
   model?: WireModel;
   thinkingLevel?: string;
   contextUsage?: ContextUsage;
-  participants?: Participant[];
-  busy?: boolean;
+  participants: Participant[];
+  isAborting?: boolean;
 }
 
+// why: upstream agent snapshots identify display name and tree kind (`packages/wire/src/index.ts:280-289`).
 export interface AgentSnapshot {
   id: string;
-  name: string;
-  status: "idle" | "running" | "completed" | "error" | "killed";
-  task?: string;
-  solutionSpace?: string;
+  displayName: string;
+  kind: "main" | "sub";
+  parentId?: string;
+  status: "running" | "idle" | "parked" | "aborted";
+  hasSessionFile: boolean;
+  createdAt: number;
+  lastActivity: number;
 }
 
 export type BusChannel = "task:subagent:progress" | "task:subagent:lifecycle";
@@ -187,16 +221,27 @@ export type BusChannel = "task:subagent:progress" | "task:subagent:lifecycle";
 // UI Request / approval
 export type CollabUiSelectItem = string | { label: string; description?: string };
 
+// why: wire requests preserve `kind`, `title`, and select choices (`packages/wire/src/index.ts:359-376`).
 export type CollabUiRequestDraft =
-  | { type: "select"; prompt: string; options: CollabUiSelectItem[] }
-  | { type: "editor"; prompt: string; text?: string; placeholder?: string };
+  | {
+      kind: "select";
+      title: string;
+      options: CollabUiSelectItem[];
+      initialIndex?: number;
+      selectionMarker?: "radio" | "checkbox";
+      checkedIndices?: number[];
+      markableCount?: number;
+      helpText?: string;
+    }
+  | { kind: "editor"; title: string; prefill?: string };
 
 export type CollabUiRequest = CollabUiRequestDraft & { reqId: number };
 
+// why: upstream prompt frame has no idempotency key; host reads only text/images (`packages/wire/src/index.ts:328-347`; `packages/coding-agent/src/collab/host.ts:997-1011`).
 // Guest -> Host frames
 export type GuestFrame =
-  | { t: "hello"; proto: number; name: string; writeToken?: Uint8Array | string }
-  | { t: "prompt"; text: string; images?: ImageContent[]; idempotencyKey?: string }
+  | { t: "hello"; proto: number; name: string; writeToken?: string }
+  | { t: "prompt"; text: string; images?: ImageContent[] }
   | { t: "ui-response"; reqId: number; value?: string }
   | { t: "abort" }
   | { t: "agent-cmd"; cmd: "chat" | "kill" | "revive"; agentId: string; text?: string }

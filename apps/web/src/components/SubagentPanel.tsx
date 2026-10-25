@@ -5,13 +5,16 @@ interface SubagentPanelProps {
   agents: AgentSnapshot[];
   onFetchTranscript: (agentId: string) => void;
   transcripts: Record<string, string>;
+  transcriptErrors: Record<string, string>;
+  loadingAgentIds: string[];
   onClose: () => void;
 }
-
 export function SubagentPanel({
   agents,
   onFetchTranscript,
   transcripts,
+  transcriptErrors,
+  loadingAgentIds,
   onClose,
 }: SubagentPanelProps) {
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
@@ -40,30 +43,27 @@ export function SubagentPanel({
               >
                 ← Back
               </button>
-              <h4>{selectedAgent.name}</h4>
+              <h4>{selectedAgent.displayName}</h4>
               <span className={`badge ${selectedAgent.status}`}>{selectedAgent.status}</span>
             </div>
 
-            {selectedAgent.task && (
-              <p style={{ fontSize: "0.85rem", color: "var(--text-muted)", marginBottom: "8px" }}>
-                Task: {selectedAgent.task}
-              </p>
-            )}
-
             <div style={{ marginTop: "12px" }}>
               <h5 style={{ marginBottom: "6px" }}>Transcript</h5>
-              {currentTranscript ? (
+              {transcriptErrors[selectedAgent.id] ? (
+                <div style={{ padding: "16px", textAlign: "center", color: "var(--text-muted)" }}>
+                  <p role="alert">{transcriptErrors[selectedAgent.id]}</p>
+                  <button type="button" className="primary" disabled={loadingAgentIds.includes(selectedAgent.id)} onClick={() => onFetchTranscript(selectedAgent.id)}>
+                    {loadingAgentIds.includes(selectedAgent.id) ? "Loading transcript…" : "Retry transcript"}
+                  </button>
+                </div>
+              ) : currentTranscript !== undefined ? (
                 <pre style={{ maxHeight: "300px", overflowY: "auto" }}>
                   <code>{currentTranscript}</code>
                 </pre>
               ) : (
                 <div style={{ padding: "16px", textAlign: "center", color: "var(--text-muted)" }}>
-                  <button
-                    type="button"
-                    className="primary"
-                    onClick={() => onFetchTranscript(selectedAgent.id)}
-                  >
-                    Load Transcript
+                  <button type="button" className="primary" disabled={loadingAgentIds.includes(selectedAgent.id)} onClick={() => onFetchTranscript(selectedAgent.id)}>
+                    {loadingAgentIds.includes(selectedAgent.id) ? "Loading transcript…" : "Load Transcript"}
                   </button>
                 </div>
               )}
@@ -89,14 +89,9 @@ export function SubagentPanel({
                   }}
                 >
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                    <span style={{ fontWeight: 600 }}>{agent.name}</span>
+                    <span style={{ fontWeight: 600 }}>{agent.displayName}</span>
                     <span className={`badge ${agent.status}`}>{agent.status}</span>
                   </div>
-                  {agent.task && (
-                    <p style={{ fontSize: "0.85rem", color: "var(--text-muted)", marginTop: "4px" }}>
-                      {agent.task}
-                    </p>
-                  )}
                 </div>
               ))
             )}

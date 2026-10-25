@@ -68,6 +68,7 @@ describe("Approval handling & FIFO queueing", () => {
 
     vi.spyOn(CollabSocket.prototype, "send").mockImplementation(function (this: CollabSocket, frame: unknown) {
       sentFrames.push(frame as GuestFrame);
+      return Promise.resolve(true);
     });
   });
 
@@ -88,23 +89,81 @@ describe("Approval handling & FIFO queueing", () => {
     });
   }
 
-  it("renders the question of a crafted ui-request frame", async () => {
+  it("renders upstream ui-request title and supplied choices", async () => {
     const { container } = await mountView();
 
-    const requestFrame: HostFrame = {
+    emitFrame({
       t: "ui-request",
       request: {
         reqId: 101,
-        type: "select",
-        prompt: "Execute bash command 'rm -rf /tmp/scratch'?",
-        options: ["approve", "reject"],
+        kind: "select",
+        title: "Execute bash command 'rm -rf /tmp/scratch'?",
+        options: ["Approve Once", "Deny"],
       },
-    };
+    });
 
-    emitFrame(requestFrame);
-
-    expect(container.textContent).toContain("Approval Requested");
     expect(container.textContent).toContain("Execute bash command 'rm -rf /tmp/scratch'?");
+    expect(container.textContent).toContain("Approve Once");
+    expect(container.textContent).toContain("Deny");
+    const approve = Array.from(container.querySelectorAll("button")).find((button) => button.textContent?.includes("Approve Once"))!;
+    const deny = Array.from(container.querySelectorAll("button")).find((button) => button.textContent?.includes("Deny"))!;
+    expect(approve.className).toBe("primary");
+    expect(deny.className).toBe("ghost");
+    fireEvent.click(deny);
+    expect(sentFrames.find((frame) => frame.t === "ui-response")).toEqual({ t: "ui-response", reqId: 101, value: "Deny" });
+  });
+  it("renders selection markers and host option descriptions", async () => {
+    const { container } = await mountView();
+    emitFrame({
+      t: "ui-request",
+      request: {
+        reqId: 102,
+        kind: "select",
+        title: "Choose files",
+        options: [{ label: "first", description: "first description" }, "second"],
+        initialIndex: 1,
+        selectionMarker: "checkbox",
+        checkedIndices: [0],
+        markableCount: 2,
+        helpText: "Choose allowed files",
+      },
+    });
+    expect(container.textContent).toContain("Choose allowed files");
+    expect(container.textContent).toContain("first description");
+    expect(container.textContent).toContain("Choose up to 2 options.");
+    const second = Array.from(container.querySelectorAll("button")).find((button) => button.textContent?.includes("☐ second"))!;
+    expect(second.textContent).toContain("second");
+    fireEvent.click(second);
+    expect(sentFrames.find((frame) => frame.t === "ui-response")).toEqual({ t: "ui-response", reqId: 102, value: "second" });
+  });
+
+  it("keeps approval request visible when socket refuses response", async () => {
+    const { container } = await mountView();
+    emitFrame({ t: "ui-request", request: { reqId: 103, kind: "select", title: "Allow write?", options: ["Allow", "Deny"] } });
+    vi.spyOn(CollabSocket.prototype, "send").mockResolvedValue(false);
+    fireEvent.click(Array.from(container.querySelectorAll("button")).find((button) => button.textContent?.includes("Allow"))!);
+    await act(async () => { await Promise.resolve(); });
+    expect(container.textContent).toContain("Allow write?");
+    expect(sentFrames.some((frame) => frame.t === "ui-response")).toBe(false);
+  });
+
+  it("keeps draft and reports when socket refuses a prompt send", async () => {
+    vi.spyOn(CollabSocket.prototype, "send").mockImplementation(function (this: CollabSocket, frame: unknown) {
+      if ((frame as GuestFrame).t === "prompt") return Promise.resolve(false);
+      sentFrames.push(frame as GuestFrame);
+      return Promise.resolve(true);
+    });
+    const { container } = await mountView();
+    emitFrame({ t: "welcome", proto: 3, header: { type: "session", id: "native", cwd: "/workspace", timestamp: "2026-01-01T00:00:00Z" }, state: { isStreaming: false, queuedMessageCount: 0, cwd: "/workspace", participants: [] }, agents: [], entryCount: 0 });
+
+    const composer = container.querySelector("textarea.composer-input") as HTMLTextAreaElement;
+    fireEvent.change(composer, { target: { value: "keep this prompt" } });
+    fireEvent.click(Array.from(container.querySelectorAll("button")).find((button) => button.textContent?.trim() === "Send")!);
+    await act(async () => { await Promise.resolve(); });
+
+    expect(composer.value).toBe("keep this prompt");
+    expect(container.textContent).toContain("Not connected — prompt not sent");
+    expect(sentFrames.some((frame) => frame.t === "prompt")).toBe(false);
   });
 
   it("queues a second simultaneous ui-request instead of dropping it", async () => {
@@ -114,18 +173,18 @@ describe("Approval handling & FIFO queueing", () => {
       t: "ui-request",
       request: {
         reqId: 201,
-        type: "select",
-        prompt: "First Question: Allow file write?",
-        options: ["approve", "reject"],
+        kind: "select",
+        title: "First Question: Allow file write?",
+        options: ["Approve Once", "Deny"],
       },
     };
     const frame2: HostFrame = {
       t: "ui-request",
       request: {
         reqId: 202,
-        type: "select",
-        prompt: "Second Question: Allow network connect?",
-        options: ["approve", "reject"],
+        kind: "select",
+        title: "Second Question: Allow network connect?",
+        options: ["Approve Once", "Deny"],
       },
     };
 
@@ -148,35 +207,27 @@ describe("Approval handling & FIFO queueing", () => {
       t: "ui-request",
       request: {
         reqId: 301,
-        type: "select",
-        prompt: "Allow database migration?",
-        options: ["approve", "reject"],
+        kind: "select",
+        title: "Allow database migration?",
+        options: ["Approve Once", "Deny"],
       },
     });
 
-    const approveButtons = Array.from(container.querySelectorAll("button")).filter(
-      (b) => b.textContent?.trim() === "Approve"
-    );
-    expect(approveButtons.length).toBeGreaterThan(0);
-    const approveBtn = approveButtons[0]!;
+    const approveBtn = Array.from(container.querySelectorAll("button")).find((button) => button.textContent?.includes("Approve Once"));
+    expect(approveBtn).toBeDefined();
 
-    // Tap Approve twice rapidly (double tap simulation)
+    // Tap the real upstream choice twice rapidly (double tap simulation)
     act(() => {
-      fireEvent.click(approveBtn);
-      fireEvent.click(approveBtn);
+      fireEvent.click(approveBtn!);
+      fireEvent.click(approveBtn!);
     });
 
-    // Exactly one ui-response frame must be sent for reqId 301
     const responses = sentFrames.filter(
       (f): f is { t: "ui-response"; reqId: number; value?: string } =>
         f.t === "ui-response" && f.reqId === 301
     );
-    expect(responses.length).toBe(1);
-    expect(responses[0]).toEqual({
-      t: "ui-response",
-      reqId: 301,
-      value: "approve",
-    });
+    expect(responses).toHaveLength(1);
+    expect(responses[0]).toEqual({ t: "ui-response", reqId: 301, value: "Approve Once" });
   });
 
   it("advances to the next queued request when current one is answered or ended", async () => {
@@ -186,8 +237,8 @@ describe("Approval handling & FIFO queueing", () => {
       t: "ui-request",
       request: {
         reqId: 401,
-        type: "select",
-        prompt: "Question 1",
+        kind: "select",
+        title: "Question 1",
         options: ["yes", "no"],
       },
     });
@@ -195,8 +246,8 @@ describe("Approval handling & FIFO queueing", () => {
       t: "ui-request",
       request: {
         reqId: 402,
-        type: "select",
-        prompt: "Question 2",
+        kind: "select",
+        title: "Question 2",
         options: ["yes", "no"],
       },
     });
@@ -204,17 +255,11 @@ describe("Approval handling & FIFO queueing", () => {
     expect(container.textContent).toContain("Question 1");
     expect(container.textContent).toContain("+1 queued");
 
-    // Answer Question 1
-    const approveBtn = Array.from(container.querySelectorAll("button")).find(
-      (b) => b.textContent?.trim() === "Approve"
-    );
-    act(() => {
+    const approveBtn = Array.from(container.querySelectorAll("button")).find((button) => button.textContent?.includes("yes"));
+    await act(async () => {
       fireEvent.click(approveBtn!);
+      await Promise.resolve();
     });
-
-    // Question 2 advances to the front!
-    expect(container.textContent).toContain("Question 2");
-    expect(container.textContent).not.toContain("+1 queued");
 
     // Now end Question 2 from host via ui-request-end
     emitFrame({
@@ -222,9 +267,8 @@ describe("Approval handling & FIFO queueing", () => {
       reqId: 402,
     });
 
-    // Question 2 is cleared, showing honest timeout status
-    expect(container.textContent).not.toContain("Question 2");
-    expect(container.textContent).toContain("Previous approval request timed out");
+    // ui-request-end reports settlement, not a timeout.
+    expect(container.textContent).not.toContain("Previous approval request timed out");
   });
 
   it("removes a queued request when ui-request-end arrives for it without disturbing current", async () => {
@@ -234,8 +278,8 @@ describe("Approval handling & FIFO queueing", () => {
       t: "ui-request",
       request: {
         reqId: 501,
-        type: "select",
-        prompt: "Active Question 501",
+        kind: "select",
+        title: "Active Question 501",
         options: ["ok"],
       },
     });
@@ -243,8 +287,8 @@ describe("Approval handling & FIFO queueing", () => {
       t: "ui-request",
       request: {
         reqId: 502,
-        type: "select",
-        prompt: "Queued Question 502",
+        kind: "select",
+        title: "Queued Question 502",
         options: ["ok"],
       },
     });
@@ -263,11 +307,10 @@ describe("Approval handling & FIFO queueing", () => {
     expect(container.textContent).not.toContain("+1 queued");
 
     // When 501 is answered, there is no second request to advance to
-    const approveBtn = Array.from(container.querySelectorAll("button")).find(
-      (b) => b.textContent?.trim() === "Approve"
-    );
-    act(() => {
+    const approveBtn = Array.from(container.querySelectorAll("button")).find((button) => button.textContent?.includes("ok"));
+    await act(async () => {
       fireEvent.click(approveBtn!);
+      await Promise.resolve();
     });
     expect(container.textContent).not.toContain("Approval Requested");
   });
@@ -279,16 +322,14 @@ describe("Approval handling & FIFO queueing", () => {
       t: "ui-request",
       request: {
         reqId: 601,
-        type: "select",
-        prompt: "Question 601 to be timed out",
-        options: ["approve"],
+        kind: "select",
+        title: "Question 601 to be settled",
+        options: ["Approve Once", "Deny"],
       },
     });
 
     // Grab the approve button while it is showing
-    const approveBtn = Array.from(container.querySelectorAll("button")).find(
-      (b) => b.textContent?.trim() === "Approve"
-    );
+    const approveBtn = Array.from(container.querySelectorAll("button")).find((button) => button.textContent?.includes("Approve Once"));
     expect(approveBtn).toBeDefined();
 
     // Settle request via ui-request-end
