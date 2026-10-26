@@ -7,7 +7,7 @@ several times during the project and an unrecorded reversal gets re-litigated.
 
 | Priority | Agent definition | Model | Use for |
 | --- | --- | --- | --- |
-| 1 | `caw-luna`, `caw-luna-scout` | `cx/gpt-6-luna:xhigh` | Everything else, including reading images. Luna remains the image reader; never give images to DeepSeek. |
+| 1 | `caw-luna`, `caw-luna-scout` | `cx/gpt-6-luna:xhigh` or `cx/gpt-6-luna:high` | Everything else, including reading images. Luna remains the image reader; never give images to DeepSeek. |
 | 2 | `caw-deepseek` | `wdb/deepseek-ai/DeepSeek-V4.1-Flash:high` | Long-horizon or token-heavy reviews: whole-file audits, multi-file independent reviews, full test inventories, regression sweeps, bulk doc-consistency passes, and second-opinion passes. |
 | 3 | `caw-gemini` | `ag/gemini-3.8-flash-high` | Do not use; quota exhausted. |
 
@@ -39,10 +39,10 @@ lowest thinking level — observed in a session journal as `"thinkingLevel":"low
 
 State the level in the model id (`cx/gpt-6-luna:xhigh`) and do not pass `effort`.
 
+Owner ruling (2026-10-26): delegated work uses `cx/gpt-6-luna:xhigh` or `cx/gpt-6-luna:high`; do not use the `:max` thinking level.
+
 ## History
 
 History: Gemini-first → Luna-first → Gemini-first again → Luna-first again →
-Luna-default with DeepSeek on bulk review. The latest change refines usage
-policy, not quota reversal: Gemini remains unused after quota exhaustion; Luna
-remains the image reader and default for everything else, while DeepSeek takes
-long/token-heavy reviews.
+Luna-default with DeepSeek on bulk review → owner ruling: delegated work uses
+Luna `:xhigh` or `:high`; never `:max`.

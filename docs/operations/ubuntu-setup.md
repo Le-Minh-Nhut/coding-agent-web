@@ -100,9 +100,45 @@ nothing secret in this file.
 pnpm start
 ```
 
-The first start prints a **one-time setup token** to stdout. Open the app, enter
-that token and choose a password. The token is single-use and the password is
-stored only as a scrypt hash under the state directory with `0600` permissions.
+The first start prints a random bootstrap token to server stdout. It expires
+after 15 minutes and can authenticate once to open a setup-only session; choose
+a password of at least 12 characters, different from the token, to finish
+setup. Until set, that session may only call the set-password route or log out;
+other API routes return `403` with error code `unauthorized`. The password is
+stored as a scrypt hash in `auth-password.json` with `0600` permissions. The
+session cookie remains the same after setup; login with new password returns an
+authenticated session.
+
+The setup-only restriction runs in a global `onRequest` guard for every `/api/*`
+request except `POST /api/auth/set-password` and `POST /api/auth/logout`, so
+routes added later remain blocked by default until the password is set.
+
+Password API contract:
+
+| Route | Request | Success | Errors | Session/cookie effect |
+| --- | --- | --- | --- | --- |
+| `POST /api/auth/login` | `{ "password": string }` | `200 { "ok": true, "data": { "status": "authenticated" | "password_setup_required", "csrfToken": string, "expiresAt": ISO-8601 } }` | `400 bad_request` malformed body; `401 unauthorized` invalid/expired credential | Mints `__Host-caw_session`; pending token gets setup-only session, existing password gets normal session. |
+| `POST /api/auth/set-password` | Pending session cookie, `X-CAW-CSRF`, `{ "password": string }` (12–1024 chars; must differ from setup token) | `200 { "ok": true, "data": { "status": "authenticated", "csrfToken": string, "expiresAt": ISO-8601 } }` | `400 bad_request` invalid/equal-to-token password; `401 unauthorized` no session; `403 unauthorized` setup not pending; `409 conflict_owner` expired/consumed pending record | Keeps setup session cookie, CSRF token, expiry and session ID; promotes current session; invalidates pending token. |
+| `POST /api/auth/change-password` | Normal session cookie, `X-CAW-CSRF`, `{ "currentPassword": string, "newPassword": string }` (new password 12–1024 chars) | `200 { "ok": true, "data": { "changed": true } }` | `400 bad_request` malformed body; `401 unauthorized` missing session or wrong current password; `403 csrf` missing/invalid CSRF | Keeps current cookie/session; revokes every other live session so sessions authenticated with old credential cannot remain active. |
+| `POST /api/auth/logout` | Session cookie, `X-CAW-CSRF` | `200 { "ok": true, "data": { "loggedOut": true } }` | `401 unauthorized` no session; `403 csrf` invalid CSRF | Revokes all sessions and clears current cookie. |
+
+Responses use the common `{ok,data}` / `{ok:false,error:{code,message}}` envelope.
+The login client distinguishes setup from normal access using `data.status`;
+the cookie itself never exposes the bootstrap token.
+
+Older installations have `auth-password.json` in the original `{salt,hash}`
+shape, where the hash was made from the first-run token. Upgrade marks this
+record `kind: "password", legacy: true` without changing its salt or hash, so
+the current credential keeps working; change it via the authenticated password
+route. No forced migration is required.
+
+Forgotten password recovery is local-only: stop the server, then from the repo
+root run `pnpm --filter @caw/server exec tsx src/auth.ts reset` (set the same
+`CAW_STATE_DIR` or `CAW_CONFIG` as the service if non-default). The command
+replaces only `auth-password.json`, leaves other state files untouched, and
+prints a fresh 15-minute bootstrap token to stdout. Restart the server, then
+log in with that token and set a new password. Sessions live only in server
+memory, so stopping the server discards all sessions.
 
 State lives in `~/.local/state/coding-agent-web/` (metadata, password hash `auth-password.json`, and the private tmux socket `tmux.sock`); override with `CAW_STATE_DIR`.
 

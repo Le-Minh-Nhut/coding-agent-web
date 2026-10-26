@@ -105,10 +105,9 @@ error that invalidates our view:
 3. **Intersect.**
    - Conversation has a managed tmux session and its host row exists → adopt the
      host row (`hostInstanceId`, `hostGeneration`, `state` from `busy`/`inputRequired`).
-   - Conversation has a managed tmux session but no host row → the process is
-     alive but not hosting (`relayConnected: false` or hosting stopped). Report
-     `idle`/`running` only from what tmux tells us, and surface "not hosting" as
-     a `statusDetail`. Do not mint a link; there is no room.
+   - Conversation has a live managed tmux process but no positively matched host
+     row → report `unknown` until OMP publishes the room. Do not mint a link;
+     there is no verified room, and do not imply the agent is idle.
    - Conversation has a host row but no managed tmux session → mark `external`.
      This is a session someone started by hand; we may attach a viewer, but we
      must never claim to own its lifecycle.

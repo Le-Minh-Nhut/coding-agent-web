@@ -116,17 +116,22 @@ enumeration through the `omp models --json` adapter. Evidence and scope notes:
 
 - No join/adoption of a live untracked native session; refusal remains fail-closed
   by design. Resume-in-app is for confirmed-free sessions only.
-- Transcript snapshot buffering/reconciliation remains quadratic for very large
-  histories; no large-history scale run was performed.
-- `bus`, notice, compaction, and retry frames are intentionally ignored or only
-  minimally represented; `readDir` pagination is absent; `welcome.readOnly` is
-  not surfaced.
+- Snapshot reduction is indexed rather than quadratic; round-nine benchmark at
+  20,000 entries measured 5,105.65 ms before and 43.94 ms after, output-equivalent.
+- `bus`, notice, compaction, and retry frames remain intentionally ignored or only
+  minimally represented.
+- Directory pagination now uses signed cursors; it is not a snapshot, so changes
+  between pages may duplicate or skip rows.
+- `welcome.readOnly` is surfaced and enforced: the banner appears while composer,
+  approval controls, and Stop are omitted; the host remains the final enforcer.
 - Physical-iPhone behavior (keyboard, safe area, lock/unlock, PWA) is **UNVERIFIED**.
 - The browser's local monotonic `user-${++localIdRef.current}` identifies only an
   optimistic row; no ID travels on the prompt wire. `recordCommandOnce()` exists
   but has no production caller; manual resend after ambiguous delivery can enqueue
   duplicate work. See the idempotency notes in architecture and troubleshooting.
-- Hosted CI for current HEAD is **NOT VERIFIED**.
+- Hosted CI for `53ef59bc9572d7af100ab565496491032abacf2a`: **VERIFIED**; run #7
+  completed with every `verify` step green, including Chromium Browser E2E.
+  `compat` was skipped by design; see `docs/audits/round-9-verification.md`.
 - Directory creation detects and refuses parent/containment changes but has a
   TOCTOU ceiling: portable Node `mkdir` cannot bind atomically to the validated
   parent with `mkdirat`; the race is not claimed closed.
@@ -249,3 +254,38 @@ dropped.
 | Approval (`ui-request`) against a live host that asks a question | Untested end to end — the queue and exactly-once answer are covered by unit tests, but no real host has raised one | Notifications and approval polish deferred by design |
 | Single-process launch guard | A second backend on the same machine would need a cross-process lease | Named as a ceiling in the code |
 | OMP upstream drift | `collab.*` is not a stability guarantee | `scripts/compat-check.mjs`, recorded baseline, upgrade procedure |
+
+## Round 9 — external audit fixes and acceptance
+
+Final code HEAD `53ef59bc9572d7af100ab565496491032abacf2a`. Hosted CI run #7 completed successfully: every `verify` step passed, including Browser E2E; the manual-only `compat` job was skipped by design.
+
+### Delivered
+
+- Closed A01–A12 from the external audit: process-lineage host identity and strict resume-journal guards; fail-closed overlay and honest startup state; composer error/reconnect/draft fixes; mobile Enter behavior; incremental subagent transcript reads; one-time setup token and reset path; indexed snapshot reduction; pinned manual compatibility workflow; Latest layout geometry. Details and evidence: `docs/audits/round-9-verification.md`.
+- Added model catalog API/UI with saved preference distinct from effective model, bounded saved-history API, signed browse pagination, and link capability ceilings.
+- Fixed write-token loss before guest `hello`, which made app-managed sessions read-only, and host startup refusal behavior: restore draft/remove optimistic row/show exact host error without automatic resend.
+
+### Verification
+
+| Check | Result |
+|---|---|
+| `pnpm -r typecheck` | Pass, 8 projects |
+| `npx vitest run` | 43 files passed; 426 passed, 8 skipped |
+| `TMPDIR=$HOME/.cache npx playwright test --project=chromium --workers=1` | 43/43 passed |
+| `node scripts/compat-check.mjs` | 17 ok / 1 warn / 0 fail |
+| Real OMP acceptance | 15 PASS / 2 FAIL / 0 SKIP; 30.26 seconds; details and limitations in the audit and acceptance plan |
+| Hosted CI | Run #7, SHA `53ef59bc9572d7af100ab565496491032abacf2a`: all `verify` steps passed; `compat` skipped by design |
+
+### Known gaps — round nine
+
+- No join/adoption of a live untracked native session; fail-closed refusal remains.
+- Restart/resume is not proven against a real agent: acceptance check10 filled a `<select>` as if it were a text field, so restart action never ran. Current evidence is unit tests only.
+- Duplicate-resend risk remains unproven: transcript showed one row but harness found zero `user`-role journal rows because OMP stores the pre-turn prompt under another role.
+- `bus`, notice, compaction, and retry frames remain minimally represented.
+- Directory paging is not a snapshot; changing contents can duplicate or skip entries between pages.
+- Directory creation retains detect-and-refuse TOCTOU limits.
+- Physical-iPhone behavior remains unverified.
+- Hosted manual compatibility job has never been dispatched.
+- A provider key under `~/.omp` appeared once in an agent transcript during this round; owner may wish to rotate it.
+
+The round-8 audit remains committed and unchanged. Round-9 report: `docs/audits/round-9-verification.md`.

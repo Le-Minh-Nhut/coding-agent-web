@@ -64,6 +64,9 @@ The findings above are the original source snapshot; current implementation stat
 - **R11 — open by choice:** tool output stays collapsed with error marker; Activity payloads are not truncated. API paging limits event count, not payload bytes (`ConversationView.tsx:59-63`; `ActivityPanel.tsx:138-195`). No measured oversized output justified a truncation change.
 - **R12 — fixed:** model editing is inside collapsed native disclosure (`ConversationView.tsx:469-491`; `styles.css:341-353`).
 - **R13 — partial:** stable settled rows are memoized and assistant updates are coalesced to 100ms (`ConversationView.tsx:52-69,153-169`). `ActivityPanel` still sorts and maps loaded events on parent rerenders (`ActivityPanel.tsx:80,138-182`). Virtualization remains unjustified absent a measured mobile bottleneck; memoize ActivityPanel only if this path is observed to matter.
+- **R14 — fixed:** if a writable send is accepted by the socket but host returns the exact startup-refusal error, remove the optimistic row and restore the unchanged draft through `onDraftChange`; the host error remains in the alert and Send stays available for a deliberate retry (`ConversationView.tsx:34-42,177-184,220-229,463-491,880-908`; regression covers refusal, ordinary success, socket `false`, and explicit second tap at `tests/web/mobile-reading-ux.test.tsx:204-241`). No auto-resend.
+- **Startup visibility:** conversation state `starting` shows an informational banner without disabling composer (`ConversationView.tsx:735-738,880-906`).
+- **Checks for R14:** `npx tsc -p apps/web/tsconfig.json --noEmit` passed; `npx vitest run tests/web/mobile-reading-ux.test.tsx` passed, 18/18 tests. No build, E2E, or full-suite rerun.
 
 ### Current scroll verdict
 

@@ -71,7 +71,19 @@ JSON
 pnpm start
 ```
 
-First run prints a one-time setup token; set your password with it in the web UI.
+First start prints a random bootstrap token to server stdout. It expires after
+15 minutes and can authenticate once to open a setup-only session; choose a
+password of at least 12 characters, different from the token, to finish setup.
+That session can only set the password or log out. A normal password login works as before.
+Existing installs with the old token-derived password hash remain valid and are
+marked as legacy in `auth-password.json`; change that credential after login
+with `POST /api/auth/change-password` if you want to replace it.
+If you forget the password, stop the service and run
+`pnpm --filter @caw/server exec tsx src/auth.ts reset` locally. It writes a new
+15-minute setup token to stdout and replaces only the auth record. Restart the
+service, log in with that token, and set a new password. Password changes
+revoke all sessions except the current one. Use the same `CAW_STATE_DIR` or
+`CAW_CONFIG` overrides as the server; reset command runs locally, not over HTTP.
 Then open `http://127.0.0.1:8791` locally, or follow
 `docs/operations/iphone-setup.md` to reach it from your phone.
 
