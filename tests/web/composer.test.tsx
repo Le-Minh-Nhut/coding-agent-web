@@ -11,6 +11,8 @@ vi.mock("../../apps/web/src/api.js", () => ({
     getConversation: vi.fn(),
     getAttachInstructions: vi.fn(),
     getConversationLink: vi.fn(),
+    getConversationHistory: vi.fn().mockResolvedValue({ ok: false, error: { code: "not_found", message: "No history" } }),
+    getModels: vi.fn().mockResolvedValue({ ok: true, data: { models: [], source: "omp", reason: null } }),
   },
 }));
 

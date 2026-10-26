@@ -58,6 +58,9 @@ function makeWorld() {
       if (probeFails) return { ok: false as const, reason: "tmux probe could not run" };
       return { ok: true as const, session: tmuxSessions.find((session) => session.id === id) ?? null };
     },
+    async isProcessDescendant(candidatePid, panePid) {
+      return candidatePid === panePid;
+    },
     async tmuxServerIdentity() {
       return tmuxServerIdentity;
     },
@@ -755,25 +758,24 @@ describe("supervisor.start", () => {
     const world = makeWorld();
     world.seed({ id: "c1" });
 
-    // An unrelated agent is already hosting in the very directory we are about to
-    // use. Adopting it would point this conversation at somebody else's session.
-    world.hosts.push({
-      instanceId: "stranger",
-      generation: 1,
-      pid: 111,
-      sessionId: "01a1ffff-0000-0000-0000-000000000000",
-      cwd: "/tmp/project",
-      model: null,
-      participants: 1,
-      relayConnected: true,
-      inputRequired: false,
-      busy: false,
-      access: "control",
-    });
-
+    // A second process publishes into the same cwd after the launch begins, with
+    // a larger PID. PID order must not let it steal this conversation.
     const originalLaunch = world.adapters.launch;
     world.adapters.launch = async (spec) => {
       const session = await originalLaunch(spec);
+      world.hosts.push({
+        instanceId: "stranger",
+        generation: 1,
+        pid: 99_999,
+        sessionId: "01a1ffff-0000-0000-0000-000000000000",
+        cwd: spec.cwd,
+        model: null,
+        participants: 1,
+        relayConnected: true,
+        inputRequired: false,
+        busy: false,
+        access: "control",
+      });
       world.hosts.push({
         instanceId: "ours",
         generation: 1,
@@ -790,12 +792,153 @@ describe("supervisor.start", () => {
       return session;
     };
 
+
     const supervisor = createSupervisor({ store: world.store, adapters: world.adapters, clock: instantClock, maxActive: 3, publishPollMs: 0 });
     const result = await supervisor.start("c1", { conversationId: "c1", name: "caw-c1", cwd: "/tmp/project" });
 
     expect(result.hostInstanceId).toBe("ours");
     expect(result.nativeSessionId).toBe("01a16ed6-2ebb-7609-a2a2-e76d0d8dd06e");
     expect(result.hostInstanceId).not.toBe("stranger");
+  });
+  it("matches concurrent same-project launches by process ancestry, not publish order or PID", async () => {
+    const world = makeWorld();
+    world.seed({ id: "c1" });
+    world.seed({ id: "c2" });
+    const originalLaunch = world.adapters.launch;
+    let count = 0;
+    let resolveBoth!: () => void;
+    const bothLaunched = new Promise<void>((resolve) => { resolveBoth = resolve; });
+    world.adapters.launch = async (spec) => {
+      const session = await originalLaunch(spec);
+      count += 1;
+      session.panePid = spec.conversationId === "c1" ? 2002 : 2001;
+      if (count === 2) {
+        const rows = [
+          { instanceId: "host-c2", pid: 2001, sessionId: "native-c2" },
+          { instanceId: "host-c1", pid: 2002, sessionId: "native-c1" },
+        ];
+        for (const row of rows) world.hosts.push({
+          ...row,
+          generation: 1,
+          cwd: spec.cwd,
+          model: null,
+          participants: 1,
+          relayConnected: true,
+          inputRequired: false,
+          busy: false,
+          access: "control",
+        });
+        resolveBoth();
+      }
+      return session;
+    };
+    const supervisor = createSupervisor({
+      store: world.store,
+      adapters: world.adapters,
+      clock: { now: () => Date.now(), sleep: async () => bothLaunched },
+      maxActive: 3,
+      publishTimeoutMs: 5_000,
+      publishPollMs: 0,
+    });
+
+    const [c1, c2] = await Promise.all([
+      supervisor.start("c1", { conversationId: "c1", name: "caw-c1", cwd: "/tmp/project" }),
+      supervisor.start("c2", { conversationId: "c2", name: "caw-c2", cwd: "/tmp/project" }),
+    ]);
+
+    expect(c1.hostInstanceId).toBe("host-c1");
+    expect(c1.nativeSessionId).toBe("native-c1");
+    expect(c2.hostInstanceId).toBe("host-c2");
+    expect(c2.nativeSessionId).toBe("native-c2");
+    expect(world.launches).toHaveLength(2);
+  });
+
+  it("adopts a host process descended from the launched pane through a wrapper", async () => {
+    const world = makeWorld();
+    world.seed({ id: "c1" });
+    const originalLaunch = world.adapters.launch;
+    world.adapters.launch = async (spec) => {
+      const session = await originalLaunch(spec);
+      session.panePid = 4000;
+      world.hosts.push({
+        instanceId: "wrapped-host", generation: 1, pid: 4010, sessionId: "wrapped-session",
+        cwd: spec.cwd, model: null, participants: 1, relayConnected: true,
+        inputRequired: false, busy: false, access: "control",
+      });
+      return session;
+    };
+    world.adapters.isProcessDescendant = async (candidatePid, panePid) => candidatePid === 4010 && panePid === 4000;
+    const supervisor = createSupervisor({ store: world.store, adapters: world.adapters, clock: instantClock, maxActive: 3, publishPollMs: 0 });
+
+    const result = await supervisor.start("c1", { conversationId: "c1", name: "caw-c1", cwd: "/tmp/project" });
+
+    expect(result.hostInstanceId).toBe("wrapped-host");
+    expect(result.nativeSessionId).toBe("wrapped-session");
+  });
+
+  it("does not adopt a matching-cwd host when process identity is unavailable", async () => {
+    const world = makeWorld();
+    world.seed({ id: "c1" });
+    world.adapters.launch = async (spec) => {
+      const session: RuntimeTmuxSession = {
+        id: "$1", name: spec.name, alive: true, panePid: null, serverIdentity: "private-socket:1",
+      };
+      world.tmuxSessions.push(session);
+      world.hosts.push({
+        instanceId: "unknown-pid-host", generation: 1, pid: null, sessionId: "other-native",
+        cwd: spec.cwd, model: null, participants: 1, relayConnected: true,
+        inputRequired: false, busy: false, access: "control",
+      });
+      return session;
+    };
+    let now = 0;
+    const supervisor = createSupervisor({
+      store: world.store,
+      adapters: world.adapters,
+      clock: { now: () => (now += 100), sleep: async () => {} },
+      maxActive: 3,
+      publishTimeoutMs: 200,
+      publishPollMs: 0,
+    });
+
+    const result = await supervisor.start("c1", { conversationId: "c1", name: "caw-c1", cwd: "/tmp/project" });
+
+    expect(result.state).toBe("unknown");
+    expect(result.hostInstanceId).toBeNull();
+    expect(result.nativeSessionId).toBeNull();
+    expect(result.statusDetail).toMatch(/could not be positively matched/i);
+  });
+
+  it("never adopts another native session while resuming a known session", async () => {
+    const world = makeWorld();
+    world.seed({ id: "c1", nativeSessionId: "expected-native" });
+    const originalLaunch = world.adapters.launch;
+    world.adapters.launch = async (spec) => {
+      const session = await originalLaunch(spec);
+      world.hosts.push({
+        instanceId: "wrong-native-host", generation: 1, pid: session.panePid,
+        sessionId: "different-native", cwd: spec.cwd, model: null, participants: 1,
+        relayConnected: true, inputRequired: false, busy: false, access: "control",
+      });
+      return session;
+    };
+    let now = 0;
+    const supervisor = createSupervisor({
+      store: world.store,
+      adapters: world.adapters,
+      clock: { now: () => (now += 100), sleep: async () => {} },
+      maxActive: 3,
+      publishTimeoutMs: 200,
+      publishPollMs: 0,
+    });
+
+    const result = await supervisor.start("c1", {
+      conversationId: "c1", name: "caw-c1", cwd: "/tmp/project", resumeSessionPath: "/tmp/expected.jsonl",
+    });
+
+    expect(result.hostInstanceId).toBeNull();
+    expect(result.nativeSessionId).toBe("expected-native");
+    expect(result.state).toBe("starting");
   });
 
   it("reports unknown rather than idle when publish registry polling fails", async () => {
@@ -808,6 +951,7 @@ describe("supervisor.start", () => {
       return session;
     };
     let now = 0;
+    world.adapters.isProcessDescendant = async (candidatePid, panePid) => candidatePid === panePid;
     const supervisor = createSupervisor({
       store: world.store,
       adapters: world.adapters,
@@ -846,7 +990,7 @@ describe("supervisor.start", () => {
     expect(result.state).toBe("unknown");
     expect(result.statusDetail).toMatch(/does not report turn state/i);
   });
-  it("reports a publish timeout honestly instead of claiming success or failure", async () => {
+  it("reports an unpublished but live process as starting, not idle", async () => {
     const world = makeWorld();
     world.seed({ id: "c1" });
     // A clock that runs out immediately: the deadline is already passed on entry.
@@ -861,8 +1005,8 @@ describe("supervisor.start", () => {
     });
 
     const result = await supervisor.start("c1", { conversationId: "c1", name: "caw-c1", cwd: "/tmp/project" });
-    expect(result.state).toBe("idle");
-    expect(result.statusDetail).toMatch(/has not shared its session/i);
+    expect(result.state).toBe("starting");
+    expect(result.statusDetail).toMatch(/no collab host was positively matched/i);
     expect(world.events.map((e) => e.type)).toContain("agent.publish_timeout");
   });
 });

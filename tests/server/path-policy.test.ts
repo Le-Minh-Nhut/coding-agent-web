@@ -137,4 +137,46 @@ describe("WorkspacePathPolicy", () => {
     const after = await readdir(parent);
     expect(after).toEqual(before);
   });
+  it("pages large listings in stable order without duplicates or skipped existing entries", async () => {
+    const root = await tempDir();
+    const names = Array.from({ length: 37 }, (_, index) => `entry-${String(index).padStart(2, "0")}`);
+    await Promise.all(names.map((name) => mkdir(join(root, name))));
+    const policy = new WorkspacePathPolicy([root]);
+    const collected: string[] = [];
+    let cursor: string | undefined;
+    do {
+      const page = await policy.listDirectory(root, { limit: 7, cursor });
+      collected.push(...page.entries.map((entry) => entry.name));
+      expect(page.hasMore).toBe(page.nextCursor !== null);
+      cursor = page.nextCursor ?? undefined;
+    } while (cursor);
+    expect(collected).toEqual([...names].sort((a, b) => a.localeCompare(b)));
+    expect(new Set(collected).size).toBe(names.length);
+  });
+
+  it("enforces page caps, rejects invalid and cross-directory cursors, and keeps unpaged listings", async () => {
+    const root = await tempDir();
+    const other = join(root, "other");
+    const outside = await tempDir();
+    await mkdir(other);
+    await Promise.all(Array.from({ length: 505 }, (_, index) => mkdir(join(root, `item-${String(index).padStart(3, "0")}`))));
+    await mkdir(join(other, "child"));
+    const policy = new WorkspacePathPolicy([root]);
+    const capped = await policy.listDirectory(root, { limit: 900 });
+    expect(capped.entries).toHaveLength(500);
+    expect(capped.hasMore).toBe(true);
+    expect(capped.nextCursor).toBeTruthy();
+    expect((await policy.listDirectory(root)).entries).toHaveLength(506);
+    await expectCode(policy.listDirectory(root, { cursor: "garbage" }), "path_forbidden");
+    await expectCode(policy.listDirectory(other, { cursor: capped.nextCursor! }), "path_forbidden");
+    await expectCode(policy.listDirectory(outside, { cursor: capped.nextCursor! }), "path_forbidden");
+  });
+
+  it("shows a directory immediately after creating it", async () => {
+    const root = await tempDir();
+    const policy = new WorkspacePathPolicy([root]);
+    const created = await policy.createDirectory(root, "new-chat");
+    const listing = await policy.listDirectory(root, { limit: 10 });
+    expect(listing.entries).toContainEqual(expect.objectContaining({ name: "new-chat", path: created, isDirectory: true }));
+  });
 });

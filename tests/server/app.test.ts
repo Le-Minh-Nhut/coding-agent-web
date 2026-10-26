@@ -1,18 +1,20 @@
 import { mkdtemp, mkdir, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { RuntimeError } from "@caw/runtime";
 import { afterEach, describe, expect, it } from "vitest";
 import { createAuthenticationService } from "../../apps/server/src/auth.js";
-import { createRuntimeSpec } from "../../apps/server/src/server.js";
+import { createRuntimeSpec, launchWithOverlay } from "../../apps/server/src/server.js";
 import { buildApp } from "../../apps/server/src/app.js";
 import type { Conversation } from "@caw/contracts";
 import type { RuntimeLaunchSpec, Supervisor } from "@caw/runtime";
+import type { NativeSessionHistory } from "@caw/omp-adapter";
 import type { WorkspacePathPolicy } from "../../apps/server/src/path-policy.js";
 import { createMetadataStore } from "../../apps/server/src/store.js";
 
 const dirs: string[] = [];
 afterEach(async () => { await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true }))); });
-async function fixture(options: { paths?: WorkspacePathPolicy; tmuxSocketPath?: string; tmuxServerIdentity?: () => Promise<string | null>; supervisor?: Supervisor; runtimeSpec?: (conversation: Conversation, input: { resumeSessionId?: string; model?: string; allowMissingResumeSession?: boolean }) => Promise<RuntimeLaunchSpec> | RuntimeLaunchSpec } = {}) {
+async function fixture(options: { paths?: WorkspacePathPolicy; tmuxSocketPath?: string; tmuxServerIdentity?: () => Promise<string | null>; supervisor?: Supervisor; runtimeSpec?: (conversation: Conversation, input: { resumeSessionId?: string; model?: string }) => Promise<RuntimeLaunchSpec> | RuntimeLaunchSpec; modelCatalog?: { listModels(): Promise<string[]>; listModelsDetailed(): Promise<{ models: string[]; source: "omp" | "unavailable"; reason: string | null }> }; readNativeHistory?: (sessionId: string, expectedCwd: string) => Promise<NativeSessionHistory> } = {}) {
   const dir = await mkdtemp(join(tmpdir(), "caw-app-")); dirs.push(dir);
   const auth = createAuthenticationService({ stateDir: dir, setupOutput: () => undefined }); await auth.initAuth();
   const config: ServerConfig = { host: "127.0.0.1", port: 8791, stateDir: dir, allowedRoots: [dir], relayPort: 8792, relayAllowedOrigins: [], maxActiveAgents: 3, authTokenTtlHours: 720, trustTailscaleOrigin: false, logLevel: "silent", insecureCookies: false };
@@ -22,6 +24,21 @@ async function fixture(options: { paths?: WorkspacePathPolicy; tmuxSocketPath?: 
   const headers = { cookie: `__Host-caw_session=${session.token}`, origin: "https://workspace.test", "x-caw-csrf": session.csrfToken };
   return { app, headers, dir, store };
 }
+describe("launch overlay failure", () => {
+  it("refuses launch when the required overlay cannot be written", async () => {
+    let launched = false;
+    await expect(launchWithOverlay(
+      { overlayDir: "/unused", conversationId: "c1", relayPort: 8792 },
+      async () => { launched = true; },
+      async () => { throw Object.assign(new Error("disk full"), { code: "ENOSPC" }); },
+    )).rejects.toMatchObject({
+      code: "agent_launch_failed",
+      message: expect.stringMatching(/overlay.*ENOSPC/i),
+    });
+    expect(launched).toBe(false);
+  });
+});
+
 
 describe("Fastify API security", () => {
   it("returns 401 for every protected API route without a session", async () => {
@@ -29,10 +46,10 @@ describe("Fastify API security", () => {
     const requests: Array<{ method: "GET" | "POST" | "PATCH" | "DELETE"; url: string }> = [
       { method: "POST", url: "/api/auth/logout" }, { method: "GET", url: "/api/auth/me" },
       { method: "GET", url: "/api/capabilities" }, { method: "GET", url: "/api/projects" },
-      { method: "POST", url: "/api/projects" }, { method: "POST", url: "/api/directories" }, { method: "PATCH", url: "/api/projects/id" },
+      { method: "GET", url: "/api/browse" }, { method: "POST", url: "/api/directories" }, { method: "PATCH", url: "/api/projects/id" },
       { method: "GET", url: "/api/projects/id/conversations" }, { method: "POST", url: "/api/projects/id/conversations" },
-      { method: "GET", url: "/api/conversations/id/events" }, { method: "PATCH", url: "/api/conversations/id/model" },
-      { method: "POST", url: "/api/conversations/id/actions" }, { method: "GET", url: "/api/runtime" },
+      { method: "GET", url: "/api/conversations/id/history" }, { method: "GET", url: "/api/conversations/id/events" }, { method: "PATCH", url: "/api/conversations/id/model" },
+      { method: "POST", url: "/api/conversations/id/actions" }, { method: "GET", url: "/api/models" }, { method: "GET", url: "/api/runtime" },
     ];
     for (const request of requests) expect((await app.inject(request)).statusCode, `${request.method} ${request.url}`).toBe(401);
     await app.close();
@@ -47,6 +64,25 @@ describe("Fastify API security", () => {
       expect(response.json().ok, url).toBe(true);
     }
     await app.close();
+  });
+
+  it("returns detailed model catalog results and unavailable reason", async () => {
+    const modelCatalog = {
+      listModels: async () => ["cx/model-a"],
+      listModelsDetailed: async () => ({ models: ["cx/model-a"], source: "omp" as const, reason: null }),
+    };
+    const configured = await fixture({ modelCatalog });
+    const browserHeaders = { cookie: configured.headers.cookie };
+    const response = await configured.app.inject({ method: "GET", url: "/api/models", headers: browserHeaders });
+    expect(response.statusCode).toBe(200);
+    expect(response.json().data).toEqual({ models: ["cx/model-a"], source: "omp", reason: null });
+    await configured.app.close();
+
+    const unconfigured = await fixture();
+    const missing = await unconfigured.app.inject({ method: "GET", url: "/api/models", headers: { cookie: unconfigured.headers.cookie } });
+    expect(missing.statusCode).toBe(200);
+    expect(missing.json().data).toMatchObject({ models: [], source: "unavailable", reason: expect.stringMatching(/not configured/i) });
+    await unconfigured.app.close();
   });
 
   it("rejects missing and disallowed Origin on state-changing requests", async () => {
@@ -131,6 +167,32 @@ describe("Fastify API security", () => {
     await app.close();
   });
 
+  it("serves stable browse pages and rejects oversized or forged paging requests", async () => {
+    const { app, headers, dir } = await fixture();
+    const workspace = join(dir, "browse");
+    await mkdir(workspace);
+    await Promise.all(Array.from({ length: 5 }, (_, index) => mkdir(join(workspace, `page-${index}`))));
+    const query = (suffix: string) => `/api/browse?path=${encodeURIComponent(workspace)}${suffix}`;
+    const first = await app.inject({ method: "GET", url: query("&limit=2"), headers });
+    expect(first.statusCode).toBe(200);
+    expect(first.json().data).toMatchObject({ hasMore: true });
+    expect(first.json().data.entries.map((entry: { name: string }) => entry.name)).toEqual(["page-0", "page-1"]);
+    const cursor = first.json().data.nextCursor as string;
+    const second = await app.inject({ method: "GET", url: query(`&limit=2&cursor=${encodeURIComponent(cursor)}`), headers });
+    expect(second.statusCode).toBe(200);
+    expect(second.json().data.entries.map((entry: { name: string }) => entry.name)).toEqual(["page-2", "page-3"]);
+    const last = await app.inject({ method: "GET", url: query(`&limit=2&cursor=${encodeURIComponent(second.json().data.nextCursor as string)}`), headers });
+    expect(last.statusCode).toBe(200);
+    expect(last.json().data).toMatchObject({ hasMore: false, nextCursor: null });
+    expect(last.json().data.entries.map((entry: { name: string }) => entry.name)).toEqual(["page-4"]);
+    const forged = await app.inject({ method: "GET", url: query("&cursor=forged"), headers });
+    expect(forged.statusCode).toBe(403);
+    expect(forged.json().error.code).toBe("path_forbidden");
+    const oversized = await app.inject({ method: "GET", url: query("&limit=501"), headers });
+    expect(oversized.statusCode).toBe(400);
+    expect(oversized.json().error.code).toBe("bad_request");
+    await app.close();
+  });
   it("reports filesystem permission failures as internal errors, not missing paths", async () => {
     const paths = {
       listDirectory: async () => { throw Object.assign(new Error("permission denied"), { code: "EACCES" }); },
@@ -246,11 +308,98 @@ describe("Fastify API security", () => {
     expect(launchedModel).toBe("provider/model-x");
     await app.close();
   });
+  it("restarts only when recorded session history can be resolved", async () => {
+    let conversation: Conversation;
+    let launched: RuntimeLaunchSpec | undefined;
+    let launchCount = 0;
+    let journalPath: string | null = null;
+    let unreadable = false;
+    let missingDuringHeaderRead = false;
+    let mismatchHeader = false;
+    let headerReadFails = false;
+    let runtimeSpec: (conversation: Conversation, input: { resumeSessionId?: string; model?: string }) => Promise<RuntimeLaunchSpec>;
+    const supervisor = {
+      start: async (_id: string, spec: RuntimeLaunchSpec) => {
+        launched = spec;
+        launchCount += 1;
+        conversation = (await store.updateConversation(conversation.id, { state: "idle", tmuxSessionId: "$2" }))!;
+        return conversation;
+      },
+    } as unknown as Supervisor;
+    const { app, headers, dir, store } = await fixture({
+      supervisor,
+      runtimeSpec: (...args) => runtimeSpec(...args),
+    });
+    runtimeSpec = createRuntimeSpec({
+      store,
+      paths: { assertInsideRoots: async (path) => path },
+      catalog: {
+        findBySessionId: async (id) => {
+          if (unreadable) throw Object.assign(new Error("EACCES: session catalog unreadable"), { code: "EACCES" });
+          return id === "journal-session" ? journalPath : null;
+        },
+        readHeader: async (path) => {
+          if (path !== journalPath) return null;
+          if (missingDuringHeaderRead) throw Object.assign(new Error("journal was removed"), { code: "ENOENT" });
+          if (headerReadFails) throw Object.assign(new Error("journal read denied"), { code: "EACCES" });
+          return { sessionId: mismatchHeader ? "wrong-session" : "journal-session", cwd: dir, timestamp: null, version: null, title: null };
+        },
+      },
+    });
+    const project = await store.createProject({ path: dir });
+
+    conversation = await store.createConversation({ projectId: project.id });
+    const fresh = await app.inject({ method: "POST", url: `/api/conversations/${conversation.id}/actions`, headers, payload: { action: "restart" } });
+    expect(fresh.statusCode).toBe(200);
+    expect(launched).toMatchObject({ resumeSessionPath: undefined });
+    const afterFresh = launchCount;
+
+    conversation = await store.createConversation({ projectId: project.id, nativeSessionId: "missing-journal" });
+    const missing = await app.inject({ method: "POST", url: `/api/conversations/${conversation.id}/actions`, headers, payload: { action: "restart" } });
+    expect(missing.statusCode).toBe(404);
+    expect(missing.json().error.code).toBe("not_found");
+    expect(launchCount).toBe(afterFresh);
+
+    unreadable = true;
+    conversation = await store.createConversation({ projectId: project.id, nativeSessionId: "journal-session" });
+    const failedCatalog = await app.inject({ method: "POST", url: `/api/conversations/${conversation.id}/actions`, headers, payload: { action: "restart" } });
+    expect(failedCatalog.statusCode).toBe(500);
+    expect(launchCount).toBe(afterFresh);
+    unreadable = false;
+
+    journalPath = `${dir}/journal.jsonl`;
+    missingDuringHeaderRead = true;
+    const disappeared = await app.inject({ method: "POST", url: `/api/conversations/${conversation.id}/actions`, headers, payload: { action: "restart" } });
+    expect(disappeared.statusCode).toBe(404);
+    expect(disappeared.json().error.code).toBe("not_found");
+    expect(launchCount).toBe(afterFresh);
+    missingDuringHeaderRead = false;
+
+    headerReadFails = true;
+    const unreadableHeader = await app.inject({ method: "POST", url: `/api/conversations/${conversation.id}/actions`, headers, payload: { action: "restart" } });
+    expect(unreadableHeader.statusCode).toBe(500);
+    expect(launchCount).toBe(afterFresh);
+    headerReadFails = false;
+
+    journalPath = `${dir}/journal.jsonl`;
+    mismatchHeader = true;
+    const badHeaderConversation = await store.createConversation({ projectId: project.id, nativeSessionId: "journal-session" });
+    const badHeader = await app.inject({ method: "POST", url: `/api/conversations/${badHeaderConversation.id}/actions`, headers, payload: { action: "restart" } });
+    expect(badHeader.statusCode).toBe(409);
+    expect(launchCount).toBe(afterFresh);
+    mismatchHeader = false;
+
+    const good = await app.inject({ method: "POST", url: `/api/conversations/${conversation.id}/actions`, headers, payload: { action: "restart" } });
+    expect(good.statusCode).toBe(200);
+    expect(launched?.resumeSessionPath).toBe(journalPath);
+    await app.close();
+  });
+
   it("restarts fresh when journal is absent, resumes existing journal, and rejects unknown explicit session", async () => {
     let conversation: Conversation;
     let launched: RuntimeLaunchSpec | undefined;
     let journalPath: string | null = null;
-    let runtimeSpec: (conversation: Conversation, input: { resumeSessionId?: string; model?: string; allowMissingResumeSession?: boolean }) => Promise<RuntimeLaunchSpec>;
+    let runtimeSpec: (conversation: Conversation, input: { resumeSessionId?: string; model?: string }) => Promise<RuntimeLaunchSpec>;
     const supervisor = {
       start: async (_id: string, spec: RuntimeLaunchSpec) => {
         launched = spec;
@@ -270,18 +419,30 @@ describe("Fastify API security", () => {
       store,
       paths: { assertInsideRoots: async (path) => path },
       catalog: {
-        findBySessionId: async (id) => id === "journal-session" ? journalPath : null,
+        findBySessionId: async (id) => {
+          if (id === "unreadable-catalog") throw Object.assign(new Error("EACCES: session catalog unreadable"), { code: "EACCES" });
+          return id === "journal-session" ? journalPath : null;
+        },
         readHeader: async (path) => path === journalPath ? { sessionId: "journal-session", cwd: dir } : null,
       },
     });
     const project = await store.createProject({ path: dir });
-    conversation = await store.createConversation({ projectId: project.id, nativeSessionId: "missing-journal" });
-    await store.updateConversation(conversation.id, { modelPreference: "provider/chosen-model", tmuxSessionId: "$1" });
-    const stopped = await app.inject({ method: "POST", url: `/api/conversations/${conversation.id}/actions`, headers, payload: { action: "stop" } });
-    expect(stopped.statusCode).toBe(200);
+    conversation = await store.createConversation({ projectId: project.id });
     const freshRestart = await app.inject({ method: "POST", url: `/api/conversations/${conversation.id}/actions`, headers, payload: { action: "restart" } });
     expect(freshRestart.statusCode).toBe(200);
-    expect(launched).toMatchObject({ model: "provider/chosen-model", resumeSessionPath: undefined });
+    expect(launched).toMatchObject({ resumeSessionPath: undefined });
+
+    conversation = await store.createConversation({ projectId: project.id, nativeSessionId: "missing-journal" });
+    await store.updateConversation(conversation.id, { modelPreference: "provider/chosen-model" });
+    const missingRestart = await app.inject({ method: "POST", url: `/api/conversations/${conversation.id}/actions`, headers, payload: { action: "restart" } });
+    expect(missingRestart.statusCode).toBe(404);
+    expect(missingRestart.json().error.code).toBe("not_found");
+    expect(launched?.resumeSessionPath).toBeUndefined();
+    conversation = await store.createConversation({ projectId: project.id, nativeSessionId: "unreadable-catalog" });
+    const unreadableRestart = await app.inject({ method: "POST", url: `/api/conversations/${conversation.id}/actions`, headers, payload: { action: "restart" } });
+    expect(unreadableRestart.statusCode).toBe(500);
+    expect(launched?.resumeSessionPath).toBeUndefined();
+
 
     journalPath = `${dir}/journal.jsonl`;
     conversation = await store.createConversation({ projectId: project.id, nativeSessionId: "journal-session" });
@@ -340,6 +501,52 @@ describe("Fastify API security", () => {
     expect(response.statusCode).toBe(404);
     expect(response.body).not.toContain("SECRET_BEARER_TOKEN_12345");
     expect(response.json().message).toBe("Route GET:/api/nonexistent-route not found");
+    await app.close();
+  });
+});
+
+describe("native session history route", () => {
+  it("returns bounded history by conversation session and canonical project cwd", async () => {
+    let requested: { sessionId: string; expectedCwd: string } | null = null;
+    const history: NativeSessionHistory = {
+      header: { sessionId: "native-123", cwd: "", timestamp: "2026-10-26T00:00:00.000Z", version: 3, title: null },
+      entries: [{ type: "message", role: "user", content: "stored" }],
+      truncated: true,
+    };
+    const { app, headers, dir, store } = await fixture({
+      readNativeHistory: async (sessionId, expectedCwd) => { requested = { sessionId, expectedCwd }; history.header.cwd = expectedCwd; return history; },
+    });
+    const projectPath = join(dir, "project");
+    await mkdir(projectPath);
+    const project = await store.createProject({ path: projectPath });
+    const conversation = await store.createConversation({ projectId: project.id, nativeSessionId: "native-123" });
+    const response = await app.inject({ method: "GET", url: `/api/conversations/${conversation.id}/history?path=/etc/passwd`, headers });
+    expect(response.statusCode).toBe(200);
+    expect(requested).toEqual({ sessionId: "native-123", expectedCwd: projectPath });
+    expect(response.json().data).toMatchObject({ header: { sessionId: "native-123" }, entries: [{ content: "stored" }], truncated: true });
+    await app.close();
+  });
+
+  it("returns clear errors for missing and foreign journals", async () => {
+    const { app, headers, dir, store } = await fixture({
+      readNativeHistory: async (sessionId, expectedCwd) => {
+        if (sessionId === "missing-native") throw Object.assign(new Error("missing"), { code: "not_found" });
+        return { header: { sessionId, cwd: join(dir, "other"), timestamp: null, version: 3, title: null }, entries: [], truncated: false };
+      },
+    });
+    const projectPath = join(dir, "project");
+    const otherPath = join(dir, "other");
+    await mkdir(projectPath);
+    await mkdir(otherPath);
+    const project = await store.createProject({ path: projectPath });
+    const missing = await store.createConversation({ projectId: project.id, nativeSessionId: "missing-native" });
+    const foreign = await store.createConversation({ projectId: project.id, nativeSessionId: "foreign-native" });
+    const missingResponse = await app.inject({ method: "GET", url: `/api/conversations/${missing.id}/history`, headers });
+    expect(missingResponse.statusCode).toBe(404);
+    expect(missingResponse.json().error.code).toBe("not_found");
+    const foreignResponse = await app.inject({ method: "GET", url: `/api/conversations/${foreign.id}/history`, headers });
+    expect(foreignResponse.statusCode).toBe(403);
+    expect(foreignResponse.json().error.code).toBe("path_forbidden");
     await app.close();
   });
 });

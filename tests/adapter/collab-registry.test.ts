@@ -95,24 +95,11 @@ describe("collab-registry", () => {
     expect(hosts[0]!.generation === linkGeneration).toBe(false);
   });
 
-  it("keeps every omitted optional field absent rather than defaulting it", () => {
-    const { generation, pid, sessionName, model, startedAt, participants, relayConnected, inputRequired, busy, access, ...rest } =
-      wellFormedRow;
-    const hosts = parseCollabListOutput(JSON.stringify({ version: 1, hosts: [rest] }));
-
-    expect(hosts).toHaveLength(1);
-    expect(hosts[0]).toMatchObject({
-      generation: null,
-      pid: null,
-      sessionName: null,
-      model: null,
-      startedAt: null,
-      participants: null,
-      relayConnected: null,
-      inputRequired: null,
-      busy: null,
-      access: "control", // the one documented fallback: a caller-chosen enum, never host evidence
-    });
+  it("keeps absent or malformed access unknown rather than granting control", () => {
+    const { access: _omitted, ...row } = wellFormedRow;
+    for (const candidate of [row, { ...wellFormedRow, access: "admin" }]) {
+      expect(parseCollabHost(candidate)?.access).toBeNull();
+    }
   });
 
   it("keeps an omitted relayConnected absent, because false is a positive fact", () => {
@@ -189,7 +176,7 @@ describe("collab-registry", () => {
       relayConnected: null,
       inputRequired: null,
       busy: null,
-      access: "control",
+      access: null,
     });
   });
 

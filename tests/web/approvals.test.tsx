@@ -11,6 +11,8 @@ vi.mock("../../apps/web/src/api.js", () => ({
     getConversation: vi.fn(),
     getAttachInstructions: vi.fn(),
     getConversationLink: vi.fn(),
+    getConversationHistory: vi.fn().mockResolvedValue({ ok: false, error: { code: "not_found", message: "No history" } }),
+    getModels: vi.fn().mockResolvedValue({ ok: true, data: { models: [], source: "omp", reason: null } }),
   },
 }));
 
@@ -108,7 +110,7 @@ describe("Approval handling & FIFO queueing", () => {
     const approve = Array.from(container.querySelectorAll("button")).find((button) => button.textContent?.includes("Approve Once"))!;
     const deny = Array.from(container.querySelectorAll("button")).find((button) => button.textContent?.includes("Deny"))!;
     expect(approve.className).toBe("primary");
-    expect(deny.className).toBe("ghost");
+    expect(deny.className).toBe("approval-deny");
     fireEvent.click(deny);
     expect(sentFrames.find((frame) => frame.t === "ui-response")).toEqual({ t: "ui-response", reqId: 101, value: "Deny" });
   });
@@ -162,7 +164,7 @@ describe("Approval handling & FIFO queueing", () => {
     await act(async () => { await Promise.resolve(); });
 
     expect(composer.value).toBe("keep this prompt");
-    expect(container.textContent).toContain("Not connected — prompt not sent");
+    expect(container.textContent).toContain("Socket did not accept prompt. Draft kept; retry when connected.");
     expect(sentFrames.some((frame) => frame.t === "prompt")).toBe(false);
   });
 

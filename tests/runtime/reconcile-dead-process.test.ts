@@ -54,7 +54,7 @@ describe("reconcile verdict for a dead managed process", () => {
       listHosts: async () => [],
       // The tmux session is gone: killed, or its server died.
       listManagedTmux: async () => [] as RuntimeTmuxSession[],
-      getTmux: async () => ({ ok: true as const, session: null }),
+      isProcessDescendant: async () => false,
       tmuxServerIdentity: async () => "socket:$0:1234",
       launch: async () => {
         throw new Error("not used");

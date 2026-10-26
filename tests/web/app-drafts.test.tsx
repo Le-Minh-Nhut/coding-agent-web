@@ -6,7 +6,7 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import { api } from "../../apps/web/src/api.js";
 import { App } from "../../apps/web/src/App.js";
 
-vi.mock("../../apps/web/src/api.js", () => ({ api: { getMe: vi.fn() } }));
+vi.mock("../../apps/web/src/api.js", () => ({ api: { getMe: vi.fn(), getCapabilities: vi.fn() } }));
 vi.mock("../../apps/web/src/components/LoginView.js", () => ({
   LoginView: () => React.createElement("div", null, "Login"),
 }));
@@ -26,7 +26,10 @@ vi.mock("../../apps/web/src/components/ConversationView.js", () => ({
 }));
 
 describe("App conversation drafts", () => {
-  beforeEach(() => vi.mocked(api.getMe).mockResolvedValue({ ok: true, data: { csrfToken: "test" } }));
+  beforeEach(() => {
+    vi.mocked(api.getMe).mockResolvedValue({ ok: true, data: { csrfToken: "test" } });
+    vi.mocked(api.getCapabilities).mockResolvedValue({ ok: true, data: {} as Awaited<ReturnType<typeof api.getCapabilities>>["data"] });
+  });
   afterEach(() => vi.restoreAllMocks());
 
   it("keeps separate drafts when switching conversations and returning", async () => {

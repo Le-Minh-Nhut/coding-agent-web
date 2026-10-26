@@ -1,7 +1,7 @@
 import { mkdir, rm } from "node:fs/promises";
+import { execFile, spawn } from "node:child_process";
 import { homedir } from "node:os";
 import path from "node:path";
-import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { DefaultTmuxService } from "../../packages/omp-adapter/src/tmux.js";
@@ -146,4 +146,18 @@ describe("tmux", () => {
       await rm(directory, { recursive: true, force: true });
     }
   });
+});
+
+it("proves ancestry from a real child process and fails closed for missing PIDs", async () => {
+  const probe = new DefaultTmuxService();
+  const child = spawn(process.execPath, ["-e", "process.stdin.resume()"]);
+  try {
+    if (child.pid === undefined) throw new Error("Child process did not receive a PID");
+    expect(await probe.isProcessDescendant(child.pid, process.pid)).toBe(true);
+    expect(await probe.isProcessDescendant(process.pid, child.pid)).toBe(false);
+    expect(await probe.isProcessDescendant(2_000_000_000, process.pid)).toBe("unknown");
+  } finally {
+    child.kill("SIGTERM");
+    await new Promise<void>((resolve) => child.once("exit", () => resolve()));
+  }
 });

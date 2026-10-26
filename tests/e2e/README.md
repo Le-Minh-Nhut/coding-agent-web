@@ -40,7 +40,7 @@ Boots the server with **hermetic** state inside a temp dir that is removed
 afterwards:
 
 - `CAW_STATE_DIR` — temp; the owner's real state dir is never touched (asserted).
-- `CAW_ALLOWED_ROOTS` — the existing `roots` directory and a sibling `roots-secondary` directory inside the same temporary tree. The existing first root keeps its `readme.txt`, `p-alpha`, `p-beta`, `p-gamma`, `p-delta`, `m-touch`, and `seeded` contents unchanged; the secondary root exists only to exercise root switching. Both are removed with the fixture; the owner's directories are never touched.
+- The roots fixture also contains `paged/` with 205 child directories to exercise the paginated browser; it is created inside the harness temp tree and removed with the fixture.
 - Password — a fixed test value, seeded by writing `auth-password.json`
   (hex salt + 64-byte `scrypt(password, salt)`) before the server starts, so
   nothing has to scrape the first-run setup-token message. The file format is the

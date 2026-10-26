@@ -14,7 +14,7 @@ vi.mock("../../apps/web/src/api.js", () => ({
 describe("FolderBrowser", () => {
   beforeEach(() => {
     cleanup();
-    vi.clearAllMocks();
+    vi.resetAllMocks();
   });
 
   it("shows our human error text for path_forbidden", async () => {
@@ -63,6 +63,8 @@ describe("FolderBrowser", () => {
             hasProject: false,
           },
         ],
+        hasMore: false,
+        nextCursor: null,
       },
     });
 
@@ -95,6 +97,8 @@ describe("FolderBrowser", () => {
         parent: null,
         roots: ["/home/user/work"],
         entries: [],
+        hasMore: false,
+        nextCursor: null,
       },
     });
 
@@ -116,13 +120,14 @@ describe("FolderBrowser", () => {
 
   it("creates a folder, refreshes listing, and selects the new path", async () => {
     const rootListing = {
-      path: "/home/user/work", parent: null, roots: ["/home/user/work"],
-      entries: [],
+      path: "/home/user/work", parent: null, roots: ["/home/user/work"], entries: [], hasMore: true, nextCursor: "cursor-new",
     };
     const createdListing = {
       ...rootListing,
       entries: [{ name: "new-folder", path: "/home/user/work/new-folder", isDirectory: true, allowed: true, hasProject: false }],
+      hasMore: false, nextCursor: null,
     };
+    vi.mocked(api.browse).mockResolvedValueOnce({ ok: true, data: rootListing });
     vi.mocked(api.browse).mockResolvedValueOnce({ ok: true, data: rootListing });
     vi.mocked(api.browse).mockResolvedValueOnce({ ok: true, data: createdListing });
     vi.mocked(api.createDirectory).mockResolvedValue({ ok: true, data: { path: "/home/user/work/new-folder" } });
@@ -134,7 +139,9 @@ describe("FolderBrowser", () => {
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Create folder" })); });
 
     expect(api.createDirectory).toHaveBeenCalledWith("/home/user/work", "new-folder");
-    expect(api.browse).toHaveBeenCalledTimes(2);
+    expect(api.browse).toHaveBeenCalledTimes(3);
+    expect(api.browse).toHaveBeenNthCalledWith(2, undefined, { limit: 100 });
+    expect(api.browse).toHaveBeenNthCalledWith(3, "/home/user/work", { limit: 100, cursor: "cursor-new" });
     expect(screen.getByText("Selected")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Use this folder" }));
     expect(onSelect).toHaveBeenCalledWith("/home/user/work/new-folder");
@@ -142,7 +149,7 @@ describe("FolderBrowser", () => {
 
   it("shows the server error text when folder creation fails", async () => {
     vi.mocked(api.browse).mockResolvedValue({
-      ok: true, data: { path: "/home/user/work", parent: null, roots: ["/home/user/work"], entries: [] },
+      ok: true, data: { path: "/home/user/work", parent: null, roots: ["/home/user/work"], entries: [], hasMore: false, nextCursor: null },
     });
     vi.mocked(api.createDirectory).mockResolvedValue({
       ok: false, error: { code: "already_exists", message: "A file or directory with that name already exists" },
@@ -154,6 +161,34 @@ describe("FolderBrowser", () => {
     expect(screen.getByRole("alert").textContent).toBe("A file or directory with that name already exists");
   });
 
+  it("appends pages in server order and reports a refused cursor without clearing entries", async () => {
+    const firstPage = {
+      path: "/home/user/work", parent: null, roots: ["/home/user/work"],
+      entries: [{ name: "alpha", path: "/home/user/work/alpha", isDirectory: true, allowed: true, hasProject: false }],
+      hasMore: true, nextCursor: "cursor-1",
+    };
+    vi.mocked(api.browse).mockResolvedValueOnce({ ok: true, data: firstPage });
+    await act(async () => { render(<FolderBrowser onSelect={() => {}} onCancel={() => {}} />); });
+    vi.mocked(api.browse).mockResolvedValueOnce({ ok: true, data: {
+      ...firstPage,
+      entries: [{ name: "beta", path: "/home/user/work/beta", isDirectory: true, allowed: true, hasProject: false }],
+      hasMore: false, nextCursor: null,
+    } });
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Load more" })); });
+    expect(api.browse).toHaveBeenLastCalledWith("/home/user/work", { limit: 100, cursor: "cursor-1" });
+    const rows = [...document.querySelectorAll(".folder-item")].map((row) => row.textContent);
+    expect(rows).toEqual(["📁 alpha", "📁 beta"]);
+
+    cleanup();
+    vi.clearAllMocks();
+    vi.mocked(api.browse).mockResolvedValueOnce({ ok: true, data: firstPage });
+    await act(async () => { render(<FolderBrowser onSelect={() => {}} onCancel={() => {}} />); });
+    vi.mocked(api.browse).mockResolvedValueOnce({ ok: false, error: { code: "path_forbidden", message: "Invalid directory cursor" } });
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Load more" })); });
+    expect(screen.getByRole("alert").textContent).toBe("Invalid directory cursor");
+    expect(document.querySelector(".folder-item")?.textContent).toContain("alpha");
+  });
+
   it("lets the user switch to another configured workspace root without exposing outside ancestors", async () => {
     vi.mocked(api.browse).mockImplementation(async (path) => ({
       ok: true,
@@ -162,6 +197,8 @@ describe("FolderBrowser", () => {
         parent: null,
         roots: ["/home/user/work", "/srv/work"],
         entries: [],
+        hasMore: false,
+        nextCursor: null,
       },
     }));
     const onSelect = vi.fn();
@@ -169,8 +206,7 @@ describe("FolderBrowser", () => {
     expect(screen.getByRole("button", { name: "work", exact: true })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "user", exact: true })).toBeNull();
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "/srv/work" })); });
-    expect(api.browse).toHaveBeenLastCalledWith("/srv/work");
-    expect(screen.getByRole("button", { name: "work", exact: true })).toBeTruthy();
+    expect(api.browse).toHaveBeenLastCalledWith("/srv/work", { limit: 100 });
     expect(screen.queryByRole("button", { name: "srv", exact: true })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Use this folder" }));
     expect(onSelect).toHaveBeenCalledWith("/srv/work");

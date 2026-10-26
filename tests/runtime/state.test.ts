@@ -76,10 +76,10 @@ describe("evaluateState", () => {
     expect(evaluateState(obs({ tmux: tmux(), host: host({ busy: true, inputRequired: true }) })).state).toBe("awaiting_input");
   });
 
-  it("distinguishes a live process that is not hosting from a running agent", () => {
+  it("reports unknown when a live process has not published its host", () => {
     const verdict = evaluateState(obs({ tmux: tmux(), host: null }));
-    expect(verdict.state).toBe("idle");
-    expect(verdict.detail).toMatch(/not sharing a session/i);
+    expect(verdict.state).toBe("unknown");
+    expect(verdict.detail).toMatch(/has not published a Collab host/i);
   });
 
   it("reports unknown, not a disconnected room, when the listing omits relayConnected", () => {

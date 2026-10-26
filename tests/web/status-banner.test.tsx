@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React from "react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, act, cleanup } from "@testing-library/react";
+import { render, act, cleanup, waitFor } from "@testing-library/react";
 import { ConversationView } from "../../apps/web/src/components/ConversationView.js";
 import { api } from "../../apps/web/src/api.js";
 
@@ -10,6 +10,8 @@ vi.mock("../../apps/web/src/api.js", () => ({
     getConversation: vi.fn(),
     getAttachInstructions: vi.fn(),
     getConversationLink: vi.fn(),
+    getConversationHistory: vi.fn().mockResolvedValue({ ok: false, error: { code: "not_found", message: "No history" } }),
+    getModels: vi.fn().mockResolvedValue({ ok: true, data: { models: [], source: "omp", reason: null } }),
   },
 }));
 
@@ -60,7 +62,7 @@ describe("Connection status banners", () => {
       viewContainer = container;
     });
 
-    const banner = viewContainer?.querySelector('[role="status"]');
+    const banner = viewContainer?.querySelector(".banner.disconnected");
     expect(banner?.textContent).toContain("Disconnected — Connection lost");
     expect(banner?.textContent).not.toContain("State: unknown");
   });
@@ -77,7 +79,7 @@ describe("Connection status banners", () => {
       viewContainer = container;
     });
 
-    const banner = viewContainer?.querySelector('[role="status"]');
+    const banner = viewContainer?.querySelector(".banner.unknown");
     expect(banner?.textContent).toContain("State: unknown");
     expect(banner?.textContent).toContain("Agent status cannot be determined");
     expect(banner?.textContent).not.toContain("Disconnected — Connection lost");
@@ -93,7 +95,7 @@ describe("Connection status banners", () => {
       const { container } = render(<ConversationView conversationId="c-1" onBack={() => {}} />);
       viewContainer = container;
     });
-    expect(viewContainer?.textContent).toContain("Effective model: claude-3-5");
+    expect(viewContainer?.textContent).toContain("Effective model reported now: claude-3-5");
     expect(viewContainer?.textContent).toContain("Model changes apply on the next launch of this conversation, not immediately.");
   });
   it("renders the registry-recorded model for stopped conversations", async () => {
@@ -113,7 +115,43 @@ describe("Connection status banners", () => {
       const { container } = render(<ConversationView conversationId="c-1" onBack={() => {}} />);
       viewContainer = container;
     });
-    expect(viewContainer?.textContent).toContain("Effective model: recorded-model");
+    expect(viewContainer?.textContent).toContain("Effective model reported now: recorded-model");
     expect(viewContainer?.textContent).toContain("Model changes apply on the next launch of this conversation, not immediately.");
+  });
+  it("renders a saved transcript, truncated note, and live-session conflict", async () => {
+    mockGetConversationLink.mockResolvedValue({ ok: false, error: { code: "link_unavailable", message: "Unavailable" } });
+    const history = {
+      header: { sessionId: "session-1", cwd: "/work", timestamp: null, version: null, title: "Saved session" },
+      entries: [{ type: "message", id: "saved-1", parentId: null, timestamp: "2026-01-01T00:00:00Z", message: { role: "user", content: "Saved prompt", timestamp: 1 } }],
+      truncated: false,
+    };
+    vi.mocked(api.getConversationHistory).mockResolvedValue({ ok: true, data: history });
+    let viewContainer: HTMLElement | null = null;
+    await act(async () => {
+      const { container } = render(<ConversationView conversationId="c-1" onBack={() => {}} />);
+      viewContainer = container;
+    });
+    await waitFor(() => {
+      expect(viewContainer?.textContent).toContain("Saved transcript — this session is not running.");
+      expect(viewContainer?.textContent).toContain("Saved prompt");
+    });
+    expect(viewContainer?.querySelector(".composer-container")).toBeNull();
+
+    cleanup();
+    vi.mocked(api.getConversationHistory).mockResolvedValue({ ok: true, data: { ...history, truncated: true } });
+    await act(async () => {
+      const { container } = render(<ConversationView conversationId="c-1" onBack={() => {}} />);
+      viewContainer = container;
+    });
+    await waitFor(() => expect(viewContainer?.textContent).toContain("Saved transcript truncated; some history is omitted."));
+
+    cleanup();
+    vi.mocked(api.getConversationHistory).mockResolvedValue({ ok: false, error: { code: "conflict_owner", message: "Live" } });
+    await act(async () => {
+      const { container } = render(<ConversationView conversationId="c-1" onBack={() => {}} />);
+      viewContainer = container;
+    });
+    await waitFor(() => expect(viewContainer?.textContent).toContain("This session is live. Open the live view to read it."));
+    expect(viewContainer?.querySelector(".composer-container")).toBeNull();
   });
 });

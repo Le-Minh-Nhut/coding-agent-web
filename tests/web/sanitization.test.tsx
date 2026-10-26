@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { describe, it, expect } from "vitest";
 import { render } from "@testing-library/react";
-import { renderMarkdown } from "../../apps/web/src/sanitize.js";
+import { parseInline, renderMarkdown } from "../../apps/web/src/sanitize.js";
 
 describe("Markdown & URL sanitization", () => {
   it("renders inert output for dangerous links, raw html img with onerror, and file:// links", () => {
@@ -40,5 +40,22 @@ describe("Markdown & URL sanitization", () => {
     // 5. Assert the dangerous link text is still rendered as inert text
     expect(container.textContent).toContain("Exploit");
     expect(container.textContent).toContain("Passwd");
+  });
+  it("preserves inline emphasis, code, and safe links", () => {
+    const { container } = render(parseInline("**bold** *italic* `code` [safe](https://example.com)"));
+    expect(container.querySelector("strong")?.textContent).toBe("bold");
+    expect(container.querySelector("em")?.textContent).toBe("italic");
+    expect(container.querySelector("code")?.textContent).toBe("code");
+    expect(container.querySelector('a[href="https://example.com"]')?.textContent).toBe("safe");
+  });
+
+  it("scans long unmatched inline markers without quadratic rescanning", () => {
+    const input = "[".repeat(200_000);
+    const started = performance.now();
+    const result = parseInline(input);
+    const elapsedMs = performance.now() - started;
+
+    expect(result).toEqual([input]);
+    expect(elapsedMs).toBeLessThan(5_000);
   });
 });

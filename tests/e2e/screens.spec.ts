@@ -5,6 +5,7 @@ import {
   harnessFixture,
   installMockCollabHost,
   login,
+  openFolderRow,
   mockNativeSessions,
   requireAppServer,
   welcomeFrame,
@@ -40,6 +41,11 @@ interface GeometryRecord {
   codeBlockScroll: { scrollWidth: number; clientWidth: number; overflows: boolean } | null;
   tableScroll: { scrollWidth: number; clientWidth: number; overflows: boolean } | null;
   latestButtonVisible: boolean;
+  latestButtonBox: { x: number; y: number; width: number; height: number } | null;
+  transcriptContentBox: { x: number; y: number; width: number; height: number } | null;
+  modelSelectorBox: { x: number; y: number; width: number; height: number } | null;
+  latestComposerGap: number | null;
+  latestIntersectsTranscript: boolean | null;
 }
 
 interface InteractionResults {
@@ -57,8 +63,8 @@ const VIEWPORTS = [
   { name: "768x1024", width: 768, height: 1024, dpr: 2, isMobile: true, hasTouch: true },
   { name: "1280x800", width: 1280, height: 800, dpr: 1, isMobile: false, hasTouch: false },
 ] as const;
-
 const SCREENS_DIR = join(process.cwd(), "docs", "assets", "screens");
+
 const MANIFEST_PATH = join(SCREENS_DIR, "manifest.md");
 
 const allGeometryRecords: GeometryRecord[] = [];
@@ -178,13 +184,26 @@ async function measureDOM(page: Page, viewport: string, screen: string): Promise
         };
       }
 
+      const modelSelector = document.querySelector("#conversation-model") as HTMLElement | null;
+      const modelSelectorRect = modelSelector?.getBoundingClientRect() ?? null;
+      const modelSelectorBox = modelSelectorRect ? { x: Math.round(modelSelectorRect.x), y: Math.round(modelSelectorRect.y), width: Math.round(modelSelectorRect.width), height: Math.round(modelSelectorRect.height) } : null;
       const latestBtn = document.querySelector(".latest-button") as HTMLElement | null;
-      let latestButtonVisible = false;
-      if (latestBtn) {
-        const rect = latestBtn.getBoundingClientRect();
-        const style = window.getComputedStyle(latestBtn);
-        latestButtonVisible = rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden";
-      }
+      const transcriptContent = document.querySelector(".messages-content") as HTMLElement | null;
+      const latestButtonBox = latestBtn ? latestBtn.getBoundingClientRect() : null;
+      const composerTop = document.querySelector(".composer-container")?.getBoundingClientRect().top ?? null;
+      const latestComposerGap = latestButtonBox && composerTop !== null ? Math.round(composerTop - latestButtonBox.bottom) : null;
+      const scrollRect = messagesScroll?.getBoundingClientRect() ?? null;
+      const contentRect = transcriptContent?.getBoundingClientRect() ?? null;
+      const transcriptContentRect = scrollRect && contentRect ? {
+        left: Math.max(scrollRect.left, contentRect.left),
+        right: Math.min(scrollRect.right, contentRect.right),
+        top: Math.max(scrollRect.top, contentRect.top),
+        bottom: Math.min(scrollRect.bottom, contentRect.bottom),
+      } : null;
+      const latestButtonVisible = Boolean(latestButtonBox && latestButtonBox.width > 0 && latestButtonBox.height > 0 && window.getComputedStyle(latestBtn!).display !== "none" && window.getComputedStyle(latestBtn!).visibility !== "hidden");
+      const latestIntersectsTranscript = latestButtonBox && transcriptContentRect
+        ? latestButtonBox.left < transcriptContentRect.right && latestButtonBox.right > transcriptContentRect.left && latestButtonBox.top < transcriptContentRect.bottom && latestButtonBox.bottom > transcriptContentRect.top
+        : null;
 
       return {
         viewport: vp,
@@ -209,6 +228,11 @@ async function measureDOM(page: Page, viewport: string, screen: string): Promise
         codeBlockScroll,
         tableScroll,
         latestButtonVisible,
+        latestButtonBox: latestButtonBox ? { x: Math.round(latestButtonBox.x), y: Math.round(latestButtonBox.y), width: Math.round(latestButtonBox.width), height: Math.round(latestButtonBox.height) } : null,
+        transcriptContentBox: transcriptContentRect ? { x: Math.round(transcriptContentRect.left), y: Math.round(transcriptContentRect.top), width: Math.round(transcriptContentRect.right - transcriptContentRect.left), height: Math.round(transcriptContentRect.bottom - transcriptContentRect.top) } : null,
+        modelSelectorBox,
+        latestComposerGap,
+        latestIntersectsTranscript,
       };
     },
     { vp: viewport, sn: screen }
@@ -216,8 +240,15 @@ async function measureDOM(page: Page, viewport: string, screen: string): Promise
 }
 
 async function captureScreen(page: Page, viewport: string, screen: string): Promise<GeometryRecord> {
+  await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
   const geo = await measureDOM(page, viewport, screen);
   allGeometryRecords.push(geo);
+  if (geo.latestButtonVisible) {
+    expect(geo.latestButtonBox!.width, `Latest button width at ${viewport}/${screen}`).toBeGreaterThanOrEqual(44);
+    expect(geo.latestButtonBox!.height, `Latest button height at ${viewport}/${screen}`).toBeGreaterThanOrEqual(44);
+    expect(geo.latestIntersectsTranscript, `Latest must not cover visible transcript at ${viewport}/${screen}`).toBe(false);
+    expect(geo.latestComposerGap, `Latest button must leave 8px before composer at ${viewport}/${screen}`).toBeGreaterThanOrEqual(8);
+  }
   const filePath = join(SCREENS_DIR, `${viewport}-${screen}.png`);
   await page.screenshot({ path: filePath });
   return geo;
@@ -261,10 +292,27 @@ test.describe("Screenshot inventory & geometry verification", () => {
         await expect(page.getByRole("button", { name: "Create folder" })).toBeVisible();
         await captureScreen(page, vp.name, "new-folder-form");
 
+
         // Cancel new folder form, then cancel folder browser modal
         await page.locator("form").getByRole("button", { name: "Cancel" }).click();
         await page.locator(".modal-content > div").last().getByRole("button", { name: "Cancel" }).click();
         await expect(page.getByRole("heading", { name: "Projects", exact: true })).toBeVisible();
+        // (d) the paginated fixture directory and its Load more control
+        await page.getByRole("button", { name: "+ New Project" }).click();
+        await page.getByRole("button", { name: "Roots", exact: true }).click();
+        await openFolderRow(page, "paged");
+        await page.locator(".folder-browser-list").evaluate((element) => { element.scrollTop = element.scrollHeight; });
+        const loadMore = page.getByRole("button", { name: "Load more" });
+        await expect(loadMore).toBeVisible();
+        await loadMore.scrollIntoViewIfNeeded();
+        await expect(loadMore).toBeInViewport();
+        if (["375x812", "390x844", "430x932"].includes(vp.name)) {
+          await captureScreen(page, vp.name, "folder-browser-paginated");
+        }
+        await loadMore.click();
+        await expect(page.locator(".folder-item").filter({ hasText: "entry-001" })).toBeAttached();
+        await expect(page.locator(".folder-item").filter({ hasText: "entry-105" })).toBeAttached();
+        await page.getByRole("button", { name: "Cancel", exact: true }).click();
 
         // (d) conversation list (project detail with conversations + native sessions)
         await mockNativeSessions(page);
@@ -274,13 +322,39 @@ test.describe("Screenshot inventory & geometry verification", () => {
         await captureScreen(page, vp.name, "conversation-list");
 
         // Install Collab mock host before clicking conversation
+        await page.route("**/api/models", async (route) => {
+          await route.fulfill({
+            status: 200,
+            contentType: "application/json",
+            body: JSON.stringify({ ok: true, data: { models: ["preferred/model", "catalog/model"], source: "omp", reason: null } }),
+          });
+        });
         const host = await installMockCollabHost(page, { conversationId: fixture.seededConversationId });
         await page.getByRole("heading", { name: "Seeded conversation", exact: true }).click();
 
-        const composer = page.getByRole("textbox", { name: /Send instructions to agent|Turn in flight/ });
+        const composer = page.locator("textarea.composer-input");
         await expect(composer).toBeVisible();
+        await expect.poll(() => host.guestFrames.find((frame) => frame.t === "hello")?.writeToken).toMatch(/^[A-Za-z0-9_-]{22}$/u);
         await host.send(welcomeFrame(false));
+        await expect(composer).toBeEnabled();
 
+        await page.getByText("Conversation model settings").click();
+        const modelInput = page.locator("#conversation-model");
+        await expect(modelInput).toBeVisible();
+        const modelBox = await modelInput.boundingBox();
+        expect(modelBox).not.toBeNull();
+        expect(modelBox!.height, "model selector must meet 44px touch minimum").toBeGreaterThanOrEqual(44);
+        expect(modelBox!.width, "model selector must meet 44px touch minimum").toBeGreaterThanOrEqual(44);
+        await expect(modelInput.locator('option[value="catalog/model"]')).toBeAttached();
+        await expect(page.getByText("Preferred for next launch: preferred/model")).toBeVisible();
+        await expect(page.getByText("Effective model reported now: effective/model")).toBeVisible();
+        if (["375x812", "390x844", "430x932"].includes(vp.name)) {
+          await captureScreen(page, vp.name, "model-settings-expanded");
+          await modelInput.selectOption("catalog/model");
+          await captureScreen(page, vp.name, "model-selector-populated");
+          await modelInput.selectOption("preferred/model");
+        }
+        await page.getByText("Conversation model settings").click();
         // (e) a conversation with a short exchange
         const t1 = 1774435000000;
         await host.send({
@@ -367,6 +441,9 @@ test.describe("Screenshot inventory & geometry verification", () => {
         // (i) the subagent panel
         await host.send({ t: "agents", agents: MOCK_SUBAGENTS });
         const agentsBtn = page.getByRole("button", { name: "Agents (2)" });
+        const header = page.locator(".app-header");
+        await expect.poll(() => header.locator(".conversation-header-title").evaluate((element) => element.getBoundingClientRect().height)).toBeLessThan(60);
+        await expect.poll(() => header.locator(".conversation-header-actions").evaluate((element) => element.getBoundingClientRect().height)).toBeLessThan(50);
         await expect(agentsBtn).toBeVisible();
         await agentsBtn.click();
         await expect(page.locator(".modal-overlay")).toBeVisible();
@@ -383,6 +460,14 @@ test.describe("Screenshot inventory & geometry verification", () => {
         await captureScreen(page, vp.name, "slash-suggestions");
         await composer.fill("");
         await expect(page.locator(".composer-suggestions")).toBeHidden();
+        await composer.fill("/model");
+        await page.getByRole("button", { name: "Send" }).click();
+        await expect(page.locator(".slash-command-intercept")).toBeVisible();
+        if (["375x812", "390x844", "430x932"].includes(vp.name)) {
+          await captureScreen(page, vp.name, "slash-command-intercepted");
+        }
+        await page.getByRole("button", { name: "Cancel", exact: true }).click();
+        await composer.fill("");
 
         // (k) the approval request card
         await host.send({ t: "ui-request", request: MOCK_APPROVAL_REQUEST });
@@ -393,12 +478,47 @@ test.describe("Screenshot inventory & geometry verification", () => {
         });
         await page.waitForTimeout(200);
         await captureScreen(page, vp.name, "approval-request");
+        await host.send(welcomeFrame(true, true));
+        await expect(page.getByText(/Read-only view/)).toBeVisible();
+        await expect(page.locator("textarea.composer-input")).toBeDisabled();
+        await expect(page.getByRole("button", { name: "Send" })).toBeDisabled();
+        await expect(page.getByRole("button", { name: "Stop" })).toHaveCount(0);
+        if (["375x812", "390x844", "430x932"].includes(vp.name)) {
+          await captureScreen(page, vp.name, "read-only-welcome");
+        }
+        await host.send({ t: "ui-request", request: { ...MOCK_APPROVAL_REQUEST, reqId: 102 } });
+        await expect(page.getByRole("button", { name: /Deny/ })).toHaveCount(0);
+        await expect(page.getByText("Read-only link — this request cannot be answered here.")).toBeVisible();
+        if (["375x812", "390x844", "430x932"].includes(vp.name)) {
+          await captureScreen(page, vp.name, "read-only-conversation");
+        }
+
+        await host.send({ t: "ui-request-end", reqId: 102 });
+        await host.send(welcomeFrame(false));
+        await expect(page.getByText(/Read-only view/)).toBeHidden();
+        await expect(composer).toBeEnabled();
+        await composer.fill("");
+        await expect(page.locator(".composer-suggestions")).toBeHidden();
 
         // Interaction assertions on primary mobile viewport (390x844)
         if (vp.name === "390x844") {
+          // Add independent tool and agent state for scroll-preservation checks.
+          await host.send({
+            t: "entry",
+            entry: createToolResultEntry("scroll-tool", "scroll-tool-call", "bash", REALISTIC_TOOL_OUTPUT, false, Date.now() + 100),
+          });
+          await expect(page.locator(".message-card.tool summary")).toBeVisible();
+          await host.send({ t: "agents", agents: MOCK_SUBAGENTS });
+          await expect(agentsBtn).toBeVisible();
+          // The read-only welcome replaces transcript history; restore enough content for scroll tests.
+          for (let index = 0; index < 24; index++) {
+            await host.send({
+              t: "entry",
+              entry: createAssistantMessageEntry(`scroll-fixture-${index}`, `History segment ${index}: ${"reading older content ".repeat(14)}`, Date.now() + index),
+            });
+          }
+          await expect(page.locator(".message-card.assistant")).toHaveCount(24);
           const ms = page.locator(".messages-scroll");
-
-          // (i) scroll up in long transcript, let fixture stream more content -> assert scroll position does NOT jump
           await ms.evaluate((el) => {
             el.scrollTop = 150;
             el.dispatchEvent(new Event("scroll"));
@@ -423,6 +543,14 @@ test.describe("Screenshot inventory & geometry verification", () => {
           // (ii) tap "↓ Latest" -> assert returns to tail
           const latestBtn = page.locator(".latest-button");
           await expect(latestBtn).toBeVisible({ timeout: 5000 });
+          const latestGeometry = await latestBtn.evaluate((button) => {
+            const b = button.getBoundingClientRect();
+            const t = document.querySelector(".messages-scroll")!.getBoundingClientRect();
+            return { box: { x: Math.round(b.x), y: Math.round(b.y), width: Math.round(b.width), height: Math.round(b.height) }, intersects: b.left < t.right && b.right > t.left && b.top < t.bottom && b.bottom > t.top };
+          });
+          expect(latestGeometry.box.height).toBeGreaterThanOrEqual(44);
+          expect(latestGeometry.box.width).toBeGreaterThanOrEqual(44);
+          expect(latestGeometry.intersects).toBe(false);
           await latestBtn.click();
           await page.waitForTimeout(200);
           const distToTail = await ms.evaluate((el) => el.scrollHeight - el.clientHeight - el.scrollTop);
@@ -519,8 +647,8 @@ test.describe("Screenshot inventory & geometry verification", () => {
     md += `## 2. Layout Note: Transcript Scrolling & "Fits Vertically"\n\n`;
     md += `In the initial pre-fix measurement, \`.messages-scroll\` reported \`no-scroll\` (\`scrollHeight === clientHeight = 3325px\`) because \`.conversation-screen\` had \`flex: 1 1 0%\` inside an unconstrained \`#root\`, expanding the entire transcript to the content height. In that state, the transcript container was NOT scrolling internally; the entire browser window/document scrolled instead, preventing the detached condition from ever triggering. After the layout fix (\`flex: 0 0 100dvh\`), \`.messages-scroll\` is constrained to the viewport (\`clientHeight: ~650px\`, \`scrollHeight: ~3325px\`) and correctly scrolls internally (\`scroll-Y\`), allowing the "↓ Latest" button to render and function as designed.\n\n`;
     md += `## 3. Geometry Table Per Screen\n\n`;
-    md += `| Viewport | Screen | Page H-Overflow | .messages-scroll | Body Font / Line-H | Composer Bounding Box | Min Touch Target | Code Scroll/Client | Table Scroll/Client | Latest Btn |\n`;
-    md += `| :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |\n`;
+    md += `| Viewport | Screen | Page H-Overflow | .messages-scroll | Body Font / Line-H | Composer Bounding Box | Model Selector Box | Latest-to-Composer Gap | Min Touch Target | Code Scroll/Client | Table Scroll/Client | Latest Btn |\n`;
+    md += `| :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |\n`;
 
     for (const r of allGeometryRecords) {
       const hOverflow = r.pageHorizontalOverflow ? `⚠️ YES (${r.docScrollWidth} > ${r.windowInnerWidth})` : "NO";
@@ -534,6 +662,7 @@ test.describe("Screenshot inventory & geometry verification", () => {
       const comp = r.composerBox
         ? `${r.composerBox.width}×${r.composerBox.height}@y=${r.composerBox.y} (${r.composerFullyInside ? "in-vp" : "clipped"})`
         : "N/A";
+      const model = r.modelSelectorBox ? `${r.modelSelectorBox.width}×${r.modelSelectorBox.height}@(${r.modelSelectorBox.x}, ${r.modelSelectorBox.y})` : "N/A";
       const touch = r.minTouchTarget
         ? `${r.minTouchTarget.width}×${r.minTouchTarget.height} (\`${r.minTouchTarget.selector}\`)`
         : "N/A";
@@ -544,8 +673,9 @@ test.describe("Screenshot inventory & geometry verification", () => {
         ? `${r.tableScroll.scrollWidth} / ${r.tableScroll.clientWidth} (${r.tableScroll.overflows ? "scroll-X" : "fits"})`
         : "N/A";
       const latest = r.latestButtonVisible ? "Visible" : "Hidden";
+      const latestGap = r.latestComposerGap === null ? "N/A" : `${r.latestComposerGap}px`;
 
-      md += `| ${r.viewport} | ${r.screen} | ${hOverflow} | ${msgScroll} | ${font} | ${comp} | ${touch} | ${code} | ${table} | ${latest} |\n`;
+      md += `| ${r.viewport} | ${r.screen} | ${hOverflow} | ${msgScroll} | ${font} | ${comp} | ${model} | ${latestGap} | ${touch} | ${code} | ${table} | ${latest} |\n`;
     }
 
     md += `\n## 3. Detailed Screenshot Inventory\n\n`;
@@ -560,6 +690,10 @@ test.describe("Screenshot inventory & geometry verification", () => {
       if (r.composerBox) {
         md += `- **Composer Bounding Box**: ${r.composerBox.width}px × ${r.composerBox.height}px at (x: ${r.composerBox.x}, y: ${r.composerBox.y}), fully inside viewport: ${r.composerFullyInside ? "YES" : "NO"}, bottom padding: ${r.composerBottomPadding}\n`;
       }
+      if (r.latestButtonBox) md += `- **Latest button box**: ${r.latestButtonBox.width}px × ${r.latestButtonBox.height}px at (${r.latestButtonBox.x}, ${r.latestButtonBox.y})\n`;
+      if (r.latestComposerGap !== null) md += `- **Latest-to-composer gap**: ${r.latestComposerGap}px\n`;
+      if (r.modelSelectorBox) md += `- **Model selector box**: ${r.modelSelectorBox.width}px × ${r.modelSelectorBox.height}px at (${r.modelSelectorBox.x}, ${r.modelSelectorBox.y})\n`;
+      if (r.transcriptContentBox) md += `- **Transcript box**: ${r.transcriptContentBox.width}px × ${r.transcriptContentBox.height}px at (${r.transcriptContentBox.x}, ${r.transcriptContentBox.y}); Latest intersection: ${r.latestIntersectsTranscript}\n`;
       if (r.codeBlockScroll) {
         md += `- **Code Block Scroll Geometry**: scrollWidth: ${r.codeBlockScroll.scrollWidth}px, clientWidth: ${r.codeBlockScroll.clientWidth}px (horizontal scroll: ${r.codeBlockScroll.overflows ? "YES" : "NO"})\n`;
       }

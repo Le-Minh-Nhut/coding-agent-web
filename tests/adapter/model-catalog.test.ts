@@ -1,7 +1,7 @@
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   DefaultModelCatalogService,
   parseOmpModelsOutput,
@@ -109,6 +109,38 @@ describe("model-catalog", () => {
       binary: stubBinary,
       args: ["models", "--json"],
     });
+  });
+
+  it("distinguishes a real empty catalog from malformed or failed discovery", async () => {
+    process.env.CAW_TEST_OMP_ARGV_FILE = argvFile;
+    process.env.CAW_TEST_OMP_OUTPUT_FILE = outputFile;
+    const service = new DefaultModelCatalogService({ ompBinary: stubBinary });
+
+    await writeFile(outputFile, JSON.stringify({ models: [] }));
+    await expect(service.listModelsDetailed()).resolves.toEqual({ models: [], source: "omp", reason: null });
+
+    await writeFile(outputFile, "not json");
+    const malformed = await new DefaultModelCatalogService({ ompBinary: stubBinary }).listModelsDetailed();
+    expect(malformed).toMatchObject({ models: [], source: "unavailable", reason: expect.stringMatching(/invalid JSON/i) });
+
+    const missing = await new DefaultModelCatalogService({ ompBinary: path.join(testRoot, "missing-omp") }).listModelsDetailed();
+    expect(missing).toMatchObject({ models: [], source: "unavailable", reason: expect.stringMatching(/ENOENT/i) });
+  });
+
+  it("retries catalog failures after the short failure cache expires", async () => {
+    process.env.CAW_TEST_OMP_ARGV_FILE = argvFile;
+    process.env.CAW_TEST_OMP_OUTPUT_FILE = path.join(testRoot, "missing.json");
+    const service = new DefaultModelCatalogService({ ompBinary: stubBinary });
+    const now = vi.spyOn(Date, "now").mockReturnValue(1_000);
+    try {
+      expect((await service.listModelsDetailed()).source).toBe("unavailable");
+      await writeFile(outputFile, JSON.stringify(modelListing));
+      process.env.CAW_TEST_OMP_OUTPUT_FILE = outputFile;
+      now.mockReturnValue(5_000);
+      await expect(service.listModelsDetailed()).resolves.toMatchObject({ source: "omp", reason: null, models: expect.arrayContaining(["cx/cx/gpt-6-luna"]) });
+    } finally {
+      now.mockRestore();
+    }
   });
 
   it("returns an empty unknown result for missing binaries, unsupported output, and unreadable catalog sources", async () => {

@@ -53,8 +53,8 @@ describe("collab link identity evidence", () => {
     delete process.env.CAW_STUB_LINK;
   });
 
-  it("does not fabricate identity when the CLI returns only a url", async () => {
-    process.env.CAW_STUB_LINK = JSON.stringify({ url: "wss://relay.example/room/def" });
+  it("does not fabricate identity when the CLI omits identity fields", async () => {
+    process.env.CAW_STUB_LINK = JSON.stringify({ url: "wss://relay.example/room/def", access: "control" });
     const link = await service().link("requested-instance", "control");
     // Never the requested id, never a defaulted generation: the caller must be
     // able to tell that this result is not a verified match.
@@ -66,15 +66,15 @@ describe("collab link identity evidence", () => {
   });
 
   it("does not fabricate identity from malformed fields", async () => {
-    process.env.CAW_STUB_LINK = JSON.stringify({ url: "wss://relay.example/room/ghi", instanceId: 42, generation: "7" });
+    process.env.CAW_STUB_LINK = JSON.stringify({ url: "wss://relay.example/room/ghi", instanceId: 42, generation: "7", access: "control" });
     const link = await service().link("requested-instance", "control");
     expect(link.instanceId).toBeNull();
     expect(link.generation).toBeNull();
     delete process.env.CAW_STUB_LINK;
   });
 
-  it("still refuses a response with no url at all", async () => {
-    process.env.CAW_STUB_LINK = JSON.stringify({ instanceId: "real-instance", generation: 3 });
+  it("refuses a response that omits its granted access", async () => {
+    process.env.CAW_STUB_LINK = JSON.stringify({ url: "wss://relay.example/room/no-access", instanceId: "real-instance", generation: 3 });
     await expect(service().link("real-instance", "control")).rejects.toMatchObject({ code: "link_unavailable" });
     delete process.env.CAW_STUB_LINK;
   });

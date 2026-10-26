@@ -422,7 +422,7 @@ async function openForTest(key: CryptoKey, sealed: Uint8Array<ArrayBuffer>): Pro
   }
 }
 
-export function welcomeFrame(busy: boolean) {
+export function welcomeFrame(busy: boolean, readOnly = false) {
   return {
     t: "welcome",
     proto: 3,
@@ -430,6 +430,7 @@ export function welcomeFrame(busy: boolean) {
     state: { isStreaming: busy, queuedMessageCount: 0, cwd: "/tmp", participants: [] },
     agents: [],
     entryCount: 0,
+    ...(readOnly ? { readOnly: true } : {}),
   };
 }
 

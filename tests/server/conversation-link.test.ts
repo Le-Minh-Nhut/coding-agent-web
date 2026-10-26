@@ -128,9 +128,10 @@ describe("live session link route", () => {
   it("ARCH-3: rejects minting if returned room generation mismatches observed listing generation", async () => {
     const fakeRegistry = {
       list: async () => [
-        { sessionId: "sess-1", instanceId: "inst-1", generation: 3, relayConnected: true },
+        { sessionId: "sess-1", instanceId: "inst-1", generation: 3, relayConnected: true, access: "control" },
       ],
       link: async () => ({
+        access: "control",
         instanceId: "inst-1",
         generation: 4,
         url: "wss://relay.test/r/successor-room.key",
@@ -157,9 +158,10 @@ describe("live session link route", () => {
   it("ARCH-3: rejects minting if returned instanceId mismatches observed instanceId", async () => {
     const fakeRegistry = {
       list: async () => [
-        { sessionId: "sess-1", instanceId: "inst-1", generation: 3, relayConnected: true },
+        { sessionId: "sess-1", instanceId: "inst-1", generation: 3, relayConnected: true, access: "control" },
       ],
       link: async () => ({
+        access: "control",
         instanceId: "inst-2",
         generation: 3,
         url: "wss://relay.test/r/other-room.key",
@@ -187,8 +189,8 @@ describe("live session link route", () => {
     ["instanceId", { generation: 3 }],
   ])("ARCH-3: missing returned %s refuses the URL as stale_generation", async (_field, linkFields) => {
     const fakeRegistry = {
-      list: async () => [{ sessionId: "sess-1", instanceId: "inst-1", generation: 3, relayConnected: true }],
-      link: async () => ({ ...linkFields, url: "wss://relay.test/r/unverified-room.key" }),
+      list: async () => [{ sessionId: "sess-1", instanceId: "inst-1", generation: 3, relayConnected: true, access: "control" }],
+      link: async () => ({ ...linkFields, access: "control", url: "wss://relay.test/r/unverified-room.key" }),
     };
     const { app, headers, conversation, store } = await fixture({ mintLink: createMintLink(fakeRegistry) });
     await store.updateConversation(conversation.id, { nativeSessionId: "sess-1" });
@@ -203,9 +205,10 @@ describe("live session link route", () => {
   it("ARCH-3: happy path mints URL when generation and instanceId match", async () => {
     const fakeRegistry = {
       list: async () => [
-        { sessionId: "sess-1", instanceId: "inst-1", generation: 3, relayConnected: true },
+        { sessionId: "sess-1", instanceId: "inst-1", generation: 3, relayConnected: true, access: "control" },
       ],
       link: async () => ({
+        access: "control",
         instanceId: "inst-1",
         generation: 3,
         url: "wss://relay.test/r/valid-room.key",
@@ -228,7 +231,94 @@ describe("live session link route", () => {
     expect(response.json().data.instanceId).toBe("inst-1");
     await app.close();
   });
+  it("honors the host capability ceiling and allows only explicit view downgrade", async () => {
+    const invoke = async (hostAccess: "control" | "view" | null, requested: "control" | "view") => {
+      let mintedAccess: string | undefined;
+      const fakeRegistry = {
+        list: async () => [{ sessionId: "sess-access", instanceId: "inst-access", generation: 1, relayConnected: true, access: hostAccess }],
+        link: async (_instanceId: string, access: "control" | "view") => {
+          mintedAccess = access;
+          return { instanceId: "inst-access", generation: 1, access, url: "wss://relay.test/r/access-room.key" };
+        },
+      };
+      const { app, headers, conversation, store } = await fixture({ mintLink: createMintLink(fakeRegistry) });
+      await store.updateConversation(conversation.id, { nativeSessionId: "sess-access" });
+      const response = await app.inject({ method: "POST", url: `/api/conversations/${conversation.id}/link?access=${requested}`, headers });
+      await app.close();
+      return { response, mintedAccess };
+    };
 
+    const viewControl = await invoke("view", "control");
+    expect(viewControl.response.statusCode).toBe(409);
+    expect(viewControl.response.json().error).toMatchObject({ code: "capability_missing", message: expect.stringMatching(/offers view.*control.*requested/i) });
+    expect(viewControl.mintedAccess).toBeUndefined();
+
+    const viewView = await invoke("view", "view");
+    expect(viewView.response.statusCode).toBe(200);
+    expect(viewView.mintedAccess).toBe("view");
+    expect(viewView.response.json().data.access).toBe("view");
+
+    for (const requested of ["control", "view"] as const) {
+      const control = await invoke("control", requested);
+      expect(control.response.statusCode).toBe(200);
+      expect(control.mintedAccess).toBe(requested);
+      expect(control.response.json().data.access).toBe(requested === "view" ? "view" : "full");
+    }
+
+    for (const requested of ["control", "view"] as const) {
+      const unknown = await invoke(null, requested);
+      expect(unknown.response.statusCode).toBe(409);
+      expect(unknown.response.json().error.code).toBe("capability_missing");
+      expect(unknown.mintedAccess).toBeUndefined();
+    }
+  });
+
+  it("rechecks host access after stale_generation retry and refuses a view-only successor", async () => {
+    let hostAccess: "control" | "view" = "control";
+    let generation = 1;
+    let mintCalls = 0;
+    const fakeRegistry = {
+      list: async () => [{ sessionId: "sess-retry", instanceId: "inst-retry", generation, relayConnected: true, access: hostAccess }],
+      link: async (instanceId: string, access: "control" | "view") => {
+        mintCalls++;
+        if (mintCalls === 1) {
+          hostAccess = "view";
+          generation++;
+          throw Object.assign(new Error("stale room"), { code: "stale_generation" });
+        }
+        return { instanceId, generation, access, url: "wss://relay.test/r/should-not-be-minted.key" };
+      },
+    };
+    const { app, headers, conversation, store } = await fixture({ mintLink: createMintLink(fakeRegistry) });
+    await store.updateConversation(conversation.id, { nativeSessionId: "sess-retry" });
+
+    const first = await app.inject({ method: "POST", url: `/api/conversations/${conversation.id}/link?access=control`, headers });
+    expect(first.statusCode).toBe(409);
+    expect(first.json().error.code).toBe("stale_generation");
+    expect(first.body).not.toContain("should-not-be-minted");
+
+    const retry = await app.inject({ method: "POST", url: `/api/conversations/${conversation.id}/link?access=control`, headers });
+    expect(retry.statusCode).toBe(409);
+    expect(retry.json().error.code).toBe("capability_missing");
+    expect(retry.body).not.toContain("should-not-be-minted");
+    expect(mintCalls).toBe(1);
+    await app.close();
+  });
+
+  it("refuses a minted access level that does not match the host grant", async () => {
+    const fakeRegistry = {
+      list: async () => [{ sessionId: "sess-mismatch", instanceId: "inst-mismatch", generation: 1, relayConnected: true, access: "view" }],
+      link: async (instanceId: string) => ({ instanceId, generation: 1, access: "control" as const, url: "wss://relay.test/r/overstated-control.key" }),
+    };
+    const { app, headers, conversation, store } = await fixture({ mintLink: createMintLink(fakeRegistry) });
+    await store.updateConversation(conversation.id, { nativeSessionId: "sess-mismatch" });
+
+    const response = await app.inject({ method: "POST", url: `/api/conversations/${conversation.id}/link?access=view`, headers });
+    expect(response.statusCode).toBe(409);
+    expect(response.json().error.code).toBe("capability_missing");
+    expect(response.body).not.toContain("overstated-control");
+    await app.close();
+  });
   it("reports an unavailable room as such instead of an internal error", async () => {
     const { app, headers, conversation } = await fixture({
       mintLink: async () => {
@@ -283,9 +373,10 @@ describe("live session link route", () => {
     const secret = "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyAhIiMkJSYnKCkqKywtLi8w";
     const fakeRegistry = {
       list: async () => [
-        { sessionId: "sess-rewrite", instanceId: "inst-rewrite", generation: 1, relayConnected: true },
+        { sessionId: "sess-rewrite", instanceId: "inst-rewrite", generation: 1, relayConnected: true, access: "control" },
       ],
       link: async () => ({
+        access: "control",
         instanceId: "inst-rewrite",
         generation: 1,
         url: `ws://127.0.0.1:9999/r/${roomId}.${secret}`,
@@ -324,9 +415,10 @@ describe("live session link route", () => {
     const secret = "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyAhIiMkJSYnKCkqKywtLi8w";
     const fakeRegistry = {
       list: async () => [
-        { sessionId: "sess-frag", instanceId: "inst-frag", generation: 2, relayConnected: true },
+        { sessionId: "sess-frag", instanceId: "inst-frag", generation: 2, relayConnected: true, access: "control" },
       ],
       link: async () => ({
+        access: "control",
         instanceId: "inst-frag",
         generation: 2,
         url: `http://127.0.0.1:8812/#ws://127.0.0.1:8812/r/${roomId}.${secret}`,
@@ -362,9 +454,10 @@ describe("live session link route", () => {
     for (const badUrl of badPaths) {
       const fakeRegistry = {
         list: async () => [
-          { sessionId: "sess-bad", instanceId: "inst-bad", generation: 1, relayConnected: true },
+          { sessionId: "sess-bad", instanceId: "inst-bad", generation: 1, relayConnected: true, access: "control" },
         ],
         link: async () => ({
+          access: "control",
           instanceId: "inst-bad",
           generation: 1,
           url: badUrl,

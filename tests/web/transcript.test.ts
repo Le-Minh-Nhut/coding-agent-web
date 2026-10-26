@@ -151,7 +151,7 @@ describe("Collab transcript reducer", () => {
     const state = trackTranscriptRequest(createTranscriptState(), 9, "agent-a");
     const result = apply(state, { t: "transcript", reqId: 9, text: "partial transcript", newSize: 18, error: "read failed" });
 
-    expect(result.transcripts["agent-a"]).toEqual({ text: "partial transcript", newSize: 18, error: "read failed" });
+    expect(result.transcripts["agent-a"]).toEqual({ text: "", newSize: 0, carry: "", error: "read failed" });
     expect(result.transcriptRequests).toEqual({});
   });
 
@@ -159,7 +159,7 @@ describe("Collab transcript reducer", () => {
     let state = trackTranscriptRequest(createTranscriptState(), 10, "agent-a");
     state = trackTranscriptRequest(state, 11, "agent-b");
     state = forgetTranscriptRequest(state, 10);
-    expect(state.transcriptRequests).toEqual({ 11: "agent-b" });
+    expect(state.transcriptRequests).toEqual({ 11: { agentId: "agent-b", fromByte: 0 } });
     expect(forgetTranscriptRequest(state, 99)).toBe(state);
     expect(clearTranscriptRequests(state).transcriptRequests).toEqual({});
   });
@@ -203,6 +203,60 @@ describe("Collab transcript reducer", () => {
     expect(state.messages).toHaveLength(1);
     expect(state.messages[0]).toMatchObject({ isRunning: false, text: "done" });
   });
+  it("maps failed and aborted subagent bus updates to alert and warning notices without disconnecting", () => {
+    let state = apply(createTranscriptState(), {
+      t: "welcome", proto: 3,
+      header: { type: "session", id: "native-session", cwd: "/workspace", timestamp: "2026-10-25T00:00:00Z" },
+      state: sessionState(), agents: [], entryCount: 0,
+    });
+    state = apply(state, { t: "bus", channel: "task:subagent:progress", data: {
+      index: 0, agent: "Scout", task: "inspect", progress: { id: "sub-1", status: "failed", currentTool: "bash" },
+    } });
+    expect(state.notice).toEqual({ level: "error", message: "Scout: inspect (failed) · bash" });
+    expect(state.connectionStatus).toBe("live");
+
+    state = apply(state, { t: "bus", channel: "task:subagent:lifecycle", data: {
+      id: "sub-1", agent: "Scout", status: "aborted", index: 0,
+    } });
+    expect(state.notice).toEqual({ level: "warning", message: "Scout aborted" });
+    expect(state.connectionStatus).toBe("live");
+  });
+
+  it("preserves visible custom entries and explicitly represents non-text content blocks", () => {
+    const frames: HostFrame[] = [
+      { t: "entry", entry: {
+        type: "custom_message", id: "omitted", parentId: null, timestamp: "2026-10-25T00:00:00Z",
+        customType: "collab-entry-too-large", content: "[tool result omitted by host]", display: true,
+      } },
+      { t: "entry", entry: {
+        type: "message", id: "mixed", parentId: null, timestamp: "2026-10-25T00:00:01Z",
+        message: {
+          role: "assistant", content: [
+            { type: "text", text: "Result" },
+            { type: "thinking", thinking: "reasoning" },
+            { type: "toolCall", id: "tc", name: "bash", arguments: { command: "pwd" } },
+            { type: "futureBlock" } as never,
+            { type: "text", text: "done" },
+          ], model: "provider/model", usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { total: 0 } },
+          stopReason: "stop", timestamp: 2,
+        },
+      } },
+      { t: "entry", entry: {
+        type: "message", id: "image", parentId: "mixed", timestamp: "2026-10-25T00:00:02Z",
+        message: { role: "user", content: [
+          { type: "text", text: "Inspect this" },
+          { type: "image", mimeType: "image/png", data: "aGVsbG8=" },
+        ], timestamp: 3 },
+      } },
+    ];
+    const state = frames.reduce(apply, createTranscriptState());
+    expect(state.messages).toEqual([
+      expect.objectContaining({ id: "omitted", role: "notice", text: "collab-entry-too-large: [tool result omitted by host]" }),
+      expect.objectContaining({ id: "mixed", role: "assistant", text: "Result\n[Reasoning]\nreasoning\n[Tool call: bash] {\n  \"command\": \"pwd\"\n}\n[Unsupported content: futureBlock]\ndone" }),
+      expect.objectContaining({ id: "image", role: "user", text: "Inspect this\n![Attachment](data:image/png;base64,aGVsbG8=)" }),
+    ]);
+  });
+
 
   it("preserves approval selection metadata through the reducer", () => {
     const request = {
