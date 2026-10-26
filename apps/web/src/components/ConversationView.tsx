@@ -1,16 +1,17 @@
-import { memo, useMemo, useState, useEffect, useRef, useCallback, useLayoutEffect } from "react";
-import { api } from "../api.js";
+import React, { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { api, type SavedConversationHistory } from "../api.js";
 import { MarkdownCodeBlock, renderMarkdown } from "../sanitize.js";
-import { SubagentPanel } from "./SubagentPanel.js";
 import { ActivityPanel } from "./ActivityPanel.js";
+import { SubagentPanel } from "./SubagentPanel.js";
 import {
   CollabSocket,
   parseCollabLink,
   importRoomKey,
   encodeBase64Url,
   type HostFrame,
+  type SessionEntry,
 } from "@caw/collab-protocol";
-import { clearTranscriptRequests, createTranscriptState, forgetTranscriptRequest, reduceHostFrame, setConnectionStatus, trackTranscriptRequest, type TranscriptState } from "../transcript.js";
+import { clearTranscriptRequests, createTranscriptState, forgetTranscriptRequest, reduceHostFrame, setConnectionStatus, trackTranscriptRequest, transcriptMessagesFromEntries, type TranscriptMessage, type TranscriptReply, type TranscriptState } from "../transcript.js";
 import { findSlashCommand, slashCommands, type SlashCommand } from "../commands.js";
 import type { AttachInstructions, Conversation } from "@caw/contracts";
 interface ConversationViewProps {
@@ -22,7 +23,7 @@ interface ConversationViewProps {
 
 interface DisplayMessage {
   id: string;
-  role: "user" | "assistant" | "tool";
+  role: "user" | "assistant" | "tool" | "notice";
   text: string;
   toolName?: string;
   isError?: boolean;
@@ -30,10 +31,23 @@ interface DisplayMessage {
   awaitingHost?: boolean;
   hostEchoCount?: number;
 }
+interface PendingPrompt {
+  text: string;
+  submitted: string;
+  hostEchoCount: number;
+  optimisticId: string | null;
+  sent: boolean;
+  refusalMessage?: string;
+  draftVersion: number;
+}
+
 
 const TAIL_THRESHOLD_PX = 80;
 const MAX_TRANSCRIPT_REQUESTS = 64;
 const TRANSCRIPT_REQUEST_TIMEOUT_MS = 15_000;
+const TRANSCRIPT_POLL_MS = 1200;
+const STARTUP_PROMPT_REFUSAL = "prompting is unavailable until the host finishes starting up";
+
 
 export function autosizeComposer(element: HTMLTextAreaElement | null): void {
   if (!element) return;
@@ -46,8 +60,9 @@ export function autosizeComposer(element: HTMLTextAreaElement | null): void {
 export function shouldSubmitOnEnter(
   event: Pick<React.KeyboardEvent<HTMLTextAreaElement>, "key" | "shiftKey" | "nativeEvent">,
   composing: boolean,
+  coarsePointer = typeof window !== "undefined" && window.matchMedia?.("(pointer: coarse)").matches === true,
 ): boolean {
-  return event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing && !composing;
+  return !coarsePointer && event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing && !composing;
 }
 
 const MessageRow = memo(function MessageRow({ message }: { message: DisplayMessage }) {
@@ -63,7 +78,7 @@ const MessageRow = memo(function MessageRow({ message }: { message: DisplayMessa
           <div className="message-content"><MarkdownCodeBlock code={message.text} language="" /></div>
         </details>
       ) : (
-        <div className="message-content">{renderMarkdown(message.text)}</div>
+        <div className="message-content">{message.role === "notice" ? <p>{message.text}</p> : renderMarkdown(message.text)}</div>
       )}
     </div>
   );
@@ -79,18 +94,23 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
   const transcriptRef = useRef(transcript);
   const [status, setStatus] = useState<ConnectionStatus>("connecting");
   const [sendError, setSendError] = useState<string | null>(null);
+  const [optimisticMessages, setOptimisticMessages] = useState<DisplayMessage[]>([]);
   const [inputText, setInputText] = useState(draft);
   const [isDetached, setIsDetached] = useState(false);
   const [attachInfo, setAttachInfo] = useState<AttachInstructions | null>(null);
   const [linkUnavailable, setLinkUnavailable] = useState(false);
   const [interceptedCommand, setInterceptedCommand] = useState<SlashCommand | null>(null);
+  const [modelCatalogState, setModelCatalogState] = useState<{ status: "loading" } | { status: "loaded"; models: string[] } | { status: "empty" } | { status: "unavailable"; reason: string } | { status: "error"; message: string }>({ status: "loading" });
   const [modelDraft, setModelDraft] = useState("");
   const [modelMessage, setModelMessage] = useState("");
   const [modelBusy, setModelBusy] = useState(false);
   const [showSubagents, setShowSubagents] = useState(false);
   const [showActivity, setShowActivity] = useState(false);
   const [transcriptErrors, setTranscriptErrors] = useState<Record<string, string>>({});
-  const [optimisticMessages, setOptimisticMessages] = useState<DisplayMessage[]>([]);
+  const [savedHistory, setSavedHistory] = useState<(SavedConversationHistory & { messages: TranscriptMessage[] }) | null>(null);
+  const [historyError, setHistoryError] = useState<string | null>(null);
+  const [historyLive, setHistoryLive] = useState(false);
+  const [historyLoading, setHistoryLoading] = useState(false);
   const [uiEditorValue, setUiEditorValue] = useState("");
   const inputValueRef = useRef(draft);
   const messagesScrollRef = useRef<HTMLDivElement | null>(null);
@@ -104,22 +124,31 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
   const modelInputRef = useRef<HTMLInputElement | null>(null);
   const socketRef = useRef<CollabSocket | null>(null);
   const pendingUiResponsesRef = useRef(new Set<number>());
+  const sendingPromptTextsRef = useRef(new Set<string>());
+  const pendingPromptRef = useRef<PendingPrompt[]>([]);
   const localIdRef = useRef(0);
-  const sendGuardRef = useRef<string | null>(null);
+  const sendGuardRef = useRef<{ id: number; text: string } | null>(null);
+  const sendVersionRef = useRef(0);
+  const sendIdRef = useRef(0);
+  const connectionGenerationRef = useRef(0);
+  const conversationIdRef = useRef(conversationId);
+  conversationIdRef.current = conversationId;
+  const watchedTranscriptAgentRef = useRef<string | null>(null);
   const reqIdCounterRef = useRef(1);
-  const transcriptRequestsRef = useRef(new Map<number, { agentId: string; timer: ReturnType<typeof setTimeout> }>());
+  const transcriptRequestsRef = useRef(new Map<number, { agentId: string; fromByte: number; timer: ReturnType<typeof setTimeout> }>());
   const rawUrlRef = useRef<string | null>(null);
 
   const streamingText = transcript.streamingMessage?.content
     .filter((part) => part.type === "text")
     .map((part) => part.text)
     .join("") ?? "";
+  const isShowingSavedHistory = linkUnavailable && savedHistory !== null;
   const commandSuggestions = inputText.startsWith("/") && !/\s/.test(inputText)
     ? slashCommands.filter((command) => command.name.startsWith(inputText)).slice(0, 5)
     : [];
   const agents = transcript.agents;
-  const transcripts = useMemo(() => Object.fromEntries(Object.entries(transcript.transcripts).map(([id, reply]) => [id, reply.text])), [transcript.transcripts]);
-  const loadingAgentIds = useMemo(() => [...new Set(Object.values(transcript.transcriptRequests))], [transcript.transcriptRequests]);
+  const transcripts = transcript.transcripts;
+  const loadingAgentIds = useMemo(() => [...new Set(Object.values(transcript.transcriptRequests).map((request) => request.agentId))], [transcript.transcriptRequests]);
   const activeUiRequest = transcript.uiRequests.current;
   const uiRequestQueue = transcript.uiRequests.queue;
   useEffect(() => {
@@ -146,12 +175,29 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     });
   }, [transcript.messages]);
 
+  const recoverRefusedPrompt = (prompt: PendingPrompt): void => {
+    pendingPromptRef.current = pendingPromptRef.current.filter((pending) => pending !== prompt);
+    if (prompt.optimisticId) setOptimisticMessages((previous) => previous.filter((message) => message.id !== prompt.optimisticId));
+    if (sendVersionRef.current !== prompt.draftVersion) return;
+    inputValueRef.current = prompt.text;
+    setInputText(prompt.text);
+    onDraftChange?.(prompt.text);
+  };
+  const removeAcknowledgedPrompts = (): void => {
+    const hostCounts = new Map<string, number>();
+    for (const message of transcriptRef.current.messages) {
+      if (message.role === "user") hostCounts.set(message.text, (hostCounts.get(message.text) ?? 0) + 1);
+    }
+    pendingPromptRef.current = pendingPromptRef.current.filter((prompt) => (hostCounts.get(prompt.submitted) ?? 0) <= prompt.hostEchoCount);
+  };
+
   const updateTranscript = (frame: HostFrame): void => {
     const next = reduceHostFrame(transcriptRef.current, frame);
     transcriptRef.current = next;
     setTranscript(next);
     setStatus(next.connectionStatus === "live" ? next.turnStatus : next.connectionStatus);
     if (frame.t === "welcome") sendGuardRef.current = null;
+    if ((frame.t === "welcome" || frame.t === "state") && next.error === null) setSendError(null);
   };
 
   const flushPendingStream = (): void => {
@@ -171,17 +217,31 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     }
     flushPendingStream();
     updateTranscript(frame);
+    if (frame.t === "entry" || frame.t === "snapshot-chunk" || (frame.t === "event" && frame.event.type === "message_end" && frame.event.message.role === "user")) removeAcknowledgedPrompts();
+    if (frame.t === "error") {
+      if (frame.message === STARTUP_PROMPT_REFUSAL) {
+        const prompt = pendingPromptRef.current.find((pending) => !pending.refusalMessage);
+        if (prompt) {
+          prompt.refusalMessage = frame.message;
+          if (prompt.sent) recoverRefusedPrompt(prompt);
+        }
+      }
+      setSendError(frame.message);
+    }
+    if (frame.t === "bye") setSendError(frame.reason);
     if (frame.t === "transcript") {
       const request = transcriptRequestsRef.current.get(frame.reqId);
       if (request) {
         clearTimeout(request.timer);
         transcriptRequestsRef.current.delete(frame.reqId);
-        setTranscriptErrors((prev) => {
-          const next = { ...prev };
-          if (frame.error) next[request.agentId] = frame.error;
-          else delete next[request.agentId];
-          return next;
-        });
+        if (request.agentId === watchedTranscriptAgentRef.current) {
+          setTranscriptErrors((prev) => {
+            const next = { ...prev };
+            if (frame.error) next[request.agentId] = frame.error;
+            else delete next[request.agentId];
+            return next;
+          });
+        }
       }
     }
   };
@@ -222,6 +282,10 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
   }, []);
 
   useLayoutEffect(() => autosizeComposer(composerRef.current), [inputText]);
+  useEffect(() => {
+    inputValueRef.current = draft;
+    setInputText(draft);
+  }, [draft]);
 
   const goToLatest = (): void => {
     const element = messagesScrollRef.current;
@@ -233,19 +297,72 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
 
 
   useEffect(() => {
+    transcriptRef.current = createTranscriptState();
+    setTranscript(transcriptRef.current);
+    setConversation(null);
+    setLinkUnavailable(false);
+    setSavedHistory(null);
+    setHistoryLive(false);
+    setHistoryLoading(false);
+
+    sendVersionRef.current++;
+    pendingPromptRef.current = [];
+    setSendError(null);
+    sendingPromptTextsRef.current.clear();
+    const currentId = conversationId;
     api.getConversation(conversationId).then((res) => {
-      if (res.ok) {
+      if (conversationIdRef.current === currentId && res.ok) {
         setConversation(res.data);
         setModelDraft(res.data.modelPreference ?? res.data.model ?? "");
       }
     });
     api.getAttachInstructions(conversationId).then((res) => {
-      if (res.ok) setAttachInfo(res.data);
+      if (conversationIdRef.current === currentId && res.ok) setAttachInfo(res.data);
     });
   }, [conversationId]);
+  useEffect(() => {
+    if (!linkUnavailable) return;
+    let active = true;
+    setHistoryLoading(true);
+    void api.getConversationHistory(conversationId).then((result) => {
+      if (!active) return;
+      setHistoryLoading(false);
+      if (result.ok) {
+        setSavedHistory({ ...result.data, messages: transcriptMessagesFromEntries(result.data.entries as unknown as SessionEntry[]) });
+      } else if (result.error.code === "conflict_owner") {
+        setHistoryLive(true);
+      } else if (result.error.code !== "not_found") {
+        setHistoryError(result.error.message || "Could not load saved transcript.");
+      }
+    }).catch((error: unknown) => {
+      if (active) {
+        setHistoryLoading(false);
+        setHistoryError(error instanceof Error ? error.message : "Could not load saved transcript.");
+      }
+    });
+    return () => { active = false; };
+  }, [conversationId, linkUnavailable]);
+  useEffect(() => {
+    let active = true;
+    void Promise.resolve().then(() => api.getModels()).then((result) => {
+      if (!active) return;
+      if (!result.ok) setModelCatalogState({ status: "error", message: result.error.message });
+      else if (result.data.source === "unavailable") setModelCatalogState({ status: "unavailable", reason: result.data.reason ?? "Model catalog unavailable." });
+      else if (result.data.models.length === 0) setModelCatalogState({ status: "empty" });
+      else setModelCatalogState({ status: "loaded", models: result.data.models });
+    }).catch((error: unknown) => {
+      if (active) setModelCatalogState({ status: "error", message: error instanceof Error ? error.message : "Could not load model catalog." });
+    });
+    return () => { active = false; };
+  }, []);
 
   const connectToCollab = useCallback(async (retryStale = true) => {
+    const generation = ++connectionGenerationRef.current;
+    const isCurrent = () => connectionGenerationRef.current === generation && conversationIdRef.current === conversationId;
+    socketRef.current?.close();
+    socketRef.current = null;
     const linkRes = await api.getConversationLink(conversationId);
+    if (!isCurrent()) return;
     if (!linkRes.ok) {
       if (linkRes.error.code === "link_unavailable") {
         setLinkUnavailable(true);
@@ -255,7 +372,7 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
         return;
       }
       if (linkRes.error.code === "stale_generation" && retryStale) {
-        connectToCollab(false);
+        void connectToCollab(false);
         return;
       }
       setStatus("disconnected");
@@ -263,6 +380,8 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     }
 
     setLinkUnavailable(false);
+    setSavedHistory(null);
+    setHistoryLive(false);
     rawUrlRef.current = linkRes.data.url;
     const parsed = parseCollabLink(rawUrlRef.current);
     if ("error" in parsed) {
@@ -270,14 +389,20 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
       return;
     }
     try {
-      const { key, writeToken } = await importRoomKey(parsed.key);
+      const { key } = await importRoomKey(parsed.key);
+      const writeToken = parsed.writeToken;
+      if (!isCurrent()) return;
       const socket = new CollabSocket({ wsUrl: parsed.wsUrl, role: "guest", key });
       socket.onOpen = () => {
+        if (!isCurrent() || socketRef.current !== socket) return;
         setStatus("connecting");
-        socket.send({ t: "hello", proto: 3, name: "Mobile Web Controller", ...(writeToken ? { writeToken: encodeBase64Url(writeToken) } : {}) });
+        void socket.send({ t: "hello", proto: 3, name: "Mobile Web Controller", ...(writeToken ? { writeToken: encodeBase64Url(writeToken) } : {}) });
       };
-      socket.onFrame = (frame) => handleHostFrameRef.current(frame);
+      socket.onFrame = (frame) => {
+        if (isCurrent() && socketRef.current === socket) handleHostFrameRef.current(frame);
+      };
       socket.onClose = (_reason, willReconnect) => {
+        if (!isCurrent() || socketRef.current !== socket) return;
         const connection = willReconnect ? "reconnecting" : "disconnected";
         setStatus(connection);
         transcriptRef.current = setConnectionStatus(transcriptRef.current, connection);
@@ -286,53 +411,85 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
       socketRef.current = socket;
       socket.connect();
     } catch {
-      setStatus("disconnected");
+      if (isCurrent()) setStatus("disconnected");
     }
   }, [conversationId]);
 
   useEffect(() => {
-    connectToCollab(true);
+    void connectToCollab(true);
     return () => {
+      connectionGenerationRef.current++;
       socketRef.current?.close();
       socketRef.current = null;
       rawUrlRef.current = null;
     };
   }, [connectToCollab]);
 
+
   const sendPrompt = (text: string, allowSlashCommand = false): void => {
     const trimmed = text.trim();
-    if (!trimmed || !socketRef.current || (status !== "idle" && status !== "running")) return;
+    const socket = socketRef.current;
+    if (!trimmed || !socket || (status !== "idle" && status !== "running")) return;
+    if (transcriptRef.current.readOnly) {
+      setSendError("Read-only view — prompt was not sent.");
+      return;
+    }
     const command = findSlashCommand(trimmed);
     if (command && !allowSlashCommand) {
       setInterceptedCommand(command);
       return;
     }
-    if (sendGuardRef.current === trimmed) return;
-    sendGuardRef.current = trimmed;
+    if (sendingPromptTextsRef.current.has(trimmed)) return;
+    const sendId = ++sendIdRef.current;
+    const draftVersion = sendVersionRef.current;
+    const conversationAtSend = conversationIdRef.current;
     const hostEchoCount = transcript.messages.filter((message) => message.role === "user" && message.text === trimmed).length;
     const echoAllowance = hostEchoCount + optimisticMessages.filter((message) => message.text === trimmed && hostEchoCount <= (message.hostEchoCount ?? 0)).length;
-    const socket = socketRef.current;
     const submitted = allowSlashCommand ? text : trimmed;
+    const pendingPrompt: PendingPrompt = {
+      text,
+      submitted,
+      hostEchoCount: echoAllowance,
+      optimisticId: null,
+      sent: false,
+      refusalMessage: undefined,
+      draftVersion,
+    };
+    pendingPromptRef.current.push(pendingPrompt);
+    sendingPromptTextsRef.current.add(trimmed);
+    const sendToken = { id: sendId, text: trimmed };
+    sendGuardRef.current = sendToken;
     setSendError(null);
+    const startedRunning = status === "running";
     void socket.send({ t: "prompt", text: submitted }).then((sent) => {
+      sendingPromptTextsRef.current.delete(trimmed);
+      if (sendGuardRef.current === sendToken) sendGuardRef.current = null;
       if (sent) {
+        const optimisticId = `user-${++localIdRef.current}`;
+        pendingPrompt.sent = true;
+        pendingPrompt.optimisticId = optimisticId;
         setOptimisticMessages((prev) => [...prev, {
-          id: `user-${++localIdRef.current}`,
+          id: optimisticId,
           role: "user",
           text: submitted,
-          awaitingHost: status === "running",
+          awaitingHost: startedRunning,
           hostEchoCount: echoAllowance,
         }]);
-        inputValueRef.current = "";
-        setInputText("");
-        onDraftChange?.("");
-        setInterceptedCommand(null);
+        setSendError("Sent to socket; host receipt is unconfirmed until conversation echo arrives.");
+        if (sendVersionRef.current === draftVersion && inputValueRef.current === text) {
+          inputValueRef.current = "";
+          setInputText("");
+          onDraftChange?.("");
+        }
+        if (pendingPrompt.refusalMessage) {
+          setSendError(pendingPrompt.refusalMessage);
+          recoverRefusedPrompt(pendingPrompt);
+        }
         return;
       }
-      sendGuardRef.current = null;
-      setSendError("Not connected — prompt not sent. Draft kept; retry when connected.");
+      pendingPromptRef.current = pendingPromptRef.current.filter((prompt) => prompt !== pendingPrompt);
+      setSendError("Socket did not accept prompt. Draft kept; retry when connected.");
     });
-
   };
   const handleSendPrompt = (event: React.FormEvent): void => {
     event.preventDefault();
@@ -340,6 +497,7 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
   };
 
   const updateDraft = (value: string): void => {
+    sendVersionRef.current++;
     inputValueRef.current = value;
     setInputText(value);
     sendGuardRef.current = null;
@@ -353,11 +511,12 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     setInterceptedCommand(null);
     if (modelControlsRef.current) modelControlsRef.current.open = true;
     modelInputRef.current?.focus();
+    modelInputRef.current?.scrollIntoView?.({ block: "nearest" });
   };
 
   const handleUiResponse = (value: string | undefined, reqId?: number): void => {
     const targetReqId = reqId ?? transcriptRef.current.uiRequests.current?.reqId;
-    if (targetReqId === undefined || !socketRef.current || pendingUiResponsesRef.current.has(targetReqId)) return;
+    if (transcriptRef.current.readOnly || targetReqId === undefined || !socketRef.current || pendingUiResponsesRef.current.has(targetReqId)) return;
     const requests = transcriptRef.current.uiRequests;
     if (requests.current?.reqId !== targetReqId && !requests.queue.some((request) => request.reqId === targetReqId)) return;
     pendingUiResponsesRef.current.add(targetReqId);
@@ -370,7 +529,8 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
   };
 
   const handleStop = () => {
-    socketRef.current?.send({ t: "abort" });
+    if (transcriptRef.current.readOnly) return;
+    void socketRef.current?.send({ t: "abort" });
   };
 
   const handleSaveModel = async () => {
@@ -383,6 +543,7 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
   };
 
   const handleRestart = async () => {
+    if (!window.confirm("Save this model preference and restart the agent now? The running session may be interrupted.")) return;
     setModelBusy(true);
     setModelMessage("");
     const saved = await api.setConversationModel(conversationId, modelDraft);
@@ -405,8 +566,8 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
   };
 
 
-  const handleFetchTranscript = (agentId: string) => {
-    if (!socketRef.current || [...transcriptRequestsRef.current.values()].some((request) => request.agentId === agentId)) return;
+  const handleFetchTranscript = (agentId: string, fromByte: number) => {
+    if (!socketRef.current || watchedTranscriptAgentRef.current !== agentId || [...transcriptRequestsRef.current.values()].some((request) => request.agentId === agentId)) return;
     const reqId = reqIdCounterRef.current++;
     if (transcriptRequestsRef.current.size >= MAX_TRANSCRIPT_REQUESTS) {
       const oldestId = transcriptRequestsRef.current.keys().next().value;
@@ -417,7 +578,8 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
         transcriptRef.current = forgetTranscriptRequest(transcriptRef.current, oldestId);
       }
     }
-    transcriptRef.current = trackTranscriptRequest(transcriptRef.current, reqId, agentId);
+    const cursor = transcriptRef.current.transcripts[agentId]?.newSize ?? fromByte;
+    transcriptRef.current = trackTranscriptRequest(transcriptRef.current, reqId, agentId, cursor);
     setTranscript(transcriptRef.current);
     setTranscriptErrors((prev) => {
       if (!(agentId in prev)) return prev;
@@ -429,13 +591,27 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
       transcriptRequestsRef.current.delete(reqId);
       transcriptRef.current = forgetTranscriptRequest(transcriptRef.current, reqId);
       setTranscript(transcriptRef.current);
-      setTranscriptErrors((prev) => ({ ...prev, [agentId]: "Transcript request timed out." }));
+      setTranscriptErrors((prev) => ({ ...prev, [agentId]: "Transcript request timed out. Cursor was kept; retry to continue." }));
     }, TRANSCRIPT_REQUEST_TIMEOUT_MS);
-    transcriptRequestsRef.current.set(reqId, { agentId, timer });
-    socketRef.current.send({ t: "fetch-transcript", reqId, agentId, fromByte: 0 });
+    transcriptRequestsRef.current.set(reqId, { agentId, fromByte: cursor, timer });
+    socketRef.current.send({ t: "fetch-transcript", reqId, agentId, fromByte: cursor });
   };
 
+  const handleWatchTranscript = useCallback((agentId: string | null) => {
+    const previousAgentId = watchedTranscriptAgentRef.current;
+    watchedTranscriptAgentRef.current = agentId;
+    if (previousAgentId === null || previousAgentId === agentId) return;
+    for (const [reqId, request] of transcriptRequestsRef.current) {
+      if (request.agentId !== previousAgentId) continue;
+      clearTimeout(request.timer);
+      transcriptRequestsRef.current.delete(reqId);
+      transcriptRef.current = forgetTranscriptRequest(transcriptRef.current, reqId);
+    }
+    setTranscript(transcriptRef.current);
+  }, []);
+
   const handleCloseSubagents = () => {
+    handleWatchTranscript(null);
     for (const request of transcriptRequestsRef.current.values()) clearTimeout(request.timer);
     transcriptRequestsRef.current.clear();
     transcriptRef.current = clearTranscriptRequests(transcriptRef.current);
@@ -447,40 +623,45 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     <div className="conversation-screen">
       {/* Header */}
       <div className="app-header">
-        <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+        <div className="conversation-header-title">
           <button type="button" className="ghost" onClick={onBack} title="Back">
             ←
           </button>
-          <div>
+          <div className="conversation-header-copy">
             <h3 style={{ fontSize: "1rem" }}>{conversation?.title ?? "Conversation"}</h3>
-            <span style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>
-              Effective model: {conversation?.model ?? "not reported"}
-            </span>
+            <span style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>{conversation?.state ?? "status unknown"}</span>
           </div>
         </div>
 
-        <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+        <div className="conversation-header-actions">
           <button
             type="button"
             className="ghost"
             style={{ fontSize: "0.85rem" }}
             onClick={() => setShowActivity(true)}
+            aria-label="Activity"
+            title="Activity"
           >
-            Activity
+            <span className="header-action-icon" aria-hidden="true">◷</span>
+            <span className="header-action-label">Activity</span>
           </button>
           {agents.length > 0 && (
             <button
               type="button"
               className="ghost"
               style={{ fontSize: "0.85rem" }}
+              aria-label={`Agents (${agents.length})`}
+              title={`Agents (${agents.length})`}
               onClick={() => setShowSubagents(true)}
             >
-              Agents ({agents.length})
+              <span className="header-action-icon" aria-hidden="true">◉</span>
+              <span className="header-action-label">Agents ({agents.length})</span>
             </button>
           )}
-          {status === "running" && (
-            <button type="button" className="danger" onClick={handleStop} style={{ padding: "4px 10px", fontSize: "0.85rem" }}>
-              Stop
+          {status === "running" && !transcript.readOnly && (
+            <button type="button" className="danger" aria-label="Stop" title="Stop" onClick={handleStop} style={{ padding: "4px 10px", fontSize: "0.85rem" }}>
+              <span className="header-action-icon" aria-hidden="true">■</span>
+              <span className="header-action-label">Stop</span>
             </button>
           )}
         </div>
@@ -488,16 +669,19 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
       <details className="model-controls-disclosure" ref={modelControlsRef}>
         <summary>Conversation model settings</summary>
         <section className="model-controls" aria-label="Conversation model">
-          <label htmlFor="conversation-model">Model</label>
-          <input
-            id="conversation-model"
-            ref={modelInputRef}
-            value={modelDraft}
-            maxLength={128}
-            onChange={(event) => setModelDraft(event.target.value)}
-            placeholder="Enter OMP model"
-            aria-describedby="model-launch-note"
-          />
+          <label htmlFor="conversation-model">Preferred model for next launch</label>
+          <select id="conversation-model" value={modelCatalogState.status === "loaded" && modelCatalogState.models.includes(modelDraft) ? modelDraft : ""} onChange={(event) => setModelDraft(event.target.value)}>
+            <option value="">Choose a catalog model</option>
+            {modelCatalogState.status === "loaded" && modelCatalogState.models.map((model) => <option key={model} value={model}>{model}</option>)}
+          </select>
+          <label htmlFor="custom-model">Custom model ID</label>
+          <input id="custom-model" ref={modelInputRef} value={modelDraft} maxLength={128} onChange={(event) => setModelDraft(event.target.value)} placeholder="Enter any OMP model ID" aria-describedby="model-launch-note" />
+          {modelCatalogState.status === "loading" && <p role="status">Loading model catalog…</p>}
+          {modelCatalogState.status === "empty" && <p role="status">No models reported by OMP. Saved preference is unchanged.</p>}
+          {modelCatalogState.status === "unavailable" && <p role="status">Model catalog unavailable: {modelCatalogState.reason} Saved preference is unchanged.</p>}
+          {modelCatalogState.status === "error" && <p role="alert">Could not load models: {modelCatalogState.message} Saved preference is unchanged.</p>}
+          <p>Preferred for next launch: <strong>{conversation?.modelPreference || "not set"}</strong></p>
+          <p>Effective model reported now: <strong>{conversation?.model ?? "not reported"}</strong></p>
           <button type="button" onClick={handleSaveModel} disabled={modelBusy || !modelDraft.trim()}>
             Save model
           </button>
@@ -508,6 +692,7 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
           {modelMessage && <span role="status">{modelMessage}</span>}
         </section>
       </details>
+      {transcript.readOnly && <div className="banner unknown" role="status">Read-only view — prompts, approvals and Stop are unavailable.</div>}
 
       {/* Accessible Status Banners */}
       {status === "disconnected" && (
@@ -544,20 +729,30 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
         </div>
       )}
       {transcript.notice && (
-        <div className={`banner ${transcript.notice.level}`} role="status">
+        <div className={`banner ${transcript.notice.level}`} role={transcript.notice.level === "error" ? "alert" : "status"}>
           <span>{transcript.notice.message}</span>
         </div>
       )}
-
+      {conversation?.state === "starting" && (
+        <div className="banner connecting" role="status">Host is starting up; prompting may be refused.</div>
+      )}
       <div className="messages-scroll" ref={messagesScrollRef} role="region" aria-label="Conversation transcript">
         <div className="messages-content" ref={messagesContentRef}>
-        {/* Honest link_unavailable / Attach instructions card */}
-        {linkUnavailable && (
+        {isShowingSavedHistory && savedHistory ? (
+          <>
+            <div className="banner idle" role="status">Saved transcript — this session is not running. {savedHistory.header.title ?? savedHistory.header.sessionId}</div>
+            {savedHistory.truncated && <div className="banner unknown" role="status">Saved transcript truncated; some history is omitted.</div>}
+            {savedHistory.messages.map((message) => (
+              <MessageRow key={message.id} message={{ id: message.id, role: message.role, text: message.text, ...(message.toolName ? { toolName: message.toolName } : {}), ...(message.isError ? { isError: true } : {}) }} />
+            ))}
+          </>
+        ) : linkUnavailable ? (
           <div className="card" style={{ borderColor: "var(--warning)", backgroundColor: "#1e180d" }}>
             <h4 style={{ color: "var(--warning)", marginBottom: "8px" }}>No live agent to attach to</h4>
             <p style={{ fontSize: "0.9rem", color: "var(--text-muted)", marginBottom: "12px" }}>
-              There is currently no active host agent process running for this conversation. You can launch or attach to the agent via tmux on your host machine.
+              {historyLive ? "This session is live. Open the live view to read it." : historyLoading ? "Checking for a saved transcript…" : historyError ?? "There is currently no active host agent process running for this conversation."}
             </p>
+            {historyLive && <button type="button" className="primary" onClick={() => void connectToCollab(true)}>Open live view</button>}
             {attachInfo?.command ? (
               <div>
                 <span style={{ fontSize: "0.8rem", color: "var(--text-muted)" }}>How to attach in terminal:</span>
@@ -569,7 +764,7 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
               </p>
             )}
           </div>
-        )}
+        ) : null}
 
         {/* A brand-new conversation has nothing to show, which reads as a broken
             screen. Say what the session actually is instead of leaving a void.
@@ -605,7 +800,7 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
         )}
 
         {/* UI Request / Host Approval */}
-        {activeUiRequest && (
+        {activeUiRequest && !linkUnavailable && (
           <div className="card" style={{ borderColor: "var(--primary)", backgroundColor: "rgba(47,129,247,0.1)" }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "8px" }}>
               <h4 style={{ margin: 0, color: "var(--primary)" }}>Approval Requested</h4>
@@ -617,7 +812,9 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
             </div>
             <p style={{ marginBottom: "12px", fontSize: "0.95rem" }}>{activeUiRequest.title}</p>
 
-            {activeUiRequest.kind === "select" ? (
+            {transcript.readOnly ? (
+              <p role="note">Read-only link — this request cannot be answered here.</p>
+            ) : activeUiRequest.kind === "select" ? (
               <>
                 {activeUiRequest.helpText && <p style={{ marginBottom: "8px", color: "var(--text-muted)" }}>{activeUiRequest.helpText}</p>}
                 <div style={{ display: "flex", flexWrap: "wrap", gap: "8px", marginBottom: "12px" }}>
@@ -626,7 +823,7 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
                     const checked = activeUiRequest.checkedIndices?.includes(index) ?? false;
                     const selected = activeUiRequest.initialIndex === index || checked;
                     return (
-                      <button key={`${activeUiRequest.reqId}-${index}-${label}`} type="button" className={/\b(deny|reject|decline|refuse|disallow|cancel|no)\b/i.test(label) ? "ghost" : "primary"} onClick={() => handleUiResponse(label, activeUiRequest.reqId)}>
+                      <button key={`${activeUiRequest.reqId}-${index}-${label}`} type="button" className={/\b(deny|reject|decline|refuse|disallow|cancel|no)\b/i.test(label) ? "approval-deny" : "primary"} disabled={transcript.readOnly} onClick={() => handleUiResponse(label, activeUiRequest.reqId)}>
                         {activeUiRequest.selectionMarker === "checkbox" ? (checked ? "☑ " : "☐ ") : (selected ? "◉ " : "○ ")}
                         {label}
                         {typeof option !== "string" && option.description && <><br /><small>{option.description}</small></>}
@@ -638,8 +835,8 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
               </>
             ) : (
               <>
-                <textarea value={uiEditorValue} onChange={(event) => setUiEditorValue(event.target.value)} rows={4} />
-                <button type="button" className="primary" onClick={() => handleUiResponse(uiEditorValue, activeUiRequest.reqId)}>Submit</button>
+                <textarea value={uiEditorValue} onChange={(event) => setUiEditorValue(event.target.value)} rows={4} readOnly={transcript.readOnly} />
+                <button type="button" className="primary" disabled={transcript.readOnly} onClick={() => handleUiResponse(uiEditorValue, activeUiRequest.reqId)}>Submit</button>
               </>
             )}
           </div>
@@ -648,10 +845,12 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
 
         </div>
       </div>
-      {isDetached && commandSuggestions.length === 0 && !interceptedCommand && <button type="button" className="latest-button" onClick={goToLatest}>↓ Latest</button>}
-
-      {/* Composer */}
-      {commandSuggestions.length > 0 && !interceptedCommand && (
+      {!linkUnavailable && !transcript.readOnly && isDetached && commandSuggestions.length === 0 && !interceptedCommand && (
+        <div className="latest-row">
+          <button type="button" className="latest-button" onClick={goToLatest}>↓ Latest</button>
+        </div>
+      )}
+      {commandSuggestions.length > 0 && !interceptedCommand && !linkUnavailable && (
         <div className="composer-suggestions" aria-label="Slash command suggestions">
           {commandSuggestions.map((command) => (
             <button
@@ -666,7 +865,7 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
           ))}
         </div>
       )}
-      {interceptedCommand && (
+      {interceptedCommand && !linkUnavailable && (
         <div className="slash-command-intercept">
           <strong>{interceptedCommand.name}</strong>
           <p>{interceptedCommand.explanation}</p>
@@ -674,18 +873,19 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
           {interceptedCommand.availability === "app_action" && (
             <button type="button" onClick={openCommandAction}>Open model controls</button>
           )}
-          <button type="button" className="primary" onClick={sendSlashAsText}>Send as plain text anyway</button>
+          <button type="button" className="primary" disabled={transcript.readOnly} onClick={sendSlashAsText}>Send as plain text anyway</button>
           <button type="button" className="ghost" onClick={() => setInterceptedCommand(null)}>Cancel</button>
         </div>
       )}
+      {!linkUnavailable && !isShowingSavedHistory && !historyLive && (
       <form onSubmit={handleSendPrompt} className="composer-container">
         <textarea
           className="composer-input"
-          placeholder={status === "running" ? "Turn in flight — send a follow-up…" : "Send instructions to agent…"}
+          placeholder={transcript.readOnly ? "Read-only — not sent" : status === "running" ? "Turn in flight — send a follow-up…" : "Send instructions to agent…"}
           value={inputText}
           ref={composerRef}
           onChange={(event) => updateDraft(event.target.value)}
-          disabled={status === "disconnected" || status === "unknown" || status === "connecting" || status === "reconnecting"}
+          disabled={transcript.readOnly || status === "disconnected" || status === "unknown" || status === "connecting" || status === "reconnecting"}
           rows={1}
           onCompositionStart={() => { composingRef.current = true; }}
           onCompositionEnd={() => { setTimeout(() => { composingRef.current = false; }, 0); }}
@@ -699,19 +899,21 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
         <button
           type="submit"
           className="primary"
-          disabled={!inputText.trim() || status === "disconnected" || status === "unknown" || status === "connecting" || status === "reconnecting"}
+          disabled={transcript.readOnly || !inputText.trim() || status === "disconnected" || status === "unknown" || status === "connecting" || status === "reconnecting"}
           style={{ minHeight: "44px", minWidth: "64px" }}
         >
           Send
         </button>
       {sendError && <div className="banner unknown" role="alert">{sendError}</div>}
       </form>
+      )}
 
       {/* Subagent Panel Modal */}
       {showSubagents && (
         <SubagentPanel
           agents={agents}
           onFetchTranscript={handleFetchTranscript}
+          onWatchAgent={handleWatchTranscript}
           transcripts={transcripts}
           transcriptErrors={transcriptErrors}
           loadingAgentIds={loadingAgentIds}

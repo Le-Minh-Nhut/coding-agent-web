@@ -10,15 +10,42 @@ type View = "projects" | "project-detail" | "conversation" | "settings";
 
 export function App() {
   const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(null);
+  const [setupRequired, setSetupRequired] = useState(false);
+  const [setupUnavailable, setSetupUnavailable] = useState(false);
   const [currentView, setCurrentView] = useState<View>("projects");
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [selectedConversationId, setSelectedConversationId] = useState<string | null>(null);
   const [conversationDrafts, setConversationDrafts] = useState<Record<string, string>>({});
 
   useEffect(() => {
-    api.getMe().then((res) => {
-      setIsAuthenticated(res.ok);
-    });
+    void (async () => {
+      const me = await api.getMe();
+      if (me.ok) {
+        const probe = await api.getCapabilities();
+        if (probe.ok) {
+          setIsAuthenticated(true);
+          return;
+        }
+        if (probe.httpStatus === 403) {
+          const refreshed = await api.getMe();
+          if (refreshed.ok) {
+            setSetupRequired(true);
+            setIsAuthenticated(false);
+          } else setSetupUnavailable(true);
+        } else setIsAuthenticated(false);
+        return;
+      }
+
+      if (me.httpStatus === 403) {
+        const probe = await api.getCapabilities();
+        if (probe.httpStatus === 403) {
+          const refreshed = await api.getMe();
+          if (refreshed.ok) setSetupRequired(true);
+          else setSetupUnavailable(true);
+        }
+      }
+      setIsAuthenticated(false);
+    })();
   }, []);
 
   if (isAuthenticated === null) {
@@ -32,8 +59,12 @@ export function App() {
   if (!isAuthenticated) {
     return (
       <LoginView
+        setupRequired={setupRequired}
+        setupUnavailable={setupUnavailable}
         onSuccess={() => {
           setIsAuthenticated(true);
+          setSetupRequired(false);
+          setSetupUnavailable(false);
           setCurrentView("projects");
         }}
       />

@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { api } from "../api.js";
 import type { DirectoryListing } from "@caw/contracts";
 
@@ -18,34 +18,68 @@ export function FolderBrowser({ onSelect, onCancel }: FolderBrowserProps) {
   const [newFolderError, setNewFolderError] = useState<string | null>(null);
   const [creatingFolder, setCreatingFolder] = useState(false);
   const [refreshVersion, setRefreshVersion] = useState(0);
-
+  const [loadingMore, setLoadingMore] = useState(false);
+  const createdPathRef = useRef<{ directory: string; path: string } | null>(null);
   useEffect(() => {
     let active = true;
     setLoading(true);
     setErrorText(null);
+    setListing(null);
 
-    api.browse(currentPath).then((res) => {
+    const load = async () => {
+      let result = await api.browse(currentPath, { limit: 100 });
       if (!active) return;
-      setLoading(false);
-      if (res.ok) {
-        setListing(res.data);
-      } else {
-        if (res.error.code === "path_forbidden") {
-          setErrorText("Access forbidden: path is outside allowed workspace directories");
-        } else if (res.error.code === "not_a_directory") {
-          setErrorText("Selected path is not a directory");
-        } else if (res.error.code === "path_not_found") {
-          setErrorText("Folder not found");
-        } else {
-          setErrorText(res.error.message || "Failed to list directory");
-        }
+      if (!result.ok) {
+        const message = result.error.code === "path_forbidden"
+          ? "Access forbidden: path is outside allowed workspace directories"
+          : result.error.code === "not_a_directory"
+            ? "Selected path is not a directory"
+            : result.error.code === "path_not_found"
+              ? "Folder not found"
+              : result.error.message || "Failed to list directory";
+        setErrorText(message);
+        setLoading(false);
+        return;
       }
-    });
-
-    return () => {
-      active = false;
+      let page = result.data;
+      setListing(page);
+      const created = createdPathRef.current;
+      while (created && page.path === created.directory && !page.entries.some((entry) => entry.path === created.path) && page.nextCursor) {
+        result = await api.browse(page.path, { limit: 100, cursor: page.nextCursor });
+        if (!active) return;
+        if (!result.ok) {
+          setErrorText(result.error.message || "Failed to load more folders");
+          break;
+        }
+        page = { ...page, entries: [...page.entries, ...result.data.entries], hasMore: result.data.hasMore, nextCursor: result.data.nextCursor };
+        setListing(page);
+      }
+      if (created && page.entries.some((entry) => entry.path === created.path)) createdPathRef.current = null;
+      setLoading(false);
     };
+
+    void load();
+    return () => { active = false; };
   }, [currentPath, refreshVersion]);
+  const loadMore = async () => {
+    if (!listing?.nextCursor || loadingMore) return;
+    setLoadingMore(true);
+    setErrorText(null);
+    const result = await api.browse(listing.path, { limit: 100, cursor: listing.nextCursor });
+    setLoadingMore(false);
+    if (!result.ok) {
+      setErrorText(result.error.message || "Failed to load more folders");
+      return;
+    }
+    setListing((current) => current && current.path === result.data.path ? {
+      ...current,
+      entries: [...current.entries, ...result.data.entries],
+      hasMore: result.data.hasMore,
+      nextCursor: result.data.nextCursor,
+    } : current);
+  };
+
+
 
   const pathParts = listing?.path ? listing.path.split("/").filter(Boolean) : [];
   const activeRoot = listing && listing.roots.find((root) => listing.path === root || listing.path.startsWith(`${root.replace(/\/$/u, "")}/`));
@@ -71,6 +105,7 @@ export function FolderBrowser({ onSelect, onCancel }: FolderBrowserProps) {
       return;
     }
     setSelectedPath(result.data.path);
+    createdPathRef.current = { directory: listing.path, path: result.data.path };
     setNewFolderName("");
     setShowNewFolder(false);
     setRefreshVersion((version) => version + 1);
@@ -184,6 +219,11 @@ export function FolderBrowser({ onSelect, onCancel }: FolderBrowserProps) {
               <div style={{ padding: "16px", textAlign: "center", color: "var(--text-muted)", fontSize: "0.9rem" }}>
                 No subdirectories
               </div>
+            )}
+            {listing?.hasMore && (
+              <button type="button" className="folder-browser-load-more" onClick={() => void loadMore()} disabled={loadingMore}>
+                {loadingMore ? "Loading…" : "Load more"}
+              </button>
             )}
           </div>
         )}

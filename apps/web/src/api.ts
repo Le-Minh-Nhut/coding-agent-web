@@ -16,6 +16,18 @@ import type {
   RuntimeSnapshot,
 } from "@caw/contracts";
 
+export interface ModelCatalog {
+  models: string[];
+  source: "omp" | "unavailable";
+  reason: string | null;
+}
+
+export interface SavedConversationHistory {
+  header: { sessionId: string; cwd: string; timestamp: string | null; version: number | null; title: string | null };
+  entries: Array<Record<string, unknown>>;
+  truncated: boolean;
+}
+
 export interface CollabLinkResponse {
   url: string;
   access: "view" | "full";
@@ -33,10 +45,9 @@ export function setCsrfToken(token: string | null): void {
   inMemoryCsrfToken = token;
 }
 
-async function request<T>(
-  endpoint: string,
-  options: RequestInit = {}
-): Promise<ApiResult<T>> {
+type ApiResultWithStatus<T> = ApiResult<T> & { httpStatus?: number };
+
+async function request<T>(endpoint: string, options: RequestInit = {}): Promise<ApiResultWithStatus<T>> {
   const method = (options.method ?? "GET").toUpperCase();
   const headers: Record<string, string> = {
     Accept: "application/json",
@@ -45,27 +56,15 @@ async function request<T>(
 
   const isMutation = method === "POST" || method === "PATCH" || method === "DELETE" || method === "PUT";
   if (isMutation) {
-    if (inMemoryCsrfToken) {
-      headers["x-caw-csrf"] = inMemoryCsrfToken;
-    }
-    // Declare JSON only when there is actually a body: endpoints like link minting
-    // take none, and claiming a type while sending zero bytes is a malformed
-    // request by definition.
+    if (inMemoryCsrfToken) headers["x-caw-csrf"] = inMemoryCsrfToken;
     const hasBody = typeof options.body === "string" && options.body.length > 0;
-    if (hasBody && !headers["Content-Type"] && !headers["content-type"]) {
-      headers["Content-Type"] = "application/json";
-    }
+    if (hasBody && !headers["Content-Type"] && !headers["content-type"]) headers["Content-Type"] = "application/json";
   }
 
   try {
-    const res = await fetch(endpoint, {
-      ...options,
-      headers,
-      credentials: "include",
-    });
-
+    const res = await fetch(endpoint, { ...options, headers, credentials: "include" });
     const data = (await res.json()) as ApiResult<T>;
-    return data;
+    return { ...data, httpStatus: res.status };
   } catch (err) {
     return {
       ok: false,
@@ -78,23 +77,35 @@ async function request<T>(
 }
 
 export const api = {
-  async getMe(): Promise<ApiResult<{ csrfToken: string }>> {
+  async getMe(): Promise<ApiResultWithStatus<{ csrfToken: string }>> {
     const res = await request<{ csrfToken: string }>("/api/auth/me");
-    if (res.ok) {
-      setCsrfToken(res.data.csrfToken);
-    }
+    if (res.ok) setCsrfToken(res.data.csrfToken);
     return res;
   },
 
-  async login(password: string): Promise<ApiResult<{ csrfToken: string; expiresAt: string }>> {
-    const res = await request<{ csrfToken: string; expiresAt: string }>("/api/auth/login", {
+  async login(password: string): Promise<ApiResultWithStatus<{ status: "authenticated" | "password_setup_required"; csrfToken: string; expiresAt: string }>> {
+    const res = await request<{ status: "authenticated" | "password_setup_required"; csrfToken: string; expiresAt: string }>("/api/auth/login", {
       method: "POST",
       body: JSON.stringify({ password }),
     });
-    if (res.ok) {
-      setCsrfToken(res.data.csrfToken);
-    }
+    if (res.ok) setCsrfToken(res.data.csrfToken);
     return res;
+  },
+
+  async setPassword(password: string): Promise<ApiResultWithStatus<{ status: "authenticated"; csrfToken: string; expiresAt: string }>> {
+    const res = await request<{ status: "authenticated"; csrfToken: string; expiresAt: string }>("/api/auth/set-password", {
+      method: "POST",
+      body: JSON.stringify({ password }),
+    });
+    if (res.ok) setCsrfToken(res.data.csrfToken);
+    return res;
+  },
+
+  async changePassword(currentPassword: string, newPassword: string): Promise<ApiResultWithStatus<{ changed: boolean }>> {
+    return request<{ changed: boolean }>("/api/auth/change-password", {
+      method: "POST",
+      body: JSON.stringify({ currentPassword, newPassword }),
+    });
   },
 
   async logout(): Promise<ApiResult<{ loggedOut: boolean }>> {
@@ -105,10 +116,9 @@ export const api = {
     return res;
   },
 
-  async getCapabilities(): Promise<ApiResult<Capabilities>> {
+  async getCapabilities(): Promise<ApiResultWithStatus<Capabilities>> {
     return request<Capabilities>("/api/capabilities");
   },
-
   async getRuntime(): Promise<ApiResult<RuntimeSnapshot>> {
     return request<RuntimeSnapshot>("/api/runtime");
   },
@@ -144,9 +154,13 @@ export const api = {
     });
   },
 
-  async browse(path?: string): Promise<ApiResult<DirectoryListing>> {
-    const q = path ? `?path=${encodeURIComponent(path)}` : "";
-    return request<DirectoryListing>(`/api/browse${q}`);
+  async browse(path?: string, options?: { limit?: number; cursor?: string }): Promise<ApiResult<DirectoryListing>> {
+    const params = new URLSearchParams();
+    if (path) params.set("path", path);
+    if (options?.limit !== undefined) params.set("limit", String(options.limit));
+    if (options?.cursor) params.set("cursor", options.cursor);
+    const query = params.toString();
+    return request<DirectoryListing>(`/api/browse${query ? `?${query}` : ""}`);
   },
 
   async listConversations(projectId: string): Promise<ApiResult<Conversation[]>> {
@@ -177,6 +191,9 @@ export const api = {
   async getConversation(id: string): Promise<ApiResult<Conversation>> {
     return request<Conversation>(`/api/conversations/${encodeURIComponent(id)}`);
   },
+  async getConversationHistory(id: string): Promise<ApiResult<SavedConversationHistory>> {
+    return request<SavedConversationHistory>(`/api/conversations/${encodeURIComponent(id)}/history`);
+  },
 
   async getConversationEvents(id: string, options?: { after?: number; limit?: number }): Promise<ApiResult<ConversationEventsResponse>> {
     const params = new URLSearchParams();
@@ -190,6 +207,9 @@ export const api = {
     return request<AttachInstructions>(`/api/conversations/${encodeURIComponent(id)}/attach`);
   },
 
+  async getModels(): Promise<ApiResult<ModelCatalog>> {
+    return request<ModelCatalog>("/api/models");
+  },
   async getConversationLink(id: string): Promise<ApiResult<CollabLinkResponse>> {
     return request<CollabLinkResponse>(`/api/conversations/${encodeURIComponent(id)}/link`, {
       method: "POST",

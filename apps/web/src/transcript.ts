@@ -5,7 +5,6 @@ import type {
   HostFrame,
   SessionEntry,
   SessionState,
-  TextContent,
   WireMessage,
 } from "@caw/collab-protocol";
 
@@ -16,7 +15,7 @@ export interface TranscriptMessage {
   identity: string;
   /** Correlates an event-only row with its durable entry when one arrives. */
   eventIdentity?: string;
-  role: "user" | "assistant" | "tool";
+  role: "user" | "assistant" | "tool" | "notice";
   text: string;
   toolName?: string;
   isError?: boolean;
@@ -27,7 +26,13 @@ export interface TranscriptMessage {
 export interface TranscriptReply {
   text: string;
   newSize: number;
+  carry?: string;
   error?: string;
+}
+
+export interface TranscriptRequest {
+  agentId: string;
+  fromByte: number;
 }
 
 export type TurnStatus = "idle" | "running";
@@ -50,11 +55,13 @@ export interface TranscriptState {
   streamingMessage: AssistantMessage | null;
   turnStatus: TurnStatus;
   connectionStatus: ConnectionStatus;
+  sessionEnded: boolean;
+  readOnly: boolean;
   error: string | null;
   notice: { level: "info" | "warning" | "error"; message: string } | null;
   uiRequests: { current: CollabUiRequest | null; queue: CollabUiRequest[] };
   lastUiRequestSettlement: number | null;
-  transcriptRequests: Record<string, string>;
+  transcriptRequests: Record<string, TranscriptRequest>;
   transcripts: Record<string, TranscriptReply>;
 }
 export function createTranscriptState(): TranscriptState {
@@ -66,6 +73,8 @@ export function createTranscriptState(): TranscriptState {
     streamingMessage: null,
     turnStatus: "idle",
     connectionStatus: "connecting",
+    sessionEnded: false,
+    readOnly: false,
     error: null,
     notice: null,
     uiRequests: { current: null, queue: [] },
@@ -76,10 +85,10 @@ export function createTranscriptState(): TranscriptState {
   };
 }
 
-export function trackTranscriptRequest(state: TranscriptState, reqId: number, agentId: string): TranscriptState {
+export function trackTranscriptRequest(state: TranscriptState, reqId: number, agentId: string, fromByte = 0): TranscriptState {
   return {
     ...state,
-    transcriptRequests: { ...state.transcriptRequests, [reqId]: agentId },
+    transcriptRequests: { ...state.transcriptRequests, [reqId]: { agentId, fromByte } },
   };
 }
 
@@ -104,23 +113,86 @@ function messageCorrelation(message: WireMessage): string {
   if (message.role === "toolResult") return `tool:${message.toolCallId}`;
   return `message:${message.role}:${message.timestamp}:${JSON.stringify(message.content)}`;
 }
-function textFromContent(content: string | readonly { type: string; text?: string }[]): string {
-  return typeof content === "string"
-    ? content
-    : content.filter((part): part is TextContent => part.type === "text").map((part) => part.text).join("");
+export function textFromContent(content: string | readonly { type: string; text?: string; mimeType?: string; data?: string; thinking?: string; name?: string; arguments?: unknown; intent?: string }[]): string {
+  if (typeof content === "string") return content;
+  let text = "";
+  let afterBlock = false;
+  for (const part of content) {
+    if (part.type === "text") {
+      if (afterBlock && text && !text.endsWith("\n")) text += "\n";
+      text += part.text ?? "";
+      afterBlock = false;
+      continue;
+    }
+    if (text && !text.endsWith("\n")) text += "\n";
+    if (part.type === "image" && /^(?:image\/(?:png|jpeg|gif|webp|avif))$/.test(part.mimeType ?? "") && part.data) {
+      text += `![Attachment](data:${part.mimeType};base64,${part.data})`;
+    } else if (part.type === "image") {
+      text += `[Image attachment not displayed${part.mimeType ? ` (${part.mimeType})` : ""}]`;
+    } else if (part.type === "thinking") {
+      text += `[Reasoning]\n${part.thinking ?? ""}`;
+    } else if (part.type === "redactedThinking") {
+      text += "[Reasoning redacted by host]";
+    } else if (part.type === "toolCall") {
+      const intent = part.intent ? ` — ${part.intent}` : "";
+      text += `[Tool call: ${part.name ?? "unknown"}${intent}] ${JSON.stringify(part.arguments ?? {}, null, 2)}`;
+    } else {
+      text += `[Unsupported content: ${part.type}]`;
+    }
+    afterBlock = true;
+  }
+  return text;
 }
+
 
 function displayMessage(entry: SessionEntry): TranscriptMessage | null {
   if (entry.type === "custom_message") {
-    if (entry.customType !== "collab-prompt") return null;
+    if (entry.customType === "collab-prompt") {
+      return {
+        id: entry.id,
+        identity: entry.id,
+        role: "user",
+        text: textFromContent(entry.content),
+        source: "entry",
+      };
+    }
+    if (!entry.display) return null;
     return {
       id: entry.id,
       identity: entry.id,
-      role: "user",
-      text: textFromContent(entry.content),
+      role: "notice",
+      text: `${entry.customType}: ${textFromContent(entry.content)}`,
       source: "entry",
     };
   }
+  if (entry.type === "compaction") return {
+    id: entry.id,
+    identity: entry.id,
+    role: "notice",
+    text: `Context compacted (${entry.tokensBefore} tokens): ${entry.shortSummary ?? entry.summary}`,
+    source: "entry",
+  };
+  if (entry.type === "branch_summary") return {
+    id: entry.id,
+    identity: entry.id,
+    role: "notice",
+    text: `Branch summary: ${entry.summary}`,
+    source: "entry",
+  };
+  if (entry.type === "model_change") return {
+    id: entry.id,
+    identity: entry.id,
+    role: "notice",
+    text: `Model changed: ${entry.model}`,
+    source: "entry",
+  };
+  if (entry.type === "thinking_level_change") return {
+    id: entry.id,
+    identity: entry.id,
+    role: "notice",
+    text: `Thinking level changed: ${entry.thinkingLevel ?? "off"}`,
+    source: "entry",
+  };
   if (entry.type !== "message") return null;
   const message = entry.message;
   switch (message.role) {
@@ -139,11 +211,19 @@ function displayMessage(entry: SessionEntry): TranscriptMessage | null {
         isError: message.isError,
         source: "entry",
       };
+    case "developer":
+      return { id: entry.id, identity: entry.id, role: "notice", text: `Developer message: ${textFromContent(message.content)}`, source: "entry" };
     default:
       return null;
   }
-}
 
+}
+export function transcriptMessagesFromEntries(entries: readonly SessionEntry[]): TranscriptMessage[] {
+  return entries.flatMap((entry) => {
+    const message = displayMessage(entry);
+    return message ? [message] : [];
+  });
+}
 function upsertMessage(messages: TranscriptMessage[], next: TranscriptMessage): TranscriptMessage[] {
   // Two distinct native entries must never share a row, and one native entry must never produce two rows.
   const pairedSource = next.source === "entry" ? "event" : "entry";
@@ -163,6 +243,57 @@ function upsertMessage(messages: TranscriptMessage[], next: TranscriptMessage): 
   const updated = [...messages];
   updated[index] = next;
   return updated;
+}
+
+function addEntriesBatch(state: TranscriptState, batch: readonly SessionEntry[]): TranscriptState {
+  const entries = state.entries.slice();
+  const messages = state.messages.slice();
+  const entryIndexes = new Map(entries.map((entry, index) => [entry.id, index]));
+  const identities = new Map<string, number[]>();
+  const eventIdentities = new Map<string, number[]>();
+  const addIndex = (map: Map<string, number[]>, key: string | undefined, index: number) => {
+    if (key === undefined) return;
+    const indices = map.get(key);
+    if (indices) indices.push(index);
+    else map.set(key, [index]);
+  };
+  const indexMessage = (message: TranscriptMessage, index: number) => {
+    addIndex(identities, message.identity, index);
+    addIndex(eventIdentities, message.eventIdentity === undefined ? undefined : `${message.source}:${message.eventIdentity}`, index);
+  };
+  messages.forEach(indexMessage);
+  const findIndex = (map: Map<string, number[]>, key: string | undefined, matches: (message: TranscriptMessage) => boolean) =>
+    key === undefined ? -1 : map.get(key)?.find((index) => matches(messages[index]!)) ?? -1;
+  const upsert = (next: TranscriptMessage) => {
+    const pairedSource = next.source === "entry" ? "event" : "entry";
+    const paired = findIndex(eventIdentities, `${pairedSource}:${next.eventIdentity}`, (message) => message.source === pairedSource && message.eventIdentity === next.eventIdentity);
+    const index = paired >= 0 ? paired : findIndex(identities, next.identity, (message) => message.identity === next.identity);
+    if (index < 0) {
+      const newIndex = messages.push(next) - 1;
+      indexMessage(next, newIndex);
+      return;
+    }
+    if (paired >= 0) {
+      const previous = messages[index]!;
+      const replacement = previous.source === "entry"
+        ? { ...previous, eventIdentity: undefined }
+        : { ...next, eventIdentity: undefined };
+      messages[index] = replacement;
+      indexMessage(replacement, index);
+    } else if (!(messages[index]!.source === "entry" && next.source === "event")) {
+      messages[index] = next;
+      indexMessage(next, index);
+    }
+  };
+  for (const entry of batch) {
+    const index = entryIndexes.get(entry.id);
+    if (index === undefined) {
+      entryIndexes.set(entry.id, entries.push(entry) - 1);
+    } else entries[index] = entry;
+    const row = displayMessage(entry);
+    if (row) upsert(row);
+  }
+  return { ...state, entries, messages };
 }
 
 function addEntry(state: TranscriptState, entry: SessionEntry): TranscriptState {
@@ -187,6 +318,8 @@ function liveMessage(message: WireMessage, sequence: number): TranscriptMessage 
       return { id, identity, eventIdentity, role: "assistant", text: textFromContent(message.content), source: "event" };
     case "user":
       return { id, identity, eventIdentity, role: "user", text: textFromContent(message.content), source: "event" };
+    case "developer":
+      return { id, identity, role: "notice", text: `Developer message: ${textFromContent(message.content)}`, source: "event" };
     case "toolResult":
       return {
         id,
@@ -280,16 +413,35 @@ function applyLiveFrame(state: TranscriptState, frame: QueuedLiveFrame): Transcr
 }
 
 function applyTranscript(state: TranscriptState, frame: Extract<HostFrame, { t: "transcript" }>): TranscriptState {
-  const agentId = state.transcriptRequests[String(frame.reqId)];
-  if (agentId === undefined) return state;
+  const request = state.transcriptRequests[String(frame.reqId)];
+  if (!request) return state;
   const transcriptRequests = { ...state.transcriptRequests };
   delete transcriptRequests[String(frame.reqId)];
+  const previous = state.transcripts[request.agentId] ?? { text: "", newSize: 0, carry: "" };
+  if (frame.error !== undefined) {
+    return {
+      ...state,
+      transcriptRequests,
+      transcripts: { ...state.transcripts, [request.agentId]: { ...previous, error: frame.error } },
+    };
+  }
+  if (request.fromByte !== previous.newSize) return { ...state, transcriptRequests };
+  const reset = frame.newSize < previous.newSize;
+  const base = reset ? { text: "", carry: "" } : previous;
+  const combined = `${base.carry ?? ""}${frame.text}`;
+  const lastNewline = combined.lastIndexOf("\n");
+  const complete = lastNewline < 0 ? "" : combined.slice(0, lastNewline + 1);
+  const carry = lastNewline < 0 ? combined : combined.slice(lastNewline + 1);
   return {
     ...state,
     transcriptRequests,
     transcripts: {
       ...state.transcripts,
-      [agentId]: { text: frame.text, newSize: frame.newSize, ...(frame.error !== undefined ? { error: frame.error } : {}) },
+      [request.agentId]: {
+        text: `${base.text}${complete}`,
+        newSize: frame.newSize,
+        carry,
+      },
     },
   };
 }
@@ -312,7 +464,9 @@ function addUiRequest(state: TranscriptState, request: CollabUiRequest): Transcr
 }
 
 function withSessionState(state: TranscriptState, session: SessionState): TranscriptState {
-  return { ...state, turnStatus: session.isStreaming ? "running" : "idle" };
+  return state.sessionEnded
+    ? { ...state, connectionStatus: "disconnected", turnStatus: session.isStreaming ? "running" : "idle" }
+    : { ...state, connectionStatus: "live", turnStatus: session.isStreaming ? "running" : "idle", error: null };
 }
 
 /**
@@ -328,6 +482,8 @@ export function reduceHostFrame(state: TranscriptState, frame: HostFrame): Trans
         ...state,
         agents: [...frame.agents],
         connectionStatus: "live" as const,
+        sessionEnded: false,
+        readOnly: frame.readOnly ?? false,
         error: null,
         turnStatus: frame.state.isStreaming ? "running" as const : "idle" as const,
         streamingMessage: null,
@@ -337,6 +493,7 @@ export function reduceHostFrame(state: TranscriptState, frame: HostFrame): Trans
         ? { ...base, entries: [], messages: [], pendingSnapshot: null }
         : { ...base, pendingSnapshot: { entries: [], live: [], total: frame.entryCount } };
     }
+
     case "snapshot-chunk": {
       if (state.pendingSnapshot === null) return state;
       const pending = {
@@ -344,15 +501,8 @@ export function reduceHostFrame(state: TranscriptState, frame: HostFrame): Trans
         entries: [...state.pendingSnapshot.entries, ...frame.entries],
       };
       if (!frame.final && pending.entries.length < pending.total) return { ...state, pendingSnapshot: pending };
-      let published: TranscriptState = {
-        ...state,
-        entries: [],
-        messages: [],
-        pendingSnapshot: null,
-      };
-      for (const entry of pending.entries) published = addEntry(published, entry);
-      for (const liveFrame of pending.live) published = applyLiveFrame(published, liveFrame);
-      return published;
+      const published = addEntriesBatch({ ...state, entries: [], messages: [], pendingSnapshot: null }, pending.entries);
+      return pending.live.reduce(applyLiveFrame, published);
     }
     case "entry":
       return state.pendingSnapshot
@@ -373,23 +523,26 @@ export function reduceHostFrame(state: TranscriptState, frame: HostFrame): Trans
     case "transcript":
       return applyTranscript(state, frame);
     case "error":
-      return { ...state, connectionStatus: "unknown", error: frame.message };
+      return { ...state, error: frame.message };
     case "bye":
-      return { ...state, connectionStatus: "disconnected", error: frame.reason };
+      return { ...state, connectionStatus: "disconnected", sessionEnded: true, error: frame.reason };
     case "bus": {
       const data = frame.data && typeof frame.data === "object"
-        ? frame.data as { agent?: unknown; task?: unknown; status?: unknown; description?: unknown; progress?: { status?: unknown } }
+        ? frame.data as { agent?: unknown; task?: unknown; status?: unknown; description?: unknown; progress?: { status?: unknown; currentTool?: unknown } }
         : {};
+      const status = frame.channel === "task:subagent:progress" ? data.progress?.status : data.status;
+      const level = status === "failed" ? "error" : status === "aborted" ? "warning" : "info";
       if (frame.channel === "task:subagent:progress") {
         const agent = typeof data.agent === "string" ? data.agent : "Subagent";
         const task = typeof data.task === "string" ? data.task : "task progress";
-        const status = typeof data.progress?.status === "string" ? ` (${data.progress.status})` : "";
-        return { ...state, notice: { level: "info", message: `${agent}: ${task}${status}` } };
+        const progress = typeof status === "string" ? ` (${status})` : "";
+        const tool = typeof data.progress?.currentTool === "string" ? ` · ${data.progress.currentTool}` : "";
+        return { ...state, notice: { level, message: `${agent}: ${task}${progress}${tool}` } };
       }
       const agent = typeof data.agent === "string" ? data.agent : "Subagent";
       const description = typeof data.description === "string" ? `: ${data.description}` : "";
-      const status = typeof data.status === "string" ? data.status : "updated";
-      return { ...state, notice: { level: "info", message: `${agent} ${status}${description}` } };
+      const lifecycle = typeof status === "string" ? status : "updated";
+      return { ...state, notice: { level, message: `${agent} ${lifecycle}${description}` } };
     }
   }
 }

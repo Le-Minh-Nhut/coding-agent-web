@@ -11,7 +11,7 @@ import React from "react";
 export function sanitizeUrl(url: string, isImage = false): string | null {
   const trimmed = url.trim();
   if (isImage) {
-    if (trimmed.startsWith("https://") || trimmed.startsWith("data:image/")) {
+    if (trimmed.startsWith("https://") || /^data:image\/(?:png|jpeg|gif|webp|avif);base64,/i.test(trimmed)) {
       return trimmed;
     }
     return null;
@@ -41,98 +41,112 @@ export interface MarkdownNode {
 
 export function parseInline(text: string): React.ReactNode[] {
   const elements: React.ReactNode[] = [];
-  let remaining = text;
+  const delimiterCache = new Map<string, { from: number; index: number }>();
+  let position = 0;
+  let textStart = 0;
   let keyIndex = 0;
 
-  while (remaining.length > 0) {
-    // Inline code `code`
-    const codeMatch = remaining.match(/^`([^`]+)`/);
-    if (codeMatch && codeMatch[1]) {
-      elements.push(React.createElement("code", { key: keyIndex++ }, codeMatch[1]));
-      remaining = remaining.slice(codeMatch[0].length);
-      continue;
-    }
+  const next = (delimiter: string, from: number): number => {
+    const cached = delimiterCache.get(delimiter);
+    if (cached && from >= cached.from && (cached.index === -1 || cached.index >= from)) return cached.index;
+    const index = text.indexOf(delimiter, from);
+    delimiterCache.set(delimiter, { from, index });
+    return index;
+  };
+  const flushText = (end: number) => {
+    if (end > textStart) elements.push(text.slice(textStart, end));
+  };
 
-    // Image ![alt](url)
-    const imgMatch = remaining.match(/^!\[([^\]]*)\]\(([^)]+)\)/);
-    if (imgMatch && imgMatch[1] !== undefined && imgMatch[2]) {
-      const safeSrc = sanitizeUrl(imgMatch[2], true);
-      if (safeSrc) {
-        elements.push(
-          React.createElement("img", {
-            key: keyIndex++,
-            src: safeSrc,
-            alt: imgMatch[1],
-            loading: "lazy",
-            style: { maxWidth: "100%", borderRadius: "4px" },
-          })
-        );
-      } else {
-        // Render inert placeholder text for rejected schemes
-        elements.push(React.createElement("span", { key: keyIndex++ }, `[Image: ${imgMatch[1]}]`));
+  while (position < text.length) {
+    const char = text[position];
+    if (char === "`") {
+      const close = next("`", position + 1);
+      if (close > position + 1) {
+        flushText(position);
+        elements.push(React.createElement("code", { key: keyIndex++ }, text.slice(position + 1, close)));
+        position = close + 1;
+        textStart = position;
+        continue;
       }
-      remaining = remaining.slice(imgMatch[0].length);
-      continue;
     }
 
-    // Link [label](url)
-    const linkMatch = remaining.match(/^\[([^\]]+)\]\(([^)]+)\)/);
-    if (linkMatch && linkMatch[1] && linkMatch[2]) {
-      const safeHref = sanitizeUrl(linkMatch[2], false);
-      if (safeHref) {
-        elements.push(
-          React.createElement(
-            "a",
-            {
-              key: keyIndex++,
-              href: safeHref,
-              target: "_blank",
-              rel: "noopener noreferrer",
-              style: { color: "var(--primary)", textDecoration: "underline" },
-            },
-            linkMatch[1]
-          )
-        );
-      } else {
-        // Inert text for rejected schemes (never javascript:, file:, blob:)
-        elements.push(React.createElement("span", { key: keyIndex++ }, linkMatch[1]));
+    const imageStart = char === "[" && position > 0 && text[position - 1] === "!" ? position - 1 : -1;
+    const labelStart = char === "[" ? position + 1 : -1;
+    if (labelStart >= 0) {
+      const closeBracket = next("]", labelStart);
+      const hasLabel = closeBracket > labelStart;
+      const hasAlt = closeBracket >= labelStart;
+      if ((imageStart >= 0 ? hasAlt : hasLabel) && text[closeBracket + 1] === "(") {
+        const urlStart = closeBracket + 2;
+        const closeParen = next(")", urlStart);
+        if (closeParen > urlStart) {
+          const label = text.slice(labelStart, closeBracket);
+          const url = text.slice(urlStart, closeParen);
+          flushText(imageStart >= 0 ? imageStart : position);
+          if (imageStart >= 0) {
+            const safeSrc = sanitizeUrl(url, true);
+            if (safeSrc) {
+              elements.push(React.createElement("img", {
+                key: keyIndex++,
+                src: safeSrc,
+                alt: label,
+                loading: "lazy",
+                style: { maxWidth: "100%", borderRadius: "4px" },
+              }));
+            } else {
+              elements.push(React.createElement("span", { key: keyIndex++ }, `[Image: ${label}]`));
+            }
+          } else {
+            const safeHref = sanitizeUrl(url, false);
+            if (safeHref) {
+              elements.push(React.createElement(
+                "a",
+                {
+                  key: keyIndex++,
+                  href: safeHref,
+                  target: "_blank",
+                  rel: "noopener noreferrer",
+                  style: { color: "var(--primary)", textDecoration: "underline" },
+                },
+                label,
+              ));
+            } else {
+              elements.push(React.createElement("span", { key: keyIndex++ }, label));
+            }
+          }
+          position = closeParen + 1;
+          textStart = position;
+          continue;
+        }
       }
-      remaining = remaining.slice(linkMatch[0].length);
-      continue;
     }
 
-    // Bold **text**
-    const boldMatch = remaining.match(/^\*\*([^*]+)\*\*/);
-    if (boldMatch && boldMatch[1]) {
-      elements.push(React.createElement("strong", { key: keyIndex++ }, parseInline(boldMatch[1])));
-      remaining = remaining.slice(boldMatch[0].length);
-      continue;
+    if (char === "*" && text[position + 1] === "*") {
+      const close = next("*", position + 2);
+      if (close > position + 2 && text[close + 1] === "*") {
+        flushText(position);
+        elements.push(React.createElement("strong", { key: keyIndex++ }, parseInline(text.slice(position + 2, close))));
+        position = close + 2;
+        textStart = position;
+        continue;
+      }
     }
 
-    // Italic *text*
-    const italicMatch = remaining.match(/^\*([^*]+)\*/);
-    if (italicMatch && italicMatch[1]) {
-      elements.push(React.createElement("em", { key: keyIndex++ }, parseInline(italicMatch[1])));
-      remaining = remaining.slice(italicMatch[0].length);
-      continue;
+    if (char === "*" && text[position + 1] !== "*") {
+      const close = next("*", position + 1);
+      if (close > position + 1) {
+        flushText(position);
+        elements.push(React.createElement("em", { key: keyIndex++ }, parseInline(text.slice(position + 1, close))));
+        position = close + 1;
+        textStart = position;
+        continue;
+      }
     }
 
-    // Plain text slice up to next formatting character or end
-    const nextSpecial = remaining.search(/[`!\[*]/);
-    if (nextSpecial === -1) {
-      elements.push(remaining);
-      break;
-    }
-    if (nextSpecial === 0) {
-      // Unmatched special char, consume 1 char as plain text
-      elements.push(remaining[0]);
-      remaining = remaining.slice(1);
-    } else {
-      elements.push(remaining.slice(0, nextSpecial));
-      remaining = remaining.slice(nextSpecial);
-    }
+    position++;
   }
 
+  flushText(text.length);
   return elements;
 }
 

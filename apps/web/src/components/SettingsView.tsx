@@ -10,6 +10,24 @@ interface SettingsViewProps {
 export function SettingsView({ onBack, onLogout }: SettingsViewProps) {
   const [runtime, setRuntime] = useState<RuntimeSnapshot | null>(null);
   const [loading, setLoading] = useState(true);
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [passwordBusy, setPasswordBusy] = useState(false);
+  const [passwordMessage, setPasswordMessage] = useState<string | null>(null);
+
+  const changePassword = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (passwordBusy || newPassword.length < 12) return;
+    setPasswordBusy(true);
+    setPasswordMessage(null);
+    const result = await api.changePassword(currentPassword, newPassword);
+    setPasswordBusy(false);
+    setPasswordMessage(result.ok ? "Password changed. Other sessions were signed out." : result.error.message);
+    if (result.ok) {
+      setCurrentPassword("");
+      setNewPassword("");
+    }
+  };
 
   useEffect(() => {
     api.getRuntime().then((res) => {
@@ -31,6 +49,15 @@ export function SettingsView({ onBack, onLogout }: SettingsViewProps) {
         <div style={{ padding: "24px", textAlign: "center", color: "var(--text-muted)" }}>Loading…</div>
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
+          <form className="card" onSubmit={changePassword} style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+            <h3 style={{ fontSize: "1rem" }}>Change password</h3>
+            <label htmlFor="current-password">Current password</label>
+            <input id="current-password" type="password" autoComplete="current-password" value={currentPassword} onChange={(event) => setCurrentPassword(event.target.value)} required maxLength={1024} />
+            <label htmlFor="new-password">New password (12 characters minimum)</label>
+            <input id="new-password" type="password" autoComplete="new-password" value={newPassword} onChange={(event) => setNewPassword(event.target.value)} required minLength={12} maxLength={1024} />
+            {passwordMessage && <p role={passwordMessage.startsWith("Password changed") ? "status" : "alert"}>{passwordMessage}</p>}
+            <button type="submit" className="primary" disabled={passwordBusy || !currentPassword || newPassword.length < 12}>{passwordBusy ? "Changing…" : "Change password"}</button>
+          </form>
           {/* Active Conversations Capacity */}
           <div className="card">
             <h3 style={{ marginBottom: "8px", fontSize: "1rem" }}>Capacity</h3>
