@@ -1,3 +1,4 @@
+import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { lstat, mkdir, realpath, readdir } from "node:fs/promises";
 import { isAbsolute, join, parse, relative, resolve, sep } from "node:path";
 import type { DirectoryEntry, DirectoryListing } from "@caw/contracts";
@@ -9,6 +10,41 @@ export class PathPolicyError extends Error {
   }
 }
 
+const DEFAULT_DIRECTORY_PAGE_SIZE = 100;
+const MAX_DIRECTORY_PAGE_SIZE = 500;
+const directoryCursorKey = randomBytes(32);
+
+interface DirectoryCursor {
+  version: 1;
+  pathHash: string;
+  name: string;
+  rawName: string;
+}
+
+function encodeDirectoryCursor(cursor: DirectoryCursor): string {
+  const payload = Buffer.from(JSON.stringify(cursor)).toString("base64url");
+  const signature = createHmac("sha256", directoryCursorKey).update(payload).digest("base64url");
+  return `${payload}.${signature}`;
+}
+
+function decodeDirectoryCursor(value: string): DirectoryCursor {
+  const [payload, signature, extra] = value.split(".");
+  if (!payload || !signature || extra !== undefined || !/^[A-Za-z0-9_-]+$/u.test(payload) || !/^[A-Za-z0-9_-]{43}$/u.test(signature)) {
+    throw new PathPolicyError("path_forbidden", "Invalid directory cursor");
+  }
+  const expected = createHmac("sha256", directoryCursorKey).update(payload).digest();
+  let supplied: Buffer;
+  try { supplied = Buffer.from(signature, "base64url"); } catch { throw new PathPolicyError("path_forbidden", "Invalid directory cursor"); }
+  if (supplied.length !== expected.length || !timingSafeEqual(supplied, expected)) throw new PathPolicyError("path_forbidden", "Invalid directory cursor");
+  let parsed: unknown;
+  try { parsed = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")); } catch { throw new PathPolicyError("path_forbidden", "Invalid directory cursor"); }
+  if (!parsed || typeof parsed !== "object") throw new PathPolicyError("path_forbidden", "Invalid directory cursor");
+  const cursor = parsed as Record<string, unknown>;
+  if (cursor.version !== 1 || typeof cursor.pathHash !== "string" || !/^[a-f0-9]{64}$/u.test(cursor.pathHash) || typeof cursor.name !== "string" || typeof cursor.rawName !== "string" || !cursor.rawName || cursor.name !== cursor.rawName.normalize("NFC")) {
+    throw new PathPolicyError("path_forbidden", "Invalid directory cursor");
+  }
+  return cursor as unknown as DirectoryCursor;
+}
 /** Listing validates canonical paths; any later open must use O_NOFOLLOW and fstat the handle to close remaining TOCTOU risk where supported. */
 export class WorkspacePathPolicy {
   constructor(private readonly configuredRoots: readonly string[], private readonly hasProject: (canonicalPath: string) => boolean = () => false) {}
@@ -180,14 +216,37 @@ export class WorkspacePathPolicy {
     return canonicalTarget;
   }
 
-  async listDirectory(path?: string): Promise<DirectoryListing> {
+  async listDirectory(path?: string, page?: { limit?: number; cursor?: string }): Promise<DirectoryListing> {
     const roots = await this.roots();
     if (roots.length === 0) throw new PathPolicyError("path_forbidden", "No workspace roots configured; set CAW_ALLOWED_ROOTS before browsing");
     const canonical = await this.assertInsideRoots(path ?? roots[0]!, true);
-    const entries: DirectoryEntry[] = [];
-    for (const name of await readdir(canonical)) entries.push(await this.classifyChild(canonical, name));
-    entries.sort((a, b) => a.name.localeCompare(b.name));
+    const cursor = page?.cursor ? decodeDirectoryCursor(page.cursor) : undefined;
+    const pathHash = createHash("sha256").update(canonical).digest("hex");
+    if (cursor && cursor.pathHash !== pathHash) throw new PathPolicyError("path_forbidden", "Directory cursor does not belong to this path");
+    const paged = page?.limit !== undefined || cursor !== undefined;
+    const limit = paged ? Math.min(Math.max(page?.limit ?? DEFAULT_DIRECTORY_PAGE_SIZE, 1), MAX_DIRECTORY_PAGE_SIZE) : Number.POSITIVE_INFINITY;
+    const rawNames = await readdir(canonical);
+    const compareRawNames = (left: string, right: string) =>
+      left.normalize("NFC").localeCompare(right.normalize("NFC")) || left.localeCompare(right);
+    rawNames.sort(compareRawNames);
+    // Cursor keys follow the existing NFC-name order; raw names only break equivalent-name ties deterministically. Additions before the cursor are omitted, while removals cannot shift unrelated rows across it; pages are not snapshots.
+    const remaining = cursor ? rawNames.filter((name) => compareRawNames(name, cursor.rawName) > 0) : rawNames;
+    const candidateNames = Number.isFinite(limit) ? remaining.slice(0, limit + 1) : remaining;
+    const names = candidateNames.slice(0, limit);
+    const entries = await Promise.all(names.map((name) => this.classifyChild(canonical, name)));
+    const hasMore = candidateNames.length > names.length;
+    const lastName = names.at(-1);
+    const nextCursor = paged && hasMore && lastName
+      ? encodeDirectoryCursor({ version: 1, pathHash, name: lastName.normalize("NFC"), rawName: lastName })
+      : null;
     const parentPath = resolve(canonical, "..");
-    return { path: canonical, parent: this.inside(parentPath, roots) ? parentPath : null, roots, entries };
+    return {
+      path: canonical,
+      parent: this.inside(parentPath, roots) ? parentPath : null,
+      roots,
+      entries,
+      hasMore,
+      nextCursor,
+    };
   }
 }

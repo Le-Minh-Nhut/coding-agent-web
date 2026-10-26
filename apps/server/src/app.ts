@@ -3,7 +3,7 @@ import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest, 
 import { browseQuerySchema, conversationActionSchema, conversationModelSchema, createConversationSchema, createDirectorySchema, createProjectSchema, ERROR_CODES, fail, listEventsQuerySchema, loginSchema, ok, updateProjectSchema } from "@caw/contracts";
 import { z } from "zod";
 import type { Capabilities, CollabLinkResponse, Conversation, ErrorCode, NativeSessionSummary } from "@caw/contracts";
-import type { CapabilityService } from "@caw/omp-adapter";
+import type { CapabilityService, ModelCatalogService, NativeSessionHistory } from "@caw/omp-adapter";
 import type { Supervisor, RuntimeLaunchSpec } from "@caw/runtime";
 import type { AuthenticationService } from "./auth.js";
 import { resolve } from "node:path";
@@ -21,7 +21,7 @@ export interface AppDependencies {
   capabilities?: CapabilityService;
   supervisor?: Supervisor;
   originAllowlist?: string[];
-  runtimeSpec?: (conversation: Conversation, input: { resumeSessionId?: string; model?: string; allowMissingResumeSession?: boolean }) => Promise<RuntimeLaunchSpec> | RuntimeLaunchSpec;
+  runtimeSpec?: (conversation: Conversation, input: { resumeSessionId?: string; model?: string }) => Promise<RuntimeLaunchSpec> | RuntimeLaunchSpec;
   /**
    * Mints a room link for a conversation's live host. Supplied by the
    * composition root because only it knows how to reach the registry. Never
@@ -33,6 +33,9 @@ export interface AppDependencies {
   tmuxServerIdentity?: () => Promise<string | null>;
   /** Discovers native OMP sessions for a project directory. */
   listNativeSessions?: (conversation: { projectPath: string }) => Promise<NativeSessionSummary[]>;
+  modelCatalog?: ModelCatalogService;
+  /** Reads a bounded native journal window by session ID after matching canonical project path. */
+  readNativeHistory?: (sessionId: string, expectedCwd: string) => Promise<NativeSessionHistory>;
 }
 
 const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
@@ -54,7 +57,7 @@ function errorCode(error: unknown): string | undefined {
 }
 type HttpRequest = FastifyRequest<RouteGenericInterface, HttpServer>;
 type HttpReply = FastifyReply<RouteGenericInterface, HttpServer>;
-type RequestWithAuth = HttpRequest & { cawSession?: { csrfToken: string; expiresAt: number }; cawToken?: string };
+type RequestWithAuth = HttpRequest & { cawSession?: { csrfToken: string; expiresAt: number; passwordSetupRequired: boolean }; cawToken?: string };
 const idParams = z.object({ id: z.string().min(1).max(128) });
 const conversationRequest = createConversationSchema.omit({ projectId: true });
 const attachRequest = z.object({ action: z.literal("attach") });
@@ -105,9 +108,14 @@ export function buildApp(deps: AppDependencies): FastifyInstance<HttpServer> {
     req.cawToken = cookies(request.headers.cookie)[deps.auth.cookieName];
     req.cawSession = deps.auth.verifySession(req.cawToken) ?? undefined;
     const pathname = request.url.split("?", 1)[0] ?? "/";
-    const isApi = pathname === "/api" || pathname.startsWith("/api/");
     const isLogin = pathname === "/api/auth/login";
-    if (isApi && !isLogin && !req.cawSession) {
+    const isApi = pathname === "/api" || pathname.startsWith("/api/");
+    const setupAction = (request.method === "POST" && ["/api/auth/set-password", "/api/auth/logout"].includes(pathname))
+      || (request.method === "GET" && pathname === "/api/auth/me");
+    if (req.cawSession?.passwordSetupRequired && isApi && !setupAction) {
+      return reply.code(403).send(fail("unauthorized", "Set the owner password before using this API"));
+    }
+    if (isApi && pathname !== "/api/auth/login" && !req.cawSession) {
       const match = app.findRoute({ method: request.method, url: pathname });
       if (match) return reply.code(401).send(fail("unauthorized", "Authentication required"));
     }
@@ -162,10 +170,29 @@ export function buildApp(deps: AppDependencies): FastifyInstance<HttpServer> {
   app.post("/api/auth/login", async (request, reply) => {
     const parsed = loginSchema.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send(fail("bad_request", "Invalid login request"));
-    if (!(await deps.auth.verifyPassword(parsed.data.password, request.ip))) return reply.code(401).send(fail("unauthorized", "Invalid password"));
-    const session = deps.auth.createSession();
+    const result = await deps.auth.authenticate(parsed.data.password, request.ip);
+    if (!result) return reply.code(401).send(fail("unauthorized", "Invalid password"));
+    const session = deps.auth.createSession(result === "setup");
     reply.header("Set-Cookie", deps.auth.cookie(session.token, Math.floor((session.expiresAt - Date.now()) / 1000)));
-    return ok({ csrfToken: session.csrfToken, expiresAt: new Date(session.expiresAt).toISOString() });
+    return ok({ status: result === "setup" ? "password_setup_required" : "authenticated", csrfToken: session.csrfToken, expiresAt: new Date(session.expiresAt).toISOString() });
+  });
+  app.post("/api/auth/set-password", { preHandler: protectedHook }, async (request, reply) => {
+    const body = z.object({ password: z.string().min(12).max(1024) }).strict().safeParse(request.body);
+    if (!body.success) return reply.code(400).send(fail("bad_request", "Password must be 12 to 1024 characters"));
+    const session = withAuth(request).cawSession;
+    if (!session?.passwordSetupRequired || !withAuth(request).cawToken) return reply.code(403).send(fail("unauthorized", "Password setup is not pending"));
+    const result = await deps.auth.completePasswordSetup(body.data.password, withAuth(request).cawToken!);
+    if (result === false) return reply.code(409).send(fail("conflict_owner", "Pending setup token is expired or already consumed"));
+    if (result === "matches_pending_token") return reply.code(400).send(fail("bad_request", "Choose a password different from the setup token"));
+    return ok({ status: "authenticated", csrfToken: session.csrfToken, expiresAt: new Date(session.expiresAt).toISOString() });
+  });
+  app.post("/api/auth/change-password", { preHandler: protectedHook }, async (request, reply) => {
+    const body = z.object({ currentPassword: z.string().min(1).max(1024), newPassword: z.string().min(12).max(1024) }).strict().safeParse(request.body);
+    if (!body.success) return reply.code(400).send(fail("bad_request", "Invalid password change request"));
+    const token = withAuth(request).cawToken;
+    if (!token) return reply.code(401).send(fail("unauthorized", "Authentication required"));
+    if (!(await deps.auth.changePassword(body.data.currentPassword, body.data.newPassword, token, request.ip))) return reply.code(401).send(fail("unauthorized", "Current password is invalid"));
+    return ok({ changed: true });
   });
   app.post("/api/auth/logout", { preHandler: protectedHook }, async (_request, reply) => {
     deps.auth.revokeAll();
@@ -212,7 +239,7 @@ export function buildApp(deps: AppDependencies): FastifyInstance<HttpServer> {
   app.get("/api/browse", { preHandler: protectedHook }, async (request, reply) => {
     const parsed = browseQuerySchema.safeParse(request.query);
     if (!parsed.success) return reply.code(400).send(fail("bad_request", "Invalid browse query"));
-    try { return ok(await paths.listDirectory(parsed.data.path)); } catch (error) { return pathError(reply, error); }
+    try { return ok(await paths.listDirectory(parsed.data.path, { limit: parsed.data.limit, cursor: parsed.data.cursor })); } catch (error) { return pathError(reply, error); }
   });
   app.post("/api/directories", { preHandler: protectedHook }, async (request, reply) => {
     const parsed = createDirectorySchema.safeParse(request.body);
@@ -220,6 +247,29 @@ export function buildApp(deps: AppDependencies): FastifyInstance<HttpServer> {
     try {
       return reply.code(201).send(ok({ path: await paths.createDirectory(parsed.data.path, parsed.data.name) }));
     } catch (error) { return pathError(reply, error); }
+  });
+  app.get("/api/conversations/:id/history", { preHandler: protectedHook }, async (request, reply) => {
+    const params = idParams.safeParse(request.params);
+    if (!params.success) return reply.code(400).send(fail("bad_request", "Invalid conversation ID"));
+    const conversation = await deps.store.getConversation(params.data.id);
+    if (!conversation) return reply.code(404).send(fail("not_found", "Conversation not found"));
+    if (!conversation.nativeSessionId) return reply.code(404).send(fail("not_found", "Conversation has no native session history."));
+    if (!deps.readNativeHistory) return reply.code(501).send(fail("capability_missing", "Native session history is not configured."));
+    try {
+      const project = (await deps.store.listProjects()).find((item) => item.id === conversation.projectId);
+      if (!project) return reply.code(404).send(fail("not_found", "Conversation project not found."));
+      const projectPath = await paths.assertInsideRoots(project.path, true);
+      const history = await deps.readNativeHistory(conversation.nativeSessionId, projectPath);
+      if (history.header.sessionId !== conversation.nativeSessionId || (await paths.assertInsideRoots(history.header.cwd, true)) !== projectPath) return reply.code(403).send(fail("path_forbidden", "Native session journal does not belong to this project."));
+      return ok(history);
+    } catch (error) {
+      const code = runtimeErrorCode(error);
+      if (code === "not_found") return reply.code(404).send(fail("not_found", "Native session journal was not found."));
+      if (code === "conflict_owner") return reply.code(409).send(fail("conflict_owner", "Native session is live or its writer status cannot be verified."));
+      if (code === "path_forbidden" || code === "path_not_found") return reply.code(403).send(fail("path_forbidden", "Native session journal does not belong to this project."));
+      app.log.error({ conversationId: conversation.id }, "failed to read native session history");
+      return reply.code(500).send(fail("internal", "Unable to read native session history."));
+    }
   });
   app.get("/api/projects/:id/conversations", { preHandler: protectedHook }, async (request, reply) => {
     const params = idParams.safeParse(request.params);
@@ -239,8 +289,7 @@ export function buildApp(deps: AppDependencies): FastifyInstance<HttpServer> {
       return reply.code(201).send(ok(await deps.supervisor.start(conversation.id, spec)));
     } catch (error) {
       const code = runtimeErrorCode(error);
-      await deps.store.updateConversation(conversation.id, { state: "error", statusDetail: error instanceof Error ? String(redactLogValue(error.message)) : "Agent launch failed." });
-      return reply.code(code === "internal" ? 500 : code === "not_found" ? 404 : 409).send(fail(code, "Agent launch failed"));
+      return reply.code(code === "internal" ? 500 : code === "not_found" ? 404 : 409).send(fail(code, error instanceof Error ? String(redactLogValue(error.message)) : "Agent launch failed."));
     }
   });
   // SEC-7: A top-level cross-site navigation to GET /api/conversations/:id with an
@@ -308,6 +357,9 @@ export function buildApp(deps: AppDependencies): FastifyInstance<HttpServer> {
       if (code === "stale_generation") {
         return reply.code(409).send(fail("stale_generation", "The agent switched sessions; list the conversation again."));
       }
+      if (code === "capability_missing") {
+        return reply.code(409).send(fail("capability_missing", error instanceof Error ? String(redactLogValue(error.message)) : "Requested Collab access is unavailable."));
+      }
       if (code === "link_unavailable" || code === "agent_not_running") {
         return reply.code(409).send(fail("link_unavailable", "No live agent is sharing this conversation right now."));
       }
@@ -368,8 +420,12 @@ export function buildApp(deps: AppDependencies): FastifyInstance<HttpServer> {
       else {
         const current = await deps.store.getConversation(params.data.id);
         if (!current) return reply.code(404).send(fail("not_found", "Conversation not found"));
-        if (!deps.runtimeSpec) return reply.code(501).send(fail("capability_missing", "Conversation launch configuration is not available"));
-        const spec = await deps.runtimeSpec(current, { resumeSessionId: current.nativeSessionId ?? undefined, model: current.modelPreference ?? current.model ?? undefined, allowMissingResumeSession: true });
+        if (current.nativeSessionPath && !current.nativeSessionId) {
+          return reply.code(409).send(fail("conflict_owner", "The recorded session journal has no native session ID; refusing to restart without its history."));
+        }
+        const runtimeSpec = deps.runtimeSpec;
+        if (!runtimeSpec) return reply.code(501).send(fail("capability_missing", "Conversation lifecycle runtime is not configured"));
+        const spec = await runtimeSpec(current, { resumeSessionId: current.nativeSessionId ?? undefined, model: current.modelPreference ?? current.model ?? undefined });
         if (current.state !== "stopped" && current.tmuxSessionId && current.ownership === "managed") await deps.supervisor.stop(current.id);
         conversation = await deps.supervisor.start(current.id, spec);
       }
@@ -379,6 +435,13 @@ export function buildApp(deps: AppDependencies): FastifyInstance<HttpServer> {
       return reply.code(code === "internal" ? 500 : code === "not_found" ? 404 : 409).send(fail(code, String(redactLogValue(error instanceof Error ? error.message : "Conversation action failed"))));
     }
   });
+  app.get("/api/models", { preHandler: protectedHook }, async () => {
+    const result = deps.modelCatalog
+      ? await deps.modelCatalog.listModelsDetailed()
+      : { models: [], source: "unavailable" as const, reason: "OMP model catalog is not configured." };
+    return ok(result);
+  });
+
   app.get("/api/runtime", { preHandler: protectedHook }, async () => {
     const result = deps.supervisor ? await deps.supervisor.activeCount() : { count: 0, known: false, reason: "Conversation lifecycle runtime is not configured." };
     return ok({ capabilities: await capabilities(), activeCount: result.known ? result.count : null, activeCountReason: result.known ? null : result.reason, maxActive: deps.config.maxActiveAgents, conversations: await deps.store.listAllConversations() });

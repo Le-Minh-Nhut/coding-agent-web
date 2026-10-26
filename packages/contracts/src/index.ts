@@ -125,6 +125,10 @@ export interface DirectoryListing {
   parent: string | null;
   roots: string[];
   entries: DirectoryEntry[];
+  /** Whether more directory entries remain after this response. */
+  hasMore: boolean;
+  /** Opaque cursor for the next page; null when this response is final. */
+  nextCursor: string | null;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -301,6 +305,8 @@ export const updateProjectSchema = z.object({
 
 export const browseQuerySchema = z.object({
   path: z.string().min(1).max(4096).optional(),
+  limit: z.coerce.number().int().min(1).max(500).optional(),
+  cursor: z.string().min(1).max(2048).optional(),
 }).strict();
 
 export const createDirectorySchema = z.object({
