@@ -70,6 +70,11 @@ writeFileSync(join(rootsDir, "readme.txt"), "Deterministic E2E fixture file. Not
 for (const name of ["p-alpha", "p-beta", "p-gamma", "p-delta", "m-touch", "seeded"]) {
   mkdirSync(join(rootsDir, name), { recursive: true });
 }
+const pagedFixtureDir = join(rootsDir, "paged");
+mkdirSync(pagedFixtureDir, { recursive: true });
+for (let index = 1; index <= 205; index++) {
+  mkdirSync(join(pagedFixtureDir, `entry-${String(index).padStart(3, "0")}`));
+}
 
 /**
  * Seed one project and one conversation so the specs can *open* a conversation
@@ -95,7 +100,8 @@ const seededConversation = {
   nativeSessionId: null,
   nativeSessionPath: null,
   title: "Seeded conversation",
-  model: null,
+  model: "effective/model",
+  modelPreference: "preferred/model",
   ownership: "managed",
   state: "stopped",
   tmuxSessionId: null,

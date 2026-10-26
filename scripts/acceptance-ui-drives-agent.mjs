@@ -636,118 +636,119 @@ async function sendPrompt(text) {
   await composer.fill(text);
   await page.locator("form.composer-container button[type=submit]").first().click();
 }
-async function pollHostReadiness(text, marker, intervalMs = 15_000, observeMs = 90_000) {
+async function pollHostReadiness(text, marker, _intervalMs = 15_000, observeMs = 90_000) {
   const welcomeAt = await page.evaluate(() => window.__cawWelcomeAt ?? null);
   if (!welcomeAt) throw new Error("Collab welcome timestamp unavailable");
   const deadline = welcomeAt + observeMs;
-  const timeline = [];
-  let attempts = 0;
-  let startupRefusals = 0;
-  let seenFrameCount = 0;
-  let outcome = "not-ready";
-  while (Date.now() < deadline) {
-    attempts++;
-    const attemptAt = Date.now();
-    const before = await page.evaluate(() => ({
-      errors: (window.__cawHostPromptErrors ?? []).length,
-      echoes: (window.__cawHostPromptEchoes ?? []).length,
-      frameCount: (window.__cawReadinessFrames ?? []).length,
-      summaryCount: (window.__cawAgentMessageSummaries ?? []).length,
-    }));
-    const composer = page.locator("textarea.composer-input");
-    await composer.fill(text);
-    const firstSendState = attempts === 1 ? await page.evaluate(() => ({
-      welcomeReadOnly: (window.__cawWelcomeReadOnly ?? []).at(-1) ?? null,
-      composerDisabled: document.querySelector("textarea.composer-input")?.disabled ?? null,
-      composerValue: document.querySelector("textarea.composer-input")?.value ?? null,
-    })) : null;
-    await page.locator("form.composer-container button[type=submit]").first().click();
-    if (attempts === 1) {
-      await waitFor("first prompt row to render", async () => userTranscriptRowsContaining(marker) > 0, { timeout: 2_000, interval: 100 }).catch(() => null);
-      await sleep(250);
-      const ui = {
-        firstSend: firstSendState,
-        userRows: await page.locator(".message-card.user").count(),
-        markerUserRows: await userTranscriptRowsContaining(marker),
-        messagesContent: redactSecretOutput(await page.locator(".messages-content").innerText().catch(() => "<unavailable>"))
-          .replace(/(?:\bsk[-_][A-Za-z0-9_-]{12,}|\bBearer\s+\S+|\bapi[_-]?key\s*[:=]\s*\S+)/gi, "[redacted]"),
-        sendError: await page.locator('form .banner[role="alert"]').allInnerTexts().catch(() => []),
-      };
-      console.log("CHECK4 FIRST-SEND UI: " + JSON.stringify(ui, null, 2));
-    }
-    let response = null;
-    while (Date.now() < Math.min(deadline, attemptAt + intervalMs)) {
-      const current = await page.evaluate(() => ({
-        errors: window.__cawHostPromptErrors ?? [],
-        echoes: window.__cawHostPromptEchoes ?? [],
-      }));
-      if (current.echoes.length > before.echoes) {
-        response = { kind: "echo" };
-        outcome = "accepted";
-        break;
-      }
-      const error = current.errors[before.errors];
-      if (error) {
-        response = { kind: error.startup ? "startup-refusal" : "other-error", message: error.message };
-        if (error.startup) startupRefusals++;
-        else outcome = "gate-cleared-other-error";
-        break;
-      }
-      await sleep(100);
-    }
-    const app = await page.evaluate(() => {
-      const frames = window.__cawReadinessFrames ?? [];
-      const newFrames = frames.slice(window.__cawReadinessFrameCursor ?? 0);
-      window.__cawReadinessFrameCursor = frames.length;
-      return {
-        appTimeSecondsAfterWelcome: ((Date.now() - (window.__cawWelcomeAt ?? Date.now())) / 1000).toFixed(1),
-        banners: [...document.querySelectorAll(".banner")].map((element) => element.innerText),
-        frames: newFrames,
-      };
-    });
-    seenFrameCount += app.frames.length;
-    const conversation = await conversationOf(state.conversationId);
-    timeline.push({
-      attempt: attempts,
-      secondsAfterWelcome: ((attemptAt - welcomeAt) / 1000).toFixed(1),
-      response: response ?? { kind: "no-error-or-echo-before-next-poll" },
-      conversation: conversation ? { state: conversation.state, statusDetail: conversation.statusDetail } : null,
-      appBanners: app.banners,
-      inboundFrames: app.frames,
-    });
-    if (response?.kind === "echo") {
-      await waitFor("host prompt echo to render", async () => userTranscriptRowsContaining(marker) === 1, {
-        timeout: Math.max(1, deadline - Date.now()), interval: 100,
-      });
-      outcome = "accepted";
-      break;
-    }
-    if (response?.kind === "other-error") break;
-    const nextAttemptAt = welcomeAt + attempts * intervalMs;
-    if (Date.now() < Math.min(deadline, nextAttemptAt)) await sleep(Math.min(deadline, nextAttemptAt) - Date.now());
-  }
-  const finalConversation = await conversationOf(state.conversationId);
-  const finalApp = await page.evaluate(() => {
+  const start = await page.evaluate(() => {
     const frames = window.__cawReadinessFrames ?? [];
-    const newFrames = frames.slice(window.__cawReadinessFrameCursor ?? 0);
     window.__cawReadinessFrameCursor = frames.length;
     return {
-      secondsAfterWelcome: ((Date.now() - (window.__cawWelcomeAt ?? Date.now())) / 1000).toFixed(1),
-      banners: [...document.querySelectorAll(".banner")].map((element) => element.innerText),
-      frames: newFrames,
+      errors: (window.__cawHostPromptErrors ?? []).length,
+      summaryCount: (window.__cawAgentMessageSummaries ?? []).length,
     };
   });
-  seenFrameCount += finalApp.frames.length;
-  timeline.push({
-    final: true,
-    secondsAfterWelcome: finalApp.secondsAfterWelcome,
-    conversation: finalConversation ? { state: finalConversation.state, statusDetail: finalConversation.statusDetail } : null,
-    appBanners: finalApp.banners,
-    inboundFrames: finalApp.frames,
-  });
-  console.log("\n--- CHECK4 STARTUP READINESS TIMELINE ---");
-  console.log(JSON.stringify({ outcome, attempts, startupRefusals, observedSecondsAfterWelcome: finalApp.secondsAfterWelcome, observedInboundFrameCount: seenFrameCount, timeline }, null, 2));
-  return { kind: outcome, attempts, startupRefusals, observedSeconds: Number(finalApp.secondsAfterWelcome) };
+
+  const composer = page.locator("textarea.composer-input");
+  await composer.fill(text);
+  const beforeSend = await page.evaluate(() => ({
+    welcomeReadOnly: (window.__cawWelcomeReadOnly ?? []).at(-1) ?? null,
+    composerDisabled: document.querySelector("textarea.composer-input")?.disabled ?? null,
+    composerValue: document.querySelector("textarea.composer-input")?.value ?? null,
+  }));
+  await page.locator("form.composer-container button[type=submit]").first().click();
+
+  await waitFor("user prompt row after first send", async () => userTranscriptRowsContaining(marker) > 0, { timeout: 5_000, interval: 100 }).catch(() => null);
+  let turnStarted = false;
+  let turnEnded = false;
+  const events = [];
+  while (Date.now() < deadline && !turnEnded) {
+    const incoming = await page.evaluate(() => {
+      const frames = window.__cawReadinessFrames ?? [];
+      const cursor = window.__cawReadinessFrameCursor ?? 0;
+      window.__cawReadinessFrameCursor = frames.length;
+      return { frames: frames.slice(cursor), errors: window.__cawHostPromptErrors ?? [] };
+    });
+    for (const frame of incoming.frames) {
+      if (!frame.eventType) continue;
+      events.push(frame.eventType);
+      if (frame.eventType === "turn_start") turnStarted = true;
+      if (turnStarted && frame.eventType === "turn_end") turnEnded = true;
+    }
+    if (incoming.errors[start.errors] && !turnStarted) break;
+    if (!turnEnded) await sleep(100);
+  }
+  await sleep(250);
+
+  const redactTranscript = (value) => value
+    .replace(/(?:\b(?:sk|rk|pk|xox[baprs])[-_][A-Za-z0-9_-]{12,}|\bBearer\s+\S+|\bapi[_-]?key\s*[:=]\s*\S+)/gi, "[redacted]")
+    .replace(/\b[A-Za-z0-9_-]{40,}\b/g, "[redacted]");
+  const ui = {
+    welcomeReadOnly: beforeSend.welcomeReadOnly,
+    composerDisabled: beforeSend.composerDisabled,
+    composerValue: redactTranscript(beforeSend.composerValue ?? ""),
+    userRows: await page.locator(".message-card.user").count(),
+    markerUserRows: await userTranscriptRowsContaining(marker),
+    messagesContent: redactTranscript(redactSecretOutput(await page.locator(".messages-content").innerText().catch(() => "<unavailable>"))),
+    sendError: await page.locator('form .banner[role="alert"]').allInnerTexts().catch(() => []),
+  };
+  const summaries = await page.evaluate((from) => (window.__cawAgentMessageSummaries ?? []).slice(from), start.summaryCount);
+
+  const current = await conversationOf(state.conversationId).catch(() => null);
+  let resolved = current ? await resolveConversationJournal(current, state.projectPath).catch(() => null) : null;
+  let resolution = current ? "resolver returned null" : "conversation lookup returned no record";
+  let candidatePath = current?.nativeSessionPath ?? state.journalPaths.get(current?.nativeSessionId);
+  if (!resolved && current?.nativeSessionId && !candidatePath) {
+    try {
+      const response = await api(page, `/api/projects/${current.projectId}/sessions`);
+      const sessions = response.body?.data ?? [];
+      candidatePath = sessions.find((session) => session.sessionId === current.nativeSessionId)?.path;
+      resolution = candidatePath
+        ? "resolver returned null; found API session candidate"
+        : `resolver returned null; API sessions status=${response.status}, count=${sessions.length}, matching nativeSessionId=false`;
+    } catch (error) {
+      resolution = `resolver returned null; API session lookup failed: ${error instanceof Error ? error.message : String(error)}`;
+    }
+  }
+  if (resolved) {
+    resolution = "resolved; journal session id and cwd matched conversation";
+    candidatePath = resolved.path;
+  } else if (candidatePath) {
+    try {
+      const textOnDisk = await readFile(candidatePath, "utf8");
+      const header = textOnDisk.split("\n").map((line) => { try { return JSON.parse(line); } catch { return null; } }).find((entry) => entry?.type === "session");
+      resolution = `resolver returned null; candidate exists; header id matches=${header?.id === current?.nativeSessionId}; cwd matches=${header?.cwd === state.projectPath}`;
+    } catch (error) {
+      resolution = `resolver returned null; candidate read failed: ${error instanceof Error ? error.message : String(error)}`;
+    }
+  } else if (current && !current.nativeSessionId) {
+    resolution = "resolver returned null; conversation has no nativeSessionId";
+  }
+
+  const journalTextValue = resolved?.text ?? null;
+  const messageText = (content) => typeof content === "string" ? content : Array.isArray(content)
+    ? content.filter((part) => part?.type === "text").map((part) => part.text ?? "").join("")
+    : "";
+  const journalEntries = journalTextValue?.split("\n").map((line) => { try { return JSON.parse(line); } catch { return null; } }) ?? [];
+  const journalEvidence = {
+    exists: Boolean(resolved),
+    markerPresent: Boolean(journalTextValue?.includes(marker)),
+    userMarkerPresent: journalEntries.some((entry) => entry?.type === "message" && entry.message?.role === "user" && messageText(entry.message.content).includes(marker)),
+    assistantReplyPresent: journalEntries.some((entry) => entry?.type === "message" && entry.message?.role === "assistant" && messageText(entry.message.content).includes(marker)),
+    path: resolved?.path ?? candidatePath ?? null,
+    resolution,
+  };
+
+  console.log("CHECK4 FIRST-SEND UI: " + JSON.stringify(ui, null, 2));
+  console.log("CHECK4 TURN SUMMARY: " + JSON.stringify({ turnStarted, turnEnded, events, messages: summaries }, null, 2));
+  console.log("CHECK4 JOURNAL: " + JSON.stringify(journalEvidence, null, 2));
+  return {
+    kind: journalEvidence.markerPresent ? "accepted" : "not-ready",
+    attempts: 1,
+    startupRefusals: 0,
+    observedSeconds: Number(((Date.now() - welcomeAt) / 1000).toFixed(1)),
+    journalEvidence,
+  };
 }
 
 async function transcriptText() {
