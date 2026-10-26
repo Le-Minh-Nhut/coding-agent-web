@@ -157,7 +157,25 @@ export async function mockConversationLink(page: Page, body: unknown, status = 2
  */
 export async function openFolderRow(page: Page, name: string): Promise<void> {
   const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  await page.getByText(new RegExp(`^\\S+\\s+${escaped}$`)).click();
+  const list = page.locator(".folder-browser-list");
+  const row = list.getByText(new RegExp(`^\\S+\\s+${escaped}$`));
+  const loadMore = list.getByRole("button", { name: "Load more" });
+  await expect(list.locator(".folder-item").first()).toBeVisible({ timeout: 15_000 });
+  for (let attempt = 0; attempt <= 3; attempt++) {
+    const found = await expect(row.first()).toBeVisible({ timeout: 5_000 }).then(() => true, () => false);
+    if (found) {
+      await row.first().click();
+      return;
+    }
+    if (attempt === 3) break;
+    const canLoadMore = await expect(loadMore).toBeVisible({ timeout: 1_000 }).then(() => true, () => false);
+    if (!canLoadMore) break;
+    await loadMore.scrollIntoViewIfNeeded();
+    await loadMore.click();
+  }
+  const visibleRows = (await list.locator(".folder-item").allTextContents()).map((text) => text.trim());
+  const breadcrumbs = await page.locator(".breadcrumbs").innerText();
+  throw new Error(`Folder row "${name}" not found after 3 Load more attempts. Breadcrumbs: ${JSON.stringify(breadcrumbs)}. Visible rows: ${JSON.stringify(visibleRows)}`);
 }
 
 export interface ProjectRecord {

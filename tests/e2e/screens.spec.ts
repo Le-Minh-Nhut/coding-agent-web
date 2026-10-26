@@ -297,10 +297,14 @@ test.describe("Screenshot inventory & geometry verification", () => {
         await page.locator("form").getByRole("button", { name: "Cancel" }).click();
         await page.locator(".modal-content > div").last().getByRole("button", { name: "Cancel" }).click();
         await expect(page.getByRole("heading", { name: "Projects", exact: true })).toBeVisible();
-        // (d) the paginated fixture directory and its Load more control
+        // (d) the dedicated paginated fixture directory and its Load more control
         await page.getByRole("button", { name: "+ New Project" }).click();
         await page.getByRole("button", { name: "Roots", exact: true }).click();
         await openFolderRow(page, "paged");
+        const pageEntries = page.locator(".folder-item").filter({ hasText: /^📁 entry-\d{3}$/u });
+        await expect(pageEntries).toHaveCount(100);
+        await expect(page.getByText(/^📁 entry-001$/u)).toBeVisible();
+        await expect(page.getByText(/^📁 entry-105$/u)).toHaveCount(0);
         await page.locator(".folder-browser-list").evaluate((element) => { element.scrollTop = element.scrollHeight; });
         const loadMore = page.getByRole("button", { name: "Load more" });
         await expect(loadMore).toBeVisible();
@@ -310,8 +314,9 @@ test.describe("Screenshot inventory & geometry verification", () => {
           await captureScreen(page, vp.name, "folder-browser-paginated");
         }
         await loadMore.click();
-        await expect(page.locator(".folder-item").filter({ hasText: "entry-001" })).toBeAttached();
-        await expect(page.locator(".folder-item").filter({ hasText: "entry-105" })).toBeAttached();
+        await expect(pageEntries).toHaveCount(200);
+        await expect(page.getByText(/^📁 entry-001$/u)).toBeVisible();
+        await expect(page.getByText(/^📁 entry-105$/u)).toBeVisible();
         await page.getByRole("button", { name: "Cancel", exact: true }).click();
 
         // (d) conversation list (project detail with conversations + native sessions)
