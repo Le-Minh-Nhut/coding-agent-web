@@ -74,11 +74,9 @@ jobs:
           path: playwright-report/
           retention-days: 7
 
-  # Real-OMP compatibility is opt-in and never runs on a pull request, because it
-  # launches agent processes. The scheduled run exists so upstream drift is noticed
-  # even when nobody is pushing; a failure there is a signal, not a broken build.
+  # Real-OMP compatibility is opt-in and manual-only; it launches agents and may spend provider credits.
   compat:
-    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -91,17 +89,28 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
 
+      # Keep compatibility checks on the repository's verified OMP 18.12.2 baseline.
+      - name: Install pinned OMP 18.12.2
+        run: |
+          set -euo pipefail
+          if ! curl -fsSL https://omp.sh/install | bash -s -- --binary --ref v18.12.2; then
+            echo "::error::Failed to install OMP v18.12.2."
+            exit 1
+          fi
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/.local/bin:$PATH"
+          omp_version="$(omp --version)" || {
+            echo "::error::Installed OMP v18.12.2 is not runnable."
+            exit 1
+          }
+          echo "Installed $omp_version"
+          if [ "$omp_version" != "omp/18.12.2" ]; then
+            echo "::error::Expected OMP v18.12.2, got: $omp_version"
+            exit 1
+          fi
+
       - name: Machine capability probe (spawns nothing)
         run: node scripts/compat-check.mjs
-
-      - name: Install OMP
-        run: |
-          # Upstream ships a single binary; the runner is a clean image, so fetch it
-          # rather than assuming a preinstalled omp.
-          curl -fsSL https://raw.githubusercontent.com/can1357/oh-my-pi/main/install.sh | bash || {
-            echo "::warning::OMP install script unavailable on this upstream revision; skipping the real-agent suite."
-            exit 0
-          }
 
       - name: Real-OMP compatibility suite
         run: CAW_COMPAT=1 npx vitest run tests/compat
