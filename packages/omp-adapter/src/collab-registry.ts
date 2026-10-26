@@ -54,7 +54,8 @@ export function parseCollabHost(raw: unknown): CollabHost | null {
     }
   }
 
-  const access = row.access === "view" ? "view" : "control";
+  // Older or malformed listings cannot authorize either kind of link; callers fail closed.
+  const access = row.access === "view" || row.access === "control" ? row.access : null;
 
   return {
     instanceId: row.instanceId,
@@ -193,8 +194,9 @@ export class DefaultCollabRegistryService implements CollabRegistryService {
       throw new AdapterError("link_unavailable", "Collab link response missing url");
     }
 
-    const returnedAccess = payload.access === "view" ? "view" : accessType;
-
+    if (payload.access !== "view" && payload.access !== "control") {
+      throw new AdapterError("link_unavailable", "Collab link response missing access");
+    }
     // Absence is preserved as `null`, never inferred. Echoing the requested
     // instance id or defaulting the generation would make the caller's
     // instance/generation comparison pass by construction, so a link minted for
@@ -202,7 +204,7 @@ export class DefaultCollabRegistryService implements CollabRegistryService {
     return {
       instanceId: typeof payload.instanceId === "string" ? payload.instanceId : null,
       generation: typeof payload.generation === "number" ? payload.generation : null,
-      access: returnedAccess,
+      access: payload.access,
       url: payload.url,
       fetchedAt: Date.now(),
     };

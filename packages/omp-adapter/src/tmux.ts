@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { readFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import { AdapterError } from "./errors.js";
 import type { LaunchRequest, TmuxService, TmuxSession } from "./types.js";
@@ -32,6 +33,16 @@ function isNoServer(err: unknown): boolean {
   const output = execErrorOutput(err);
   return output.length > 0 && !PERMISSION_PATTERNS.some((pattern) => pattern.test(output)) &&
     NO_SERVER_PATTERNS.some((pattern) => pattern.test(output));
+}
+
+function parentPidFromProcStat(stat: string, expectedPid: number): number | null {
+  const separator = stat.indexOf(" ");
+  const close = stat.lastIndexOf(") ");
+  if (separator <= 0 || close < separator || !/^\d+$/.test(stat.slice(0, separator))) return null;
+  const pid = Number(stat.slice(0, separator));
+  const fields = stat.slice(close + 2).trim().split(/\s+/);
+  const parentPid = Number(fields[1]);
+  return pid === expectedPid && fields[0]?.length === 1 && Number.isSafeInteger(parentPid) && parentPid >= 0 ? parentPid : null;
 }
 
 export interface TmuxServiceOptions {
@@ -81,6 +92,27 @@ export class DefaultTmuxService implements TmuxService {
     } catch {
       // A diagnostic sink that fails must not change the outcome of the probe.
     }
+  }
+
+  async isProcessDescendant(candidatePid: number, panePid: number): Promise<boolean | "unknown"> {
+    if (!Number.isSafeInteger(candidatePid) || candidatePid <= 0 || !Number.isSafeInteger(panePid) || panePid <= 0) return "unknown";
+    let pid = candidatePid;
+    const seen = new Set<number>();
+    for (let depth = 0; depth < 4096 && !seen.has(pid); depth++) {
+      if (pid === panePid) return true;
+      seen.add(pid);
+      let stat: string;
+      try {
+        stat = await readFile(`/proc/${pid}/stat`, "utf8");
+      } catch {
+        return "unknown";
+      }
+      const parentPid = parentPidFromProcStat(stat, pid);
+      if (parentPid === null) return "unknown";
+      if (parentPid === 0 || parentPid === pid) return false;
+      pid = parentPid;
+    }
+    return "unknown";
   }
 
   async #execTmux(args: string[]): Promise<{ stdout: string; stderr: string }> {

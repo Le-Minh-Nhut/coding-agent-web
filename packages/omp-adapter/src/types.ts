@@ -39,6 +39,8 @@ export interface CapabilityService {
 export interface ModelCatalogService {
   /** Provider-qualified OMP selectors; empty when catalog is empty or unavailable. */
   listModels(): Promise<string[]>;
+  /** Distinguishes a confirmed empty catalog from a failed/unsupported discovery. */
+  listModelsDetailed(): Promise<{ models: string[]; source: "omp" | "unavailable"; reason: string | null }>;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -55,6 +57,12 @@ export interface NativeSessionHeader {
   title: string | null;
 }
 
+export interface NativeSessionHistory {
+  header: NativeSessionHeader;
+  entries: Array<Record<string, unknown>>;
+  truncated: boolean;
+}
+
 export interface NativeSessionCatalog {
   /** Journalled sessions for a working directory, newest first. */
   listForCwd(cwd: string): Promise<NativeSessionSummary[]>;
@@ -62,8 +70,10 @@ export interface NativeSessionCatalog {
   listAll(limit?: number): Promise<NativeSessionSummary[]>;
   /** Read one journal's header, or null when it is unreadable or not a session. */
   readHeader(sessionPath: string): Promise<NativeSessionHeader | null>;
-  /** Candidate journal paths for a session id (used when only the id is known). */
+  /** Candidate journal paths for a session id (used only inside the adapter). */
   findBySessionId(sessionId: string): Promise<string | null>;
+  /** Read a bounded tail only after matching journal cwd to canonical project path. */
+  readHistory(sessionId: string, expectedCwd: string, limit?: number): Promise<NativeSessionHistory>;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -122,7 +132,9 @@ export interface TmuxService {
   /** Look up one session by id. */
   getById(sessionId: string): Promise<TmuxSession | null>;
   getByName(name: string): Promise<TmuxSession | null>;
-  /** Current socket path plus server start time and PID; null means socket unreachable, not proof of process exit. */
+  /** True only when candidatePid is the pane process or its descendant. */
+  isProcessDescendant(candidatePid: number, panePid: number): Promise<boolean | "unknown">;
+  /** Current socket path plus start time and PID; null means socket unreachable, not proof of process exit. */
   serverIdentity(): Promise<string | null>;
   /** Launch a detached session; returns id and owning server identity. */
   launch(request: LaunchRequest): Promise<TmuxSession>;
@@ -208,12 +220,8 @@ export interface CollabHost {
    * during scheduling pauses too.
    */
   busy: boolean | null;
-  /**
-   * The one field that still defaults. `access` is a closed enum the caller
-   * itself asks for, and every code path passes its own access alongside the
-   * row, so the fallback cannot be mistaken for evidence about the host.
-   */
-  access: "view" | "control";
+  /** Host-published capability ceiling; absent or invalid stays unknown. */
+  access: "view" | "control" | null;
 }
 
 export interface CollabLink {

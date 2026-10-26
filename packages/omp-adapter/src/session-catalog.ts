@@ -1,12 +1,14 @@
-import { realpathSync } from "node:fs";
-import { open, readdir, stat } from "node:fs/promises";
+import { constants, realpathSync } from "node:fs";
+import { open, readdir, realpath, stat } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import type { NativeSessionSummary } from "@caw/contracts";
 import { DefaultSessionLeaseProbe } from "./session-lease.js";
-import type { NativeSessionCatalog, NativeSessionHeader, SessionLeaseProbe } from "./types.js";
+import type { NativeSessionCatalog, NativeSessionHeader, NativeSessionHistory, SessionLeaseProbe } from "./types.js";
 
 export const SESSION_HEADER_PREFIX_BYTES = 64 * 1024;
+export const SESSION_HISTORY_MAX_BYTES = 2 * 1024 * 1024;
+export const SESSION_HISTORY_MAX_ENTRIES = 500;
 
 export interface SessionCatalogOptions {
   sessionsRoot?: string;
@@ -294,5 +296,104 @@ export class DefaultNativeSessionCatalog implements NativeSessionCatalog {
     }
 
     return null;
+  }
+  async readHistory(sessionId: string, expectedCwd: string, limit = SESSION_HISTORY_MAX_ENTRIES): Promise<NativeSessionHistory> {
+    const entryLimit = Number.isFinite(limit) ? Math.min(Math.max(Math.trunc(limit), 1), SESSION_HISTORY_MAX_ENTRIES) : SESSION_HISTORY_MAX_ENTRIES;
+    if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u.test(sessionId)) {
+      throw Object.assign(new Error("Invalid native session ID"), { code: "path_forbidden" });
+    }
+    const live = await this.#leaseProbe.isLive(sessionId);
+    if (live !== false) throw Object.assign(new Error(live === true ? "Native session is currently live" : "Native session liveness could not be verified"), { code: "conflict_owner" });
+    const candidate = await this.findBySessionId(sessionId);
+    if (!candidate) throw Object.assign(new Error("Native session journal was not found"), { code: "not_found" });
+    let root: string;
+    let file: string;
+    try {
+      root = await realpath(this.#sessionsRoot);
+      file = await realpath(candidate);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") throw Object.assign(new Error("Native session journal was not found"), { code: "not_found" });
+      throw error;
+    }
+    if (!isRelativeWithin(path.relative(root, file))) throw Object.assign(new Error("Native session journal is outside the OMP session store"), { code: "path_forbidden" });
+    const handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW);
+    try {
+      const metadata = await handle.stat();
+      if (!metadata.isFile()) throw Object.assign(new Error("Native session journal is not a regular file"), { code: "path_forbidden" });
+      let openedPath: string;
+      try { openedPath = await realpath(`/proc/self/fd/${handle.fd}`); }
+      catch { throw Object.assign(new Error("Cannot verify native session journal location"), { code: "path_forbidden" }); }
+      if (!isRelativeWithin(path.relative(root, openedPath))) throw Object.assign(new Error("Native session journal is outside the OMP session store"), { code: "path_forbidden" });
+      const truncatedByBytes = metadata.size > SESSION_HISTORY_MAX_BYTES;
+      let prefixText: string;
+      let entriesText: string;
+      if (truncatedByBytes) {
+        const prefix = Buffer.alloc(SESSION_HEADER_PREFIX_BYTES);
+        const prefixRead = await handle.read(prefix, 0, prefix.length, 0);
+        prefixText = prefix.toString("utf8", 0, prefixRead.bytesRead);
+        const tailLength = SESSION_HISTORY_MAX_BYTES - prefixRead.bytesRead;
+        const tail = Buffer.alloc(tailLength);
+        const tailRead = await handle.read(tail, 0, tailLength, metadata.size - tailLength);
+        entriesText = tail.toString("utf8", 0, tailRead.bytesRead);
+        const firstNewline = entriesText.indexOf("\n");
+        entriesText = firstNewline < 0 ? "" : entriesText.slice(firstNewline + 1);
+      } else {
+        const all = Buffer.alloc(metadata.size);
+        const read = await handle.read(all, 0, metadata.size, 0);
+        prefixText = all.toString("utf8", 0, read.bytesRead);
+        entriesText = prefixText;
+      }
+      const prefixLines = prefixText.split("\n");
+      let headerLine = 0;
+      let title: string | null = null;
+      if (prefixLines[0]?.trim()) {
+        try {
+          const slot = JSON.parse(prefixLines[0]) as Record<string, unknown>;
+          if (slot.type === "title" && slot.v === 1) {
+            title = typeof slot.title === "string" ? slot.title : null;
+            headerLine = 1;
+          }
+        } catch { /* The first line may itself be the session header. */ }
+      }
+      let rawHeader: Record<string, unknown>;
+      try { rawHeader = JSON.parse(prefixLines[headerLine] ?? "") as Record<string, unknown>; }
+      catch { throw Object.assign(new Error("Native session journal header is invalid"), { code: "path_forbidden" }); }
+      if (rawHeader.type !== "session" || rawHeader.id !== sessionId || typeof rawHeader.cwd !== "string") throw Object.assign(new Error("Native session journal does not match the requested session"), { code: "path_forbidden" });
+      const header: NativeSessionHeader = {
+        sessionId,
+        cwd: rawHeader.cwd,
+        timestamp: typeof rawHeader.timestamp === "string" ? rawHeader.timestamp : null,
+        version: typeof rawHeader.version === "number" ? rawHeader.version : null,
+        title: title ?? (typeof rawHeader.title === "string" ? rawHeader.title : null),
+      };
+      const expected = await realpath(expectedCwd);
+      let actual: string;
+      try { actual = await realpath(header.cwd); }
+      catch { throw Object.assign(new Error("Native session journal does not belong to this project"), { code: "path_forbidden" }); }
+      if (expected !== actual) throw Object.assign(new Error("Native session journal does not belong to this project"), { code: "path_forbidden" });
+      if (!truncatedByBytes) entriesText = prefixLines.slice(headerLine + 1).join("\n");
+      const entries: Array<Record<string, unknown>> = [];
+      let entryCount = 0;
+      let offset = 0;
+      while (offset < entriesText.length) {
+        const newline = entriesText.indexOf("\n", offset);
+        const end = newline < 0 ? entriesText.length : newline;
+        const line = entriesText.slice(offset, end);
+        offset = end + 1;
+        if (!line) continue;
+        let entry: unknown;
+        try { entry = JSON.parse(line); }
+        catch { throw Object.assign(new Error("Native session journal contains an invalid entry"), { code: "path_forbidden" }); }
+        if (!entry || typeof entry !== "object" || Array.isArray(entry)) throw Object.assign(new Error("Native session journal contains an invalid entry"), { code: "path_forbidden" });
+        if (entryCount < entryLimit) entries.push(entry as Record<string, unknown>);
+        else entries[entryCount % entryLimit] = entry as Record<string, unknown>;
+        entryCount++;
+      }
+      const rotation = entryCount > entryLimit ? entryCount % entryLimit : 0;
+      const orderedEntries = rotation ? [...entries.slice(rotation), ...entries.slice(0, rotation)] : entries;
+      return { header, entries: orderedEntries, truncated: truncatedByBytes || entryCount > entryLimit };
+    } finally {
+      await handle.close();
+    }
   }
 }

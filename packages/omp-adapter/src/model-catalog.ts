@@ -7,9 +7,9 @@ const execFileAsync = promisify(execFile);
 const MODEL_LIST_ARGS = ["models", "--json"];
 const MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
 const COMMAND_TIMEOUT_MS = 15_000;
-// OMP's catalog has its own 24-hour discovery cache; 60s avoids repeated CLI
-// startup without making a model/config change stay hidden for long.
+// Successful discovery stays cached for 60s; failures retry quickly.
 const CACHE_TTL_MS = 60_000;
+const FAILURE_CACHE_TTL_MS = 3_000;
 
 export interface ModelCatalogOptions {
   ompBinary?: string;
@@ -21,15 +21,16 @@ const modelRowSchema = z.object({
   selector: z.string().min(1).refine((selector) => selector.trim() === selector && !/[\u0000-\u001f\u007f]/.test(selector)),
 }).passthrough();
 
-/** Parse and sort OMP's machine-readable model listing; malformed rows are dropped. */
-export function parseOmpModelsOutput(stdout: string): string[] {
+function parseModelCatalog(stdout: string): { models: string[]; reason: string | null } {
   let parsed: unknown;
   try {
     parsed = JSON.parse(stdout);
   } catch {
-    return [];
+    return { models: [], reason: "OMP model catalog returned invalid JSON" };
   }
-  if (parsed === null || typeof parsed !== "object" || !("models" in parsed) || !Array.isArray(parsed.models)) return [];
+  if (parsed === null || typeof parsed !== "object" || !("models" in parsed) || !Array.isArray(parsed.models)) {
+    return { models: [], reason: "OMP model catalog returned an unsupported format" };
+  }
 
   const selectors: string[] = [];
   const seen = new Set<string>();
@@ -41,16 +42,22 @@ export function parseOmpModelsOutput(stdout: string): string[] {
     seen.add(selector);
     selectors.push(selector);
   }
-  return selectors.sort((a, b) => {
+  selectors.sort((a, b) => {
     const [providerA, ...idA] = a.split("/");
     const [providerB, ...idB] = b.split("/");
     return providerA!.localeCompare(providerB!) || idA.join("/").localeCompare(idB.join("/"));
   });
+  return { models: selectors, reason: null };
+}
+
+/** Parse and sort OMP's machine-readable model listing; malformed rows are dropped. */
+export function parseOmpModelsOutput(stdout: string): string[] {
+  return parseModelCatalog(stdout).models;
 }
 
 export class DefaultModelCatalogService implements ModelCatalogService {
   readonly #ompBinary: string;
-  #cachedModels: string[] | null = null;
+  #cachedResult: { models: string[]; source: "omp" | "unavailable"; reason: string | null } | null = null;
   #cacheExpiresAt = 0;
 
   constructor(options: ModelCatalogOptions = {}) {
@@ -58,8 +65,12 @@ export class DefaultModelCatalogService implements ModelCatalogService {
   }
 
   async listModels(): Promise<string[]> {
-    if (this.#cachedModels !== null && Date.now() < this.#cacheExpiresAt) {
-      return [...this.#cachedModels];
+    return (await this.listModelsDetailed()).models;
+  }
+
+  async listModelsDetailed(): Promise<{ models: string[]; source: "omp" | "unavailable"; reason: string | null }> {
+    if (this.#cachedResult !== null && Date.now() < this.#cacheExpiresAt) {
+      return { ...this.#cachedResult, models: [...this.#cachedResult.models] };
     }
 
     try {
@@ -69,13 +80,22 @@ export class DefaultModelCatalogService implements ModelCatalogService {
         maxBuffer: MAX_OUTPUT_BYTES,
         encoding: "utf8",
       });
-      this.#cachedModels = parseOmpModelsOutput(stdout);
-      this.#cacheExpiresAt = Date.now() + CACHE_TTL_MS;
-      return [...this.#cachedModels];
-    } catch {
-      // Missing binary, timeout, unreadable config/cache, or unsupported CLI all
-      // mean that the catalog is unknown, not that a guessed list is acceptable.
-      return [];
+      const parsed = parseModelCatalog(stdout);
+      const result = parsed.reason === null
+        ? { ...parsed, source: "omp" as const }
+        : { ...parsed, source: "unavailable" as const };
+      this.#cachedResult = result;
+      this.#cacheExpiresAt = Date.now() + (result.source === "omp" ? CACHE_TTL_MS : FAILURE_CACHE_TTL_MS);
+      return { ...result, models: [...result.models] };
+    } catch (error) {
+      const record = error && typeof error === "object" ? error as Record<string, unknown> : {};
+      const reason = [record.stderr, record.stdout, error instanceof Error ? error.message : String(error)]
+        .filter((text): text is string => typeof text === "string" && text.trim().length > 0)
+        .join(" ");
+      const result = { models: [], source: "unavailable" as const, reason: reason || "OMP model catalog command failed" };
+      this.#cachedResult = result;
+      this.#cacheExpiresAt = Date.now() + FAILURE_CACHE_TTL_MS;
+      return { ...result, models: [] };
     }
   }
 }

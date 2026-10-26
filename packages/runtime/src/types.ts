@@ -45,7 +45,8 @@ export interface RuntimeHost {
   /** `true` means confirmed awaiting an answer; `null` means the listing did not say. */
   inputRequired: boolean | null;
   busy?: boolean | null;
-  access: "view" | "control";
+  /** Published capability ceiling; absent or invalid stays unknown. */
+  access: "view" | "control" | null;
 }
 
 /** A tmux session we own, keyed by id and qualified by server lifetime. */
@@ -133,8 +134,10 @@ export interface RuntimeAdapters {
    * only the former means a reused `$N` is somebody else's process.
    */
   getTmux(id: string): Promise<TmuxProbeRead>;
-  /** Current tmux socket path plus start time; null means unreachable, not process absence. */
-  tmuxServerIdentity(): Promise<string | null>;
+ /** True only when candidatePid is the pane process or its descendant; unknown when lineage cannot be read. */
+ isProcessDescendant(candidatePid: number, panePid: number): Promise<Tri>;
+ /** Current tmux socket path plus start time; null means unreachable, not process absence. */
+ tmuxServerIdentity(): Promise<string | null>;
   launch(spec: RuntimeLaunchSpec): Promise<RuntimeTmuxSession>;
   /** Resolves only after the adapter proves this process is gone; rejects otherwise. */
   killTmux(id: string, expectedServerIdentity: string): Promise<void>;

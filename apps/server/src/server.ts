@@ -21,14 +21,16 @@ import { join, resolve } from "node:path";
 import {
   DefaultCapabilityService,
   DefaultCollabRegistryService,
+  DefaultModelCatalogService,
   DefaultNativeSessionCatalog,
   DefaultSessionLeaseProbe,
   DefaultTmuxService,
   StaleGenerationError,
 } from "@caw/omp-adapter";
-import { createSupervisor } from "@caw/runtime";
+import { createSupervisor, RuntimeError } from "@caw/runtime";
 import { createRelay } from "@caw/relay";
 import type { CollabLinkResponse, Conversation, NativeSessionSummary } from "@caw/contracts";
+import type { NativeSessionHeader } from "@caw/omp-adapter";
 import { loadConfig } from "./config.js";
 import { createAuthenticationService } from "./auth.js";
 import { buildApp } from "./app.js";
@@ -51,34 +53,59 @@ export async function writeOverlay(overlayDir: string, conversationId: string, p
   return path;
 }
 
+export async function launchWithOverlay<T>(
+  input: { overlayDir: string; conversationId: string; configPath?: string; relayPort: number; webUrl?: string },
+  launch: (configPath: string) => Promise<T>,
+  write: typeof writeOverlay = writeOverlay,
+): Promise<T> {
+  let configPath = input.configPath;
+  if (!configPath) {
+    try {
+      configPath = await write(input.overlayDir, input.conversationId, input.relayPort, input.webUrl);
+    } catch (error) {
+      const code = error && typeof error === "object" && "code" in error && typeof error.code === "string" ? error.code : "unknown";
+      throw new RuntimeError("agent_launch_failed", `Could not write the agent overlay required for Collab hosting (${code}).`);
+    }
+  }
+  return launch(configPath);
+}
+
 export function createRuntimeSpec(deps: {
   store: { listProjects: () => Promise<Array<{ id: string; path: string }>> };
   paths: { assertInsideRoots: (path: string, mustExist?: boolean) => Promise<string> };
   catalog: {
     findBySessionId: (sessionId: string) => Promise<string | null>;
-    readHeader: (path: string) => Promise<{ sessionId: string; cwd: string } | null>;
+    readHeader: (path: string) => Promise<NativeSessionHeader | null>;
   };
 }) {
-  return async (conversation: Conversation, input: { resumeSessionId?: string; model?: string; allowMissingResumeSession?: boolean }) => {
+  return async (conversation: Conversation, input: { resumeSessionId?: string; model?: string }) => {
     const project = (await deps.store.listProjects()).find((item) => item.id === conversation.projectId);
     if (!project) throw new Error("Conversation project not found");
     const cwd = await deps.paths.assertInsideRoots(project.path, true);
 
     let resumeSessionPath: string | undefined;
     if (input.resumeSessionId) {
-      resumeSessionPath = (await deps.catalog.findBySessionId(input.resumeSessionId)) ?? undefined;
-      if (!resumeSessionPath && !input.allowMissingResumeSession) {
-        throw Object.assign(new Error("Requested native session was not found"), { code: "not_found" });
+      resumeSessionPath = await deps.catalog.findBySessionId(input.resumeSessionId) ?? undefined;
+      if (!resumeSessionPath) {
+        throw Object.assign(new Error("Requested native session journal was not found"), { code: "not_found" });
       }
-      if (resumeSessionPath) {
-        const header = await deps.catalog.readHeader(resumeSessionPath);
-        if (
-          !header ||
-          header.sessionId !== input.resumeSessionId ||
-          (await deps.paths.assertInsideRoots(header.cwd, true)) !== cwd
-        ) {
-          throw new Error("Requested native session does not belong to this project");
+      let header: NativeSessionHeader | null;
+      try {
+        header = await deps.catalog.readHeader(resumeSessionPath);
+      } catch (error) {
+        if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
+          throw Object.assign(new Error("Requested native session journal was not found"), { code: "not_found" });
         }
+        throw error;
+      }
+      if (!header) {
+        throw Object.assign(new Error("Requested native session journal was not found"), { code: "not_found" });
+      }
+      if (
+        header.sessionId !== input.resumeSessionId ||
+        (await deps.paths.assertInsideRoots(header.cwd, true)) !== cwd
+      ) {
+        throw Object.assign(new Error("Requested native session journal does not belong to this project"), { code: "path_forbidden" });
       }
     }
 
@@ -226,8 +253,8 @@ export function createMintLink(
      * read as "connected", so the mint below refuses an unreported value rather
      * than treating it as good news.
      */
-    list: () => Promise<Array<{ sessionId: string; instanceId: string | null; generation: number | null; relayConnected: boolean | null }>>;
-    link: (instanceId: string, access: "control" | "view") => Promise<{ instanceId?: string | null; generation?: number | null; url: string }>;
+    list: () => Promise<Array<{ sessionId: string; instanceId: string | null; generation: number | null; relayConnected: boolean | null; access?: "control" | "view" | null }>>;
+    link: (instanceId: string, access: "control" | "view") => Promise<{ instanceId?: string | null; generation?: number | null; access: "control" | "view"; url: string }>;
   },
   publicOriginOrOptions?: string | { publicOrigin?: string },
 ) {
@@ -246,10 +273,20 @@ export function createMintLink(
     if (!host || host.relayConnected !== true) {
       throw Object.assign(new Error("This session is not hosting a live room"), { code: "link_unavailable" });
     }
+    // Never infer an omitted or invalid published capability: only explicit host policy can authorize a bearer link.
+    if (host.access !== "control" && host.access !== "view") {
+      throw Object.assign(new Error(`This host's access is unknown; ${access} access was requested.`), { code: "capability_missing" });
+    }
+    if (access === "control" && host.access !== "control") {
+      throw Object.assign(new Error(`This host offers ${host.access} access; control access was requested.`), { code: "capability_missing" });
+    }
     if (host.instanceId == null || host.generation == null) {
       throw new StaleGenerationError("Collab host identity or generation is unavailable");
     }
-    const link = await registry.link(host.instanceId, access === "view" ? "view" : "control");
+    const link = await registry.link(host.instanceId, access);
+    if (link.access !== access) {
+      throw Object.assign(new Error(`The host did not confirm the requested ${access} access; refusing to return an unverified link.`), { code: "capability_missing" });
+    }
     // Missing CLI identity fields are evidence gaps, not matching defaults.
     if (link.instanceId == null || link.generation == null || link.instanceId !== host.instanceId || link.generation !== host.generation) {
       throw new StaleGenerationError(
@@ -265,7 +302,7 @@ export function createMintLink(
     const url = publicOrigin ? rewriteCollabLink(link.url, publicOrigin) : link.url;
     return {
       url,
-      access: access === "view" ? "view" : "full",
+      access: link.access === "view" ? "view" : "full",
       instanceId: link.instanceId,
       generation: link.generation,
     };
@@ -305,6 +342,7 @@ const catalog = new DefaultNativeSessionCatalog({ leaseProbe: lease });
 const tmuxSocketPath = join(config.stateDir, "tmux.sock");
 const tmux = new DefaultTmuxService({ socketPath: tmuxSocketPath });
 const registry = new DefaultCollabRegistryService();
+const modelCatalog = new DefaultModelCatalogService();
 const paths = new WorkspacePathPolicy(config.allowedRoots);
 
 /**
@@ -358,6 +396,7 @@ const supervisor = createSupervisor({
           serverIdentity: session.serverIdentity,
         })),
       ),
+    isProcessDescendant: (candidatePid, panePid) => tmux.isProcessDescendant(candidatePid, panePid),
     tmuxServerIdentity: () => tmux.serverIdentity(),
     getTmux: async (id) => {
       try {
@@ -367,27 +406,26 @@ const supervisor = createSupervisor({
         return { ok: false as const, reason: error instanceof Error ? error.message : String(error) };
       }
     },
-    launch: async (spec) => {
-      // Every managed agent is launched with an overlay that turns on Collab
-      // auto-hosting against our private relay. Without it the process runs but
-      // shares no room, so the browser could never watch it.
-      const configPath = spec.configPath ?? (await writeOverlay(overlayDir, spec.conversationId, config.relayPort, config.publicOrigin).catch(() => undefined));
-      const session = await tmux.launch({
-        name: spec.name,
-        cwd: spec.cwd,
-        configPath,
-        model: spec.model,
-        env: spec.env,
-        args: spec.resumeSessionPath ? ["--resume", spec.resumeSessionPath] : [],
-      });
-      return {
-        id: session.id,
-        name: session.name,
-        alive: session.alive,
-        panePid: session.panePid,
-        serverIdentity: session.serverIdentity,
-      };
-    },
+    launch: async (spec) => launchWithOverlay(
+      { overlayDir, conversationId: spec.conversationId, configPath: spec.configPath, relayPort: config.relayPort, webUrl: config.publicOrigin },
+      async (configPath) => {
+        const session = await tmux.launch({
+          name: spec.name,
+          cwd: spec.cwd,
+          configPath,
+          model: spec.model,
+          env: spec.env,
+          args: spec.resumeSessionPath ? ["--resume", spec.resumeSessionPath] : [],
+        });
+        return {
+          id: session.id,
+          name: session.name,
+          alive: session.alive,
+          panePid: session.panePid,
+          serverIdentity: session.serverIdentity,
+        };
+      },
+    ),
     // The guard is mandatory here: a recorded `$N` is not actionable unless the
     // tmux server that owns it is still the one we recorded.
     killTmux: (id, expectedServerIdentity) => tmux.kill(id, { expectedIdentity: expectedServerIdentity }),
@@ -462,6 +500,8 @@ const app = buildApp({
   runtimeSpec,
   mintLink,
   listNativeSessions,
+  modelCatalog,
+  readNativeHistory: (sessionId, expectedCwd) => catalog.readHistory(sessionId, expectedCwd),
   tmuxSocketPath,
   tmuxServerIdentity: () => tmux.serverIdentity(),
 });

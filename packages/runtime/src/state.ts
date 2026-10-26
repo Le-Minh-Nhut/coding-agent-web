@@ -122,11 +122,10 @@ export function evaluateState(observations: Observations): StateVerdict {
       return { state: "stopping", ownership: "managed", detail: "Stopping the agent…" };
     }
     if (!host) {
-      // Alive but not hosting: no room, so no viewer can attach.
       return {
-        state: "idle",
+        state: "unknown",
         ownership: "managed",
-        detail: "The agent process is running but is not sharing a session, so a live view is unavailable.",
+        detail: "The agent process is live but has not published a Collab host; activity is unknown.",
       };
     }
     if (host.relayConnected === null) {

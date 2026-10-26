@@ -537,10 +537,10 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
   /**
    * Wait for the agent we just launched to publish a room, then record it.
    *
-   * Adoption is by *instance*: we only accept a host whose `instanceId` was not
-   * present before the launch. Matching by working directory instead would be a
-   * correctness bug — two agents in one project tree are ordinary, and adopting
-   * the wrong one points the conversation at a stranger's session.
+   * Adoption is by process lineage: accept only a new host whose PID is a
+   * descendant of the exact tmux pane launched for this conversation. Matching
+   * by working directory or PID order could point the conversation at a stranger's
+   * session when multiple agents share a project tree.
    *
    * A timeout is not a failure: the process may be alive but not hosting. We
    * report exactly that rather than pretending the launch failed.
@@ -553,6 +553,7 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
   ): Promise<Conversation> {
     const deadline = clock.now() + publishTimeoutMs;
     let registryReadable = true;
+    let identityUnverified = false;
 
     while (clock.now() < deadline) {
       await clock.sleep(publishPollMs);
@@ -582,15 +583,34 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
         );
       }
 
-      const host =
-        (conversation.nativeSessionId
-          ? hosts.find((row) => row.sessionId === conversation.nativeSessionId)
-          : undefined) ??
-        [...hosts]
-          .filter((row) => !preexistingInstances.has(row.instanceId) && row.cwd === spec.cwd)
-          // Newest process wins; an unreported pid is unknown, and `0` would sort
-          // it first, so unknowns go last instead.
-          .sort((a, b) => (b.pid ?? -1) - (a.pid ?? -1))[0];
+      const published = hosts.filter((row) =>
+        !preexistingInstances.has(row.instanceId) &&
+        row.cwd === spec.cwd &&
+        (!conversation.nativeSessionId || row.sessionId === conversation.nativeSessionId),
+      );
+      const matched: RuntimeHost[] = [];
+      let lineageUnknown = false;
+      if (still.panePid !== null) {
+        for (const candidate of published) {
+          if (candidate.pid === null) {
+            lineageUnknown = true;
+            continue;
+          }
+          let descendant: Tri;
+          try {
+            descendant = await options.adapters.isProcessDescendant(candidate.pid, still.panePid);
+          } catch {
+            descendant = "unknown";
+          }
+          if (descendant === true) matched.push(candidate);
+          else if (descendant === "unknown") lineageUnknown = true;
+        }
+      } else if (published.length > 0) {
+        lineageUnknown = true;
+      }
+      if (lineageUnknown || matched.length > 1) identityUnverified = true;
+      // More than one matching room or any undecidable candidate is ambiguous; never choose by cwd or PID order.
+      const host = !lineageUnknown && matched.length === 1 ? matched[0] : undefined;
 
       if (host) {
         await options.store.recordEvent(conversationId, "agent.hosted", {
@@ -622,10 +642,12 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
     if (!latest) throw new RuntimeFailure("agent_not_running", `Conversation ${conversationId} disappeared`);
     return (
       (await options.store.updateConversation(conversationId, {
-        state: registryReadable ? "idle" : "unknown",
-        statusDetail: registryReadable
-          ? "The agent is running but has not shared its session yet, so live viewing is unavailable."
-          : "The OMP Collab registry could not be read during startup, so session publication is unknown.",
+        state: registryReadable && !identityUnverified ? "starting" : "unknown",
+        statusDetail: !registryReadable
+          ? "The OMP Collab registry could not be read during startup, so session publication is unknown."
+          : identityUnverified
+            ? "The agent is running, but the published host process could not be positively matched to its tmux process."
+            : "The agent is running, but no Collab host was positively matched to its tmux process before startup timed out.",
       })) ?? latest
     );
   }
