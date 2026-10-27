@@ -63,6 +63,8 @@ export interface NativeSessionHistory {
   truncated: boolean;
   truncatedByBytes: boolean;
   truncatedByEntries: boolean;
+  /** True when this page's bounded scan encountered and skipped an oversized journal record. */
+  skippedOversized: boolean;
   hasOlder: boolean;
   nextCursor: string | null;
 }

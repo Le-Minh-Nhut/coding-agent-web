@@ -473,8 +473,10 @@ const mintLink = createMintLink(registry, config.publicOrigin);
 const listNativeSessions = async (input: { projectPath: string }): Promise<Array<Omit<NativeSessionSummary, "hasCollabHost">>> => {
   const canonical = await paths.assertInsideRoots(input.projectPath, true);
   const sessions = await catalog.listForCwd(canonical);
+  const projectIds = new Set((await store.listProjects()).map((project) => project.id));
   const tracked = new Set(
     (await store.listAllConversations())
+      .filter((conversation) => projectIds.has(conversation.projectId))
       .map((conversation) => conversation.nativeSessionId)
       .filter((id): id is string => Boolean(id)),
   );

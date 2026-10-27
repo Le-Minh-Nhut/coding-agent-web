@@ -401,14 +401,35 @@ export class DefaultNativeSessionCatalog implements NativeSessionCatalog {
         throw Object.assign(new Error("History cursor no longer matches this journal"), { code: "path_forbidden" });
       }
 
-      let end = cursor?.end ?? metadata.size;
+      const end = cursor?.end ?? metadata.size;
       const start = Math.max(headerEnd, end - SESSION_HISTORY_MAX_BYTES);
       const window = Buffer.alloc(end - start);
       const windowRead = await handle.read(window, 0, window.length, start);
+      const firstNewline = start > headerEnd ? window.indexOf(10, 0) : -1;
       let contentStart = 0;
+      let skippedOversized = false;
       if (start > headerEnd) {
-        const firstNewline = window.indexOf(10, 0);
-        contentStart = firstNewline < 0 ? windowRead.bytesRead : firstNewline + 1;
+        if (firstNewline < 0) {
+          contentStart = windowRead.bytesRead;
+          skippedOversized = windowRead.bytesRead === SESSION_HISTORY_MAX_BYTES;
+        } else {
+          const previousByte = Buffer.alloc(1);
+          await handle.read(previousByte, 0, 1, start - 1);
+          if (previousByte[0] !== 10) {
+            contentStart = firstNewline + 1;
+            if (windowRead.bytesRead === SESSION_HISTORY_MAX_BYTES) {
+              const lookbackLength = Math.min(SESSION_HISTORY_MAX_BYTES, start - headerEnd);
+              const lookbackStart = start - lookbackLength;
+              const lookback = Buffer.alloc(lookbackLength);
+              const lookbackRead = await handle.read(lookback, 0, lookbackLength, lookbackStart);
+              const previousNewline = lookback.lastIndexOf(10, lookbackRead.bytesRead - 1);
+              const lineStart = previousNewline >= 0
+                ? lookbackStart + previousNewline + 1
+                : lookbackStart === headerEnd ? headerEnd : null;
+              skippedOversized = lineStart === null || start + firstNewline + 1 - lineStart > SESSION_HISTORY_MAX_BYTES;
+            }
+          }
+        }
       }
       const completeEnd = window.lastIndexOf(10, windowRead.bytesRead - 1);
       const lineLimit = entryLimit + 1;
@@ -442,7 +463,7 @@ export class DefaultNativeSessionCatalog implements NativeSessionCatalog {
       const nextCursor = hasOlder
         ? encodeHistoryCursor({ sessionId, cwdHash, dev: metadata.dev, ino: metadata.ino, size: cursor?.size ?? metadata.size, end: firstEntry ?? start })
         : null;
-      return { header, entries, truncated: truncatedByBytes || truncatedByEntries, truncatedByBytes, truncatedByEntries, hasOlder, nextCursor };
+      return { header, entries, truncated: truncatedByBytes || truncatedByEntries, truncatedByBytes, truncatedByEntries, skippedOversized, hasOlder, nextCursor };
     } finally {
       await handle.close();
     }
