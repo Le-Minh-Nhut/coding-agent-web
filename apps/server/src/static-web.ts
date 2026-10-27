@@ -194,12 +194,11 @@ export function registerStaticWeb(
     }
 
     const pathname = cleanPathname(request.url ?? "/guest");
-    const subpath =
-      pathname === "/guest" || pathname === "/guest/"
-        ? "/"
-        : pathname.startsWith("/guest/")
-          ? pathname.slice("/guest".length)
-          : pathname;
+    if (pathname === "/guest") {
+      reply.headers(BASE_HEADERS);
+      return reply.code(308).header("Location", "/guest/").type("text/plain; charset=utf-8").send("Permanent Redirect");
+    }
+    const subpath = pathname === "/guest/" ? "/" : pathname.slice("/guest".length);
 
     const segments = safeSegments(subpath);
     if (segments === null) {
@@ -268,6 +267,9 @@ export function registerStaticWeb(
     if (served) return reply;
 
     // SPA fallback: non-/api, non-/guest, non-/r, non-/healthz path returns index.html
+    if (segments[0] === "assets") {
+      return reply.code(404).type("text/plain; charset=utf-8").send("Not Found");
+    }
     const indexPath = path.join(webRootReal, "index.html");
     const spaServed = await tryServeFile(
       indexPath,

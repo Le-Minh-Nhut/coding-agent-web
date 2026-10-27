@@ -1,9 +1,11 @@
 import { createServer } from "node:http";
 import { once } from "node:events";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
 import net from "node:net";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
+import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { WebSocket } from "ws";
@@ -215,8 +217,8 @@ describe("Single Origin & Static Web Serving", () => {
 
     // Without trailing slash
     const resWithoutSlash = await app.inject({ method: "GET", url: "/guest" });
-    expect(resWithoutSlash.statusCode).toBe(200);
-    expect(resWithoutSlash.body).toContain("Guest Viewer");
+    expect(resWithoutSlash.statusCode).toBe(308);
+    expect(resWithoutSlash.headers.location).toBe("/guest/");
 
     // Non-existent guest asset 404s (no SPA fallback for guest)
     const resGuestMissing = await app.inject({ method: "GET", url: "/guest/missing.js" });
@@ -224,6 +226,40 @@ describe("Single Origin & Static Web Serving", () => {
     expect(resGuestMissing.body).not.toContain("Guest Viewer");
 
     await app.close();
+  });
+
+  it("serves every bundled guest page asset with its real MIME type", async () => {
+    const repoRoot = fileURLToPath(new URL("../../", import.meta.url));
+    execFileSync("node", [join(repoRoot, "scripts/build-guest.mjs")], { cwd: repoRoot, stdio: "pipe" });
+    const { auth, config, store, guestDir } = await createFixture();
+    await rm(guestDir, { recursive: true, force: true });
+    await cp(join(repoRoot, "packages/guest/dist"), guestDir, { recursive: true });
+    const app = buildApp({ config, auth, store });
+    try {
+      const page = await app.inject({ method: "GET", url: "/guest/" });
+      expect(page.statusCode).toBe(200);
+      expect(page.headers["content-type"]).toContain("text/html");
+      const references = [...page.body.matchAll(/<(?:link|script)\b[^>]*?\b(?:href|src)=["']([^"']+)["'][^>]*>/giu)].map((match) => match[1]!);
+      const assets = references.map((reference) => new URL(reference, "http://workspace.test/guest/").pathname);
+      const cssAssets = assets.filter((asset) => asset.endsWith(".css"));
+      const jsAssets = assets.filter((asset) => asset.endsWith(".js"));
+      expect(cssAssets).not.toHaveLength(0);
+      expect(jsAssets).not.toHaveLength(0);
+      for (const asset of assets) {
+        const response = await app.inject({ method: "GET", url: asset });
+        expect(response.statusCode, asset).toBe(200);
+        expect(response.headers["content-type"], asset).not.toContain("text/html");
+        if (asset.endsWith(".css")) expect(response.headers["content-type"], asset).toContain("text/css");
+        if (asset.endsWith(".js")) expect(response.headers["content-type"], asset).toContain("text/javascript");
+      }
+
+      const staleAsset = await app.inject({ method: "GET", url: "/assets/app.missing.css" });
+      expect(staleAsset.statusCode).toBe(404);
+      expect(staleAsset.headers["content-type"]).toContain("text/plain");
+      expect(staleAsset.headers["content-type"]).not.toContain("text/html");
+    } finally {
+      await app.close();
+    }
   });
 
   it("WebSocket upgrade over the same server exchanges binary frames and answers /api/capabilities 401", async () => {
