@@ -289,3 +289,28 @@ Final code HEAD `53ef59bc9572d7af100ab565496491032abacf2a`. Hosted CI run #7 com
 - A provider key under `~/.omp` appeared once in an agent transcript during this round; owner may wish to rotate it.
 
 The round-8 audit remains committed and unchanged. Round-9 report: `docs/audits/round-9-verification.md`.
+
+## Round 12 — round-10/11 audit findings closed
+
+All six findings from the round-10 and round-11 independent audits closed at commits `b9c633c`/`1fc7700`/`500bc2c`/`efcc857`. Details and evidence: `docs/audits/round-12-verification.md`.
+
+### Verification
+
+| Gate step | Check | Result |
+|---|---|---|
+| 1 | `pnpm -r typecheck` | Pass, all packages. Verbatim tail available in the gate log. |
+| 2 | `npx vitest run --maxWorkers=8 --reporter=dot` | 53 files passed, 2 skipped; 485 tests passed, 8 skipped. |
+| 3 | `node scripts/build-guest.mjs` | Pass. |
+| 4 | `pnpm --filter @caw/web build` | Pass. |
+| 5 | `pnpm --filter @caw/server build` | Pass. |
+| 6 | `TMPDIR=$HOME/.cache CAW_E2E_PORT=4489 CAW_RELAY_PORT=8819 npx playwright test --project=chromium --workers=1` | 43 passed (59.9s). |
+| 7 | `node scripts/compat-check.mjs` | 17 ok, 1 warn, 0 fail. This followed `fix(scripts): accept tmux no-server connect error in compat probe`; tmux 3.6 wording `error connecting to /tmp/tmux-1000/default (No such file or directory)` was previously a false FAIL. |
+
+### Known gaps
+
+- Real-OMP acceptance and physical-iPhone validation were NOT RUN THIS ROUND; prior acceptance evidence stands. Round 9 had 15 PASS / 2 FAIL; check8 NOT POSSIBLE VIA UI; check12 SKIP precondition; check6 Deny and check14 subagent fixed but not re-run in acceptance. Physical iPhone remains UNVERIFIED.
+- Hosted compat job was never dispatched; it remains manual `workflow_dispatch` only.
+- Oversized records still use bounded reads (2 MiB window); they are now honestly flagged instead of silently dropped.
+- No join/adoption of live untracked session; behavior unchanged.
+
+Round-10/11 audit evidence: `docs/audits/round-12-verification.md`.
