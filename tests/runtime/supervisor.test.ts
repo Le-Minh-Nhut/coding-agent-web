@@ -1551,6 +1551,62 @@ describe("supervisor.activeCount", () => {
 });
 
 describe("supervisor.refresh", () => {
+  it("keeps external host state current through refresh without taking ownership", async () => {
+    const world = makeWorld();
+    world.seed({ nativeSessionId: "external-native", ownership: "external", state: "running" });
+    world.setLease(true);
+    world.hosts.push({
+      instanceId: "external-host", generation: 1, pid: 9000, sessionId: "external-native",
+      cwd: "/tmp/project", model: "model", participants: 1, relayConnected: true,
+      inputRequired: false, busy: true, access: "control",
+    });
+    const supervisor = createSupervisor({ store: world.store, adapters: world.adapters, clock: instantClock, maxActive: 3 });
+
+    expect((await supervisor.refresh("c1"))?.state).toBe("running");
+    world.hosts[0]!.busy = false;
+    expect((await supervisor.refresh("c1"))?.state).toBe("idle");
+    world.hosts[0]!.inputRequired = true;
+    expect((await supervisor.refresh("c1"))?.state).toBe("awaiting_input");
+    expect((await world.store.getConversation("c1"))?.ownership).toBe("external");
+    expect(world.launches).toHaveLength(0);
+  });
+
+  it("reports unknown when an external host disappears", async () => {
+    const world = makeWorld();
+    world.seed({ nativeSessionId: "external-native", ownership: "external", state: "running" });
+    world.setLease(true);
+    world.hosts.push({
+      instanceId: "external-host", generation: 1, pid: 9000, sessionId: "external-native",
+      cwd: "/tmp/project", model: "model", participants: 1, relayConnected: true,
+      inputRequired: false, busy: true, access: "control",
+    });
+    const supervisor = createSupervisor({ store: world.store, adapters: world.adapters, clock: instantClock, maxActive: 3 });
+    await supervisor.reconcile();
+    world.hosts.splice(0);
+
+    const refreshed = await supervisor.refresh("c1");
+    expect(refreshed?.state).toBe("unknown");
+    expect(refreshed?.statusDetail).toMatch(/another process is writing this session/i);
+    expect(refreshed?.ownership).toBe("external");
+  });
+
+  it("reports unknown when the registry becomes unreadable for an external session", async () => {
+    const world = makeWorld();
+    world.seed({ nativeSessionId: "external-native", ownership: "external", state: "running" });
+    world.setLease(true);
+    world.hosts.push({
+      instanceId: "external-host", generation: 1, pid: 9000, sessionId: "external-native",
+      cwd: "/tmp/project", model: "model", participants: 1, relayConnected: true,
+      inputRequired: false, busy: true, access: "control",
+    });
+    const supervisor = createSupervisor({ store: world.store, adapters: world.adapters, clock: instantClock, maxActive: 3 });
+    await supervisor.reconcile();
+    world.breakRegistry(true);
+
+    const refreshed = await supervisor.refresh("c1");
+    expect(refreshed?.state).toBe("unknown");
+  });
+
   it("does not append events for an unchanged state, so polling cannot flood the log", async () => {
     const world = makeWorld();
     world.seed({ id: "c1", state: "stopped", tmuxSessionId: "$8", tmuxServerIdentity: "private-socket:1" });

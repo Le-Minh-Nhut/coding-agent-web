@@ -19,8 +19,8 @@ const header = { sessionId: "session", cwd: "/work", timestamp: null, version: 1
 function entry(id: string, text: string) {
   return { type: "message", id, parentId: null, timestamp: `2026-01-01T00:00:0${id === "begin" ? "1" : id === "middle" ? "2" : "3"}Z`, message: { role: "user", content: text, timestamp: Date.now() } };
 }
-function page(entries: ReturnType<typeof entry>[], nextCursor: string | null, hasOlder: boolean, truncated = false) {
-  return { ok: true as const, data: { header, entries, truncated, truncatedByBytes: false, truncatedByEntries: truncated, hasOlder, nextCursor } };
+function page(entries: ReturnType<typeof entry>[], nextCursor: string | null, hasOlder: boolean, truncated = false, skippedOversized = false) {
+  return { ok: true as const, data: { header, entries, truncated, truncatedByBytes: false, truncatedByEntries: truncated, skippedOversized, hasOlder, nextCursor } };
 }
 
 async function mountSavedHistory() {
@@ -37,6 +37,11 @@ async function mountSavedHistory() {
   await view.findByRole("button", { name: "Load older" });
   return view;
 }
+afterEach(() => cleanup());
+beforeEach(() => {
+  vi.clearAllMocks();
+  vi.mocked(api.getConversationHistory).mockReset();
+});
 
 describe("saved transcript cursor paging", () => {
   it("loads two older pages in journal order without duplicates and reaches beginning", async () => {
@@ -58,11 +63,23 @@ describe("saved transcript cursor paging", () => {
     expect(scroller.scrollTop).toBe(150);
     fireEvent.click(view.getByRole("button", { name: "Load older" }));
     await waitFor(() => expect(view.getByText("Beginning of history.")).toBeTruthy());
+    expect(view.queryByText("Saved transcript truncated; some history is omitted.")).toBeNull();
 
     const rows = [...view.container.querySelectorAll(".message-card.user .message-content")].map((row) => row.textContent?.trim());
     expect(rows).toEqual(["begin", "middle", "end"]);
     expect(view.queryByRole("button", { name: "Load older" })).toBeNull();
     expect(api.getConversationHistory.mock.calls).toEqual([["c1"], ["c1", "cursor-1"], ["c1", "cursor-2"]]);
+  });
+  it("keeps oversized-record warning across pages and avoids claiming a complete beginning", async () => {
+    vi.mocked(api.getConversationHistory)
+      .mockResolvedValueOnce(page([entry("end", "end")], "cursor-1", true, false, true))
+      .mockResolvedValueOnce(page([entry("begin", "begin")], null, false));
+    const view = await mountSavedHistory();
+    const warning = "History is incomplete: a record too large to display was skipped; journal intact on disk.";
+    expect(view.getByText(warning)).toBeTruthy();
+    fireEvent.click(view.getByRole("button", { name: "Load older" }));
+    await waitFor(() => expect(view.getByText(warning)).toBeTruthy());
+    expect(view.queryByText("Beginning of history.")).toBeNull();
   });
 
   it("surfaces a refused cursor as an error and keeps current page", async () => {
@@ -71,7 +88,7 @@ describe("saved transcript cursor paging", () => {
       .mockResolvedValueOnce({ ok: false, error: { code: "bad_request", message: "Invalid history cursor" } });
     const view = await mountSavedHistory();
     fireEvent.click(view.getByRole("button", { name: "Load older" }));
-    expect((await view.findByRole("alert")).textContent).toContain("Invalid history cursor");
+    expect(await view.findByText("Invalid history cursor")).toBeTruthy();
     expect(view.container.querySelector(".messages-content")?.textContent).toContain("end marker");
     expect(view.getByRole("button", { name: "Load older" })).toBeTruthy();
   });

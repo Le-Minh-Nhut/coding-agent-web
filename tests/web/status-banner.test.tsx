@@ -125,7 +125,7 @@ describe("Connection status banners", () => {
     const history = {
       header: { sessionId: "session-1", cwd: "/work", timestamp: null, version: null, title: "Saved session" },
       entries: [{ type: "message", id: "saved-1", parentId: null, timestamp: "2026-01-01T00:00:00Z", message: { role: "user", content: "Saved prompt", timestamp: 1 } }],
-      truncated: false, truncatedByBytes: false, truncatedByEntries: false, hasOlder: false, nextCursor: null,
+      truncated: false, truncatedByBytes: false, truncatedByEntries: false, skippedOversized: false, hasOlder: false, nextCursor: null,
     };
     vi.mocked(api.getConversationHistory).mockResolvedValue({ ok: true, data: history });
     let viewContainer: HTMLElement | null = null;
@@ -140,12 +140,15 @@ describe("Connection status banners", () => {
     expect(viewContainer?.querySelector(".composer-container")).toBeNull();
 
     cleanup();
-    vi.mocked(api.getConversationHistory).mockResolvedValue({ ok: true, data: { ...history, truncated: true } });
+    vi.mocked(api.getConversationHistory).mockResolvedValue({ ok: true, data: { ...history, truncated: true, skippedOversized: true } });
     await act(async () => {
       const { container } = render(<ConversationView conversationId="c-1" onBack={() => {}} />);
       viewContainer = container;
     });
-    await waitFor(() => expect(viewContainer?.textContent).toContain("Saved transcript truncated; some history is omitted."));
+    await waitFor(() => {
+      expect(viewContainer?.textContent).toContain("History is incomplete: a record too large to display was skipped; journal intact on disk.");
+      expect(viewContainer?.textContent).toContain("Saved transcript truncated; some history is omitted.");
+    });
 
     cleanup();
     vi.mocked(api.getConversationHistory).mockResolvedValue({ ok: false, error: { code: "conflict_owner", message: "Live" } });

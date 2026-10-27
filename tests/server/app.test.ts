@@ -516,6 +516,7 @@ describe("native session history route", () => {
       truncated: true,
       truncatedByBytes: false,
       truncatedByEntries: true,
+      skippedOversized: false,
       hasOlder: true,
       nextCursor: "cursor",
     };
@@ -542,6 +543,7 @@ describe("native session history route", () => {
           header: { sessionId, cwd: expectedCwd, timestamp: null, version: 3, title: null },
           entries: [{ id: "older", type: "message" }],
           truncated: true, truncatedByBytes: true, truncatedByEntries: false,
+          skippedOversized: false,
           hasOlder: true, nextCursor: "next-opaque-cursor",
         };
       },
@@ -583,7 +585,7 @@ describe("native session history route", () => {
     const { app, headers, dir, store } = await fixture({
       readNativeHistory: async (sessionId, expectedCwd) => {
         if (sessionId === "missing-native") throw Object.assign(new Error("missing"), { code: "not_found" });
-        return { header: { sessionId, cwd: join(dir, "other"), timestamp: null, version: 3, title: null }, entries: [], truncated: false, truncatedByBytes: false, truncatedByEntries: false, hasOlder: false, nextCursor: null };
+        return { header: { sessionId, cwd: join(dir, "other"), timestamp: null, version: 3, title: null }, entries: [], truncated: false, truncatedByBytes: false, truncatedByEntries: false, skippedOversized: false, hasOlder: false, nextCursor: null };
       },
     });
     const projectPath = join(dir, "project");

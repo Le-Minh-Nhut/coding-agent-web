@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { ProjectDetailView } from "../../apps/web/src/components/ProjectDetailView.js";
 import { api } from "../../apps/web/src/api.js";
 import type { Conversation, NativeSessionSummary } from "@caw/contracts";
@@ -33,10 +33,10 @@ function session(over: Partial<NativeSessionSummary> = {}): NativeSessionSummary
   };
 }
 
-async function renderWith(sessions: SessionWithHost[], onSelectConversation = () => {}) {
+async function renderWith(sessions: SessionWithHost[], onSelectConversation = () => {}, projectLabel = "project") {
   vi.mocked(api.listProjects).mockResolvedValue({
     ok: true,
-    data: [{ id: "p1", path: "/tmp/project", label: "project", favorite: false, createdAt: "", updatedAt: "" }],
+    data: [{ id: "p1", path: "/tmp/project", label: projectLabel, favorite: false, createdAt: "", updatedAt: "" }],
   } as never);
   vi.mocked(api.listNativeSessions).mockResolvedValue({ ok: true, data: sessions } as never);
 
@@ -133,6 +133,18 @@ describe("native session liveness badge", () => {
   it("does not offer resume when the lease is unknown or session is already tracked", async () => {
     await renderWith([session({ live: "unknown" }), session({ sessionId: "tracked-id", tracked: true })]);
     expect(screen.queryByRole("button", { name: "Resume in app" })).toBeNull();
+  });
+  it("offers a resume action for untracked sessions and hides it for tracked sessions", async () => {
+    await renderWith([
+      session({ title: "Recreated project session", live: false, tracked: false }),
+      session({ sessionId: "tracked-session", title: "Tracked session", live: false, tracked: true }),
+    ], () => {}, "Recreated project");
+    expect(screen.getByRole("heading", { name: "Recreated project" })).toBeTruthy();
+    expect(screen.getByText("No conversations yet.")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Resume in app" })).toBeTruthy();
+    expect(screen.getByText("Tracked session")).toBeTruthy();
+    expect(within(screen.getByText("Tracked session").closest(".card")!).queryByRole("button", { name: "Resume in app" })).toBeNull();
+    expect(screen.getAllByRole("button", { name: "Resume in app" })).toHaveLength(1);
   });
 
   it("shows persisted lifecycle details beside the conversation state", async () => {
