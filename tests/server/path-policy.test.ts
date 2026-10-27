@@ -137,6 +137,21 @@ describe("WorkspacePathPolicy", () => {
     const after = await readdir(parent);
     expect(after).toEqual(before);
   });
+  it("returns both NFC and NFD names across unchanged directory pages", async () => {
+    const root = await tempDir();
+    const names = ["caf\u00e9", "cafe\u0301", "zzz"];
+    await Promise.all(names.map((name) => mkdir(join(root, name))));
+    const policy = new WorkspacePathPolicy([root]);
+    const found: string[] = [];
+    let cursor: string | undefined;
+    do {
+      const page = await policy.listDirectory(root, { limit: 1, cursor });
+      found.push(...page.entries.map((entry) => entry.path.slice(root.length + 1)));
+      cursor = page.nextCursor ?? undefined;
+    } while (cursor);
+    expect(found).toHaveLength(3);
+    expect(new Set(found)).toEqual(new Set(names));
+  });
   it("pages large listings in stable order without duplicates or skipped existing entries", async () => {
     const root = await tempDir();
     const names = Array.from({ length: 37 }, (_, index) => `entry-${String(index).padStart(2, "0")}`);

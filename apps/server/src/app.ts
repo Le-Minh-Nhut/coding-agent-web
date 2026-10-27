@@ -3,7 +3,7 @@ import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest, 
 import { browseQuerySchema, conversationActionSchema, conversationModelSchema, createConversationSchema, createDirectorySchema, createProjectSchema, ERROR_CODES, fail, listEventsQuerySchema, loginSchema, ok, updateProjectSchema } from "@caw/contracts";
 import { z } from "zod";
 import type { Capabilities, CollabLinkResponse, Conversation, ErrorCode, NativeSessionSummary } from "@caw/contracts";
-import type { CapabilityService, ModelCatalogService, NativeSessionHistory } from "@caw/omp-adapter";
+import type { CapabilityService, CollabHost, ModelCatalogService, NativeSessionHistory } from "@caw/omp-adapter";
 import type { Supervisor, RuntimeLaunchSpec } from "@caw/runtime";
 import type { AuthenticationService } from "./auth.js";
 import { resolve } from "node:path";
@@ -32,10 +32,12 @@ export interface AppDependencies {
   tmuxSocketPath?: string;
   tmuxServerIdentity?: () => Promise<string | null>;
   /** Discovers native OMP sessions for a project directory. */
-  listNativeSessions?: (conversation: { projectPath: string }) => Promise<NativeSessionSummary[]>;
+  listNativeSessions?: (conversation: { projectPath: string }) => Promise<Array<Omit<NativeSessionSummary, "hasCollabHost">>>;
+  listCollabHosts?: () => Promise<CollabHost[]>;
   modelCatalog?: ModelCatalogService;
   /** Reads a bounded native journal window by session ID after matching canonical project path. */
-  readNativeHistory?: (sessionId: string, expectedCwd: string) => Promise<NativeSessionHistory>;
+  readNativeHistory?: (sessionId: string, expectedCwd: string, options?: { before?: string }) => Promise<NativeSessionHistory>;
+  findLiveHost?: (sessionId: string) => Promise<CollabHost | null>;
 }
 
 const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
@@ -59,9 +61,10 @@ type HttpRequest = FastifyRequest<RouteGenericInterface, HttpServer>;
 type HttpReply = FastifyReply<RouteGenericInterface, HttpServer>;
 type RequestWithAuth = HttpRequest & { cawSession?: { csrfToken: string; expiresAt: number; passwordSetupRequired: boolean }; cawToken?: string };
 const idParams = z.object({ id: z.string().min(1).max(128) });
-const conversationRequest = createConversationSchema.omit({ projectId: true });
-const attachRequest = z.object({ action: z.literal("attach") });
 const linkQuerySchema = z.object({ access: z.enum(["control", "view"]).default("control") });
+const attachRequest = z.object({ action: z.literal("attach") });
+const conversationRequest = createConversationSchema.omit({ projectId: true });
+const historyQuerySchema = z.object({ before: z.string().min(1).max(2048).optional() });
 
 function withAuth(request: HttpRequest): RequestWithAuth {
   return request as unknown as RequestWithAuth;
@@ -230,10 +233,54 @@ export function buildApp(deps: AppDependencies): FastifyInstance<HttpServer> {
     const project = (await deps.store.listProjects()).find((item) => item.id === params.data.id);
     if (!project) return reply.code(404).send(fail("not_found", "Project not found"));
     if (!deps.listNativeSessions) return ok([] as NativeSessionSummary[]);
+    if (!deps.listCollabHosts) return reply.code(501).send(fail("capability_missing", "Collab registry is not configured."));
+    let sessions: Array<Omit<NativeSessionSummary, "hasCollabHost">>;
     try {
-      return ok(await deps.listNativeSessions({ projectPath: project.path }));
+      sessions = await deps.listNativeSessions({ projectPath: project.path });
     } catch (error) {
       return pathError(reply, error);
+    }
+    let hosts: CollabHost[];
+    try {
+      hosts = await deps.listCollabHosts();
+    } catch {
+      return reply.code(500).send(fail("internal", "Unable to read Collab host registry."));
+    }
+    const hostAvailability = new Map<string, boolean>();
+    for (const host of hosts) if (!hostAvailability.has(host.sessionId)) hostAvailability.set(host.sessionId, host.relayConnected === true);
+    return ok(sessions.map((session) => ({ ...session, hasCollabHost: hostAvailability.get(session.sessionId) ?? false })));
+  });
+  app.post("/api/projects/:id/sessions/:sessionId/attach-live", { preHandler: protectedHook }, async (request, reply) => {
+    const params = z.object({ id: z.string().min(1).max(128), sessionId: z.string().min(1).max(128) }).safeParse(request.params);
+    if (!params.success) return reply.code(400).send(fail("bad_request", "Invalid project or session ID"));
+    if (!deps.listNativeSessions || !deps.findLiveHost) return reply.code(501).send(fail("capability_missing", "Live native session attachment is not configured."));
+    const project = (await deps.store.listProjects()).find((item) => item.id === params.data.id);
+    if (!project) return reply.code(404).send(fail("not_found", "Project not found"));
+    try {
+      const projectPath = await paths.assertInsideRoots(project.path, true);
+      const sessions = await deps.listNativeSessions({ projectPath });
+      const session = sessions.find((item) => item.sessionId === params.data.sessionId);
+      if (!session) return reply.code(404).send(fail("not_found", "Native session journal was not found."));
+      if ((await paths.assertInsideRoots(session.cwd, true)) !== projectPath) return reply.code(403).send(fail("path_forbidden", "Native session journal does not belong to this project."));
+      if (session.live === "unknown") return reply.code(409).send(fail("conflict_owner", "Native session writer status cannot be verified."));
+      if (session.live !== true) return reply.code(409).send(fail("link_unavailable", "Native session has no live writer to attach to."));
+      const host = await deps.findLiveHost(params.data.sessionId);
+      if (!host || host.sessionId !== params.data.sessionId || host.relayConnected !== true) return reply.code(409).send(fail("link_unavailable", "Native session has no connected Collab host."));
+      const conversation = await deps.store.registerExternalConversation({
+        projectId: project.id,
+        nativeSessionId: params.data.sessionId,
+        title: session.title ?? "Live session",
+        hostInstanceId: host.instanceId,
+        hostGeneration: host.generation,
+      });
+      if (conversation.ownership !== "external") return reply.code(409).send(fail("conflict_owner", "Native session is already tracked by a managed conversation."));
+      return ok(conversation);
+    } catch (error) {
+      const code = error && typeof error === "object" && "code" in error ? error.code : undefined;
+      if (code === "path_forbidden" || code === "path_not_found") return reply.code(403).send(fail("path_forbidden", "Native session journal does not belong to this project."));
+      if (code === "not_found") return reply.code(404).send(fail("not_found", "Native session journal was not found."));
+      app.log.error({ projectId: params.data.id }, "failed to attach live native session");
+      return reply.code(500).send(fail("internal", "Unable to attach live native session."));
     }
   });
   app.get("/api/browse", { preHandler: protectedHook }, async (request, reply) => {
@@ -251,6 +298,8 @@ export function buildApp(deps: AppDependencies): FastifyInstance<HttpServer> {
   app.get("/api/conversations/:id/history", { preHandler: protectedHook }, async (request, reply) => {
     const params = idParams.safeParse(request.params);
     if (!params.success) return reply.code(400).send(fail("bad_request", "Invalid conversation ID"));
+    const query = historyQuerySchema.safeParse(request.query ?? {});
+    if (!query.success) return reply.code(400).send(fail("bad_request", "Invalid history cursor"));
     const conversation = await deps.store.getConversation(params.data.id);
     if (!conversation) return reply.code(404).send(fail("not_found", "Conversation not found"));
     if (!conversation.nativeSessionId) return reply.code(404).send(fail("not_found", "Conversation has no native session history."));
@@ -259,7 +308,7 @@ export function buildApp(deps: AppDependencies): FastifyInstance<HttpServer> {
       const project = (await deps.store.listProjects()).find((item) => item.id === conversation.projectId);
       if (!project) return reply.code(404).send(fail("not_found", "Conversation project not found."));
       const projectPath = await paths.assertInsideRoots(project.path, true);
-      const history = await deps.readNativeHistory(conversation.nativeSessionId, projectPath);
+      const history = await deps.readNativeHistory(conversation.nativeSessionId, projectPath, { before: query.data.before });
       if (history.header.sessionId !== conversation.nativeSessionId || (await paths.assertInsideRoots(history.header.cwd, true)) !== projectPath) return reply.code(403).send(fail("path_forbidden", "Native session journal does not belong to this project."));
       return ok(history);
     } catch (error) {
@@ -420,9 +469,9 @@ export function buildApp(deps: AppDependencies): FastifyInstance<HttpServer> {
       else {
         const current = await deps.store.getConversation(params.data.id);
         if (!current) return reply.code(404).send(fail("not_found", "Conversation not found"));
-        if (current.nativeSessionPath && !current.nativeSessionId) {
-          return reply.code(409).send(fail("conflict_owner", "The recorded session journal has no native session ID; refusing to restart without its history."));
-        }
+        if (current.ownership !== "managed") return reply.code(409).send(fail("conflict_owner", "This session is externally managed and cannot be restarted here."));
+        if (current.tmuxSessionId && !current.tmuxServerIdentity) return reply.code(409).send(fail("conflict_owner", "Managed tmux identity cannot be verified; refusing to restart this session."));
+        if (current.nativeSessionPath && !current.nativeSessionId) return reply.code(409).send(fail("conflict_owner", "The recorded session journal has no native session ID; refusing to restart without its history."));
         const runtimeSpec = deps.runtimeSpec;
         if (!runtimeSpec) return reply.code(501).send(fail("capability_missing", "Conversation lifecycle runtime is not configured"));
         const spec = await runtimeSpec(current, { resumeSessionId: current.nativeSessionId ?? undefined, model: current.modelPreference ?? current.model ?? undefined });

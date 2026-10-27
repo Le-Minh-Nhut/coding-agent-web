@@ -470,7 +470,7 @@ const mintLink = createMintLink(registry, config.publicOrigin);
  * already owns each one. The store is consulted so the UI can show "already
  * tracked" rather than offering to resume something we are already running.
  */
-const listNativeSessions = async (input: { projectPath: string }): Promise<NativeSessionSummary[]> => {
+const listNativeSessions = async (input: { projectPath: string }): Promise<Array<Omit<NativeSessionSummary, "hasCollabHost">>> => {
   const canonical = await paths.assertInsideRoots(input.projectPath, true);
   const sessions = await catalog.listForCwd(canonical);
   const tracked = new Set(
@@ -501,7 +501,9 @@ const app = buildApp({
   mintLink,
   listNativeSessions,
   modelCatalog,
-  readNativeHistory: (sessionId, expectedCwd) => catalog.readHistory(sessionId, expectedCwd),
+  readNativeHistory: (sessionId, expectedCwd, options) => catalog.readHistory(sessionId, expectedCwd, options),
+  listCollabHosts: () => registry.list(),
+  findLiveHost: (sessionId) => registry.findBySessionId(sessionId),
   tmuxSocketPath,
   tmuxServerIdentity: () => tmux.serverIdentity(),
 });

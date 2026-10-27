@@ -12,6 +12,7 @@ export interface StoreEvent<T = unknown> { id: string; conversationId: string; s
 export interface StoredCommand { idempotencyKey: string; conversationId: string; kind: string; payload: Record<string, unknown>; createdAt: string }
 export interface ProjectInput { path: string; label?: string }
 export interface ConversationInput { projectId: string; title?: string; nativeSessionId?: string }
+export interface ExternalConversationInput { projectId: string; nativeSessionId: string; title: string; hostInstanceId: string; hostGeneration: number | null }
 export interface MetadataStore {
   listProjects(): Promise<Project[]>;
   createProject(input: ProjectInput): Promise<Project>;
@@ -21,6 +22,7 @@ export interface MetadataStore {
   listAllConversations(): Promise<Conversation[]>;
   getConversation(id: string): Promise<Conversation | null>;
   createConversation(input: ConversationInput): Promise<Conversation>;
+  registerExternalConversation(input: ExternalConversationInput): Promise<Conversation>;
   updateConversation(id: string, patch: Partial<Conversation>): Promise<Conversation | null>;
   recordEvent<T>(conversationId: string, type: string, payload: T, ts?: string): Promise<StoreEvent<T>>;
   listEvents<T = unknown>(conversationId: string, afterSeq?: number, limit?: number): Promise<Array<StoreEvent<T>>>;
@@ -133,6 +135,24 @@ export function createMetadataStore(stateDir: string, now: () => Date = () => ne
           tmuxServerIdentity: null, tmuxPanePid: null,
           hostInstanceId: null, hostGeneration: null, createdAt: created, updatedAt: created,
           lastActivityAt: null, statusDetail: null,
+        };
+        await append({ op: "conversation", value }); conversations.set(value.id, value); return value;
+      });
+    },
+    registerExternalConversation(input) {
+      return serialize(async () => {
+        await load();
+        if (!projects.has(input.projectId)) throw new Error("Project not found");
+        const existing = [...conversations.values()].find((conversation) => conversation.projectId === input.projectId && conversation.nativeSessionId === input.nativeSessionId);
+        if (existing) return existing;
+        const created = stamp();
+        const value: Conversation = {
+          id: randomUUID(), projectId: input.projectId, nativeSessionId: input.nativeSessionId,
+          nativeSessionPath: null, title: input.title, modelPreference: null, model: null,
+          ownership: "external", state: "unknown", tmuxSessionId: null, tmuxSessionName: null,
+          tmuxServerIdentity: null, tmuxPanePid: null, hostInstanceId: input.hostInstanceId,
+          hostGeneration: input.hostGeneration, createdAt: created, updatedAt: created,
+          lastActivityAt: null, statusDetail: "Observed live session; lifecycle is not managed here.",
         };
         await append({ op: "conversation", value }); conversations.set(value.id, value); return value;
       });

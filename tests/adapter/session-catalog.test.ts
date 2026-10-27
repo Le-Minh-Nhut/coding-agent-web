@@ -189,6 +189,10 @@ describe("session-catalog", () => {
       expect(history.header.sessionId).toBe("history-session");
       expect(history.entries).toEqual([{ type: "message", i: 3 }, { type: "message", i: 4 }]);
       expect(history.truncated).toBe(true);
+      expect(history.truncatedByEntries).toBe(true);
+      expect(history.truncatedByBytes).toBe(false);
+      expect(history.hasOlder).toBe(true);
+      expect(history.nextCursor).toBeTruthy();
       const otherCwd = path.join(testRoot, "history-foreign-project");
       await mkdir(otherCwd, { recursive: true });
       await expect(makeCatalog(sessionsRoot).readHistory("history-session", otherCwd)).rejects.toMatchObject({ code: "path_forbidden" });
@@ -220,17 +224,29 @@ describe("session-catalog", () => {
       expect(history.entries).toHaveLength(500);
       expect(history.entries.at(-1)).toEqual({ type: "message", i: 500 });
       expect(history.truncated).toBe(true);
+      expect(history.truncatedByEntries).toBe(true);
+      expect(history.truncatedByBytes).toBe(false);
     });
     it("bounds bytes read and reports byte truncation honestly", async () => {
       const cwd = path.join(testRoot, "history-large-project");
       const sessionsRoot = path.join(testRoot, "history-large-sessions");
       await mkdir(cwd, { recursive: true });
-      const body = `${JSON.stringify({ type: "message", text: "x".repeat(SESSION_HISTORY_MAX_BYTES + 100) })}\n`;
+      const body = Array.from({ length: 140 }, (_, i) => `${JSON.stringify({ type: "message", i, text: "x".repeat(20_000) })}\n`).join("");
       await createJournal(cwd, "large-history", body, sessionsRoot);
       await mkdir(sessionsRoot, { recursive: true });
       const history = await makeCatalog(sessionsRoot).readHistory("large-history", cwd);
       expect(history.truncated).toBe(true);
-      expect(history.entries).toEqual([]);
+      expect(history.truncatedByBytes).toBe(true);
+      expect(history.truncatedByEntries).toBe(false);
+      expect(history.entries.reduce((bytes, entry) => bytes + Buffer.byteLength(`${JSON.stringify(entry)}\n`), 0)).toBeLessThanOrEqual(SESSION_HISTORY_MAX_BYTES);
+      const indices = [...history.entries.map((entry) => entry.i as number)];
+      let before = history.nextCursor ?? undefined;
+      while (before) {
+        const older = await makeCatalog(sessionsRoot).readHistory("large-history", cwd, { before });
+        indices.unshift(...older.entries.map((entry) => entry.i as number));
+        before = older.nextCursor ?? undefined;
+      }
+      expect(indices).toEqual(Array.from({ length: 140 }, (_, i) => i));
     });
     it("refuses history when session liveness is active or unknown", async () => {
       const cwd = path.join(testRoot, "history-live-project");
@@ -242,6 +258,51 @@ describe("session-catalog", () => {
         const catalog = new DefaultNativeSessionCatalog({ sessionsRoot, leaseProbe: { isLive: async () => live, liveSet: async () => new Map(), leaseName: (id) => id } });
         await expect(catalog.readHistory("live-history", cwd)).rejects.toMatchObject({ code: "conflict_owner" });
       }
+    });
+
+    it("walks a long journal backward without gaps or duplicates", async () => {
+      const cwd = path.join(testRoot, "history-paging-project");
+      const sessionsRoot = path.join(testRoot, "history-paging-sessions");
+      await mkdir(cwd, { recursive: true });
+      await mkdir(sessionsRoot, { recursive: true });
+      const total = 3_200;
+      await createJournal(cwd, "paging-session", Array.from({ length: total }, (_, i) => `${JSON.stringify({ i, marker: i === 0 || i === 1600 || i === total - 1 })}\n`).join(""), sessionsRoot);
+      const catalog = makeCatalog(sessionsRoot);
+      const pages: number[] = [];
+      let before: string | undefined;
+      do {
+        const page = await catalog.readHistory("paging-session", cwd, { before });
+        pages.unshift(...page.entries.map((entry) => entry.i as number));
+        before = page.nextCursor ?? undefined;
+        expect(page.hasOlder).toBe(Boolean(before));
+      } while (before);
+      expect(pages).toEqual(Array.from({ length: total }, (_, i) => i));
+      expect(pages.filter((i) => i === 0 || i === 1600 || i === total - 1)).toEqual([0, 1600, total - 1]);
+    });
+
+    it("ignores an incomplete trailing JSONL record and rejects forged or cross-session cursors", async () => {
+      const cwd = path.join(testRoot, "history-cursor-project");
+      const sessionsRoot = path.join(testRoot, "history-cursor-sessions");
+      await mkdir(cwd, { recursive: true });
+      await mkdir(sessionsRoot, { recursive: true });
+      await createJournal(cwd, "cursor-session", `${JSON.stringify({ i: 0 })}\n${JSON.stringify({ i: 1 })}\n{\"partial\":`, sessionsRoot);
+      await createJournal(cwd, "other-cursor-session", `${JSON.stringify({ i: 0 })}\n`, sessionsRoot);
+      const catalog = makeCatalog(sessionsRoot);
+      const history = await catalog.readHistory("cursor-session", cwd);
+      expect(history.entries).toEqual([{ i: 0 }, { i: 1 }]);
+      await expect(catalog.readHistory("cursor-session", cwd, { before: "forged.cursor" })).rejects.toMatchObject({ code: "path_forbidden" });
+
+      const pagingCwd = path.join(testRoot, "history-cross-cursor-project");
+      const pagingRoot = path.join(testRoot, "history-cross-cursor-sessions");
+      await mkdir(pagingCwd, { recursive: true });
+      await mkdir(pagingRoot, { recursive: true });
+      await createJournal(pagingCwd, "cursor-source", Array.from({ length: 501 }, (_, i) => `${JSON.stringify({ i })}\n`).join(""), pagingRoot);
+      await createJournal(pagingCwd, "cursor-target", `${JSON.stringify({ i: 0 })}\n`, pagingRoot);
+      const source = await makeCatalog(pagingRoot).readHistory("cursor-source", pagingCwd);
+      expect(source.nextCursor).toBeTruthy();
+      const otherCwd = path.join(testRoot, "some-other-project");
+      await mkdir(otherCwd, { recursive: true });
+      await expect(makeCatalog(pagingRoot).readHistory("cursor-source", otherCwd, { before: source.nextCursor! })).rejects.toMatchObject({ code: "path_forbidden" });
     });
   });
 });

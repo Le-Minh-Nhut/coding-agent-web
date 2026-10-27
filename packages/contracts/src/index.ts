@@ -206,6 +206,8 @@ export interface NativeSessionSummary {
    * the conversation's history.
    */
   live: boolean | "unknown";
+  /** True only when a matching host row confirms relayConnected === true; failed registry reads fail the sessions listing. */
+  hasCollabHost: boolean;
   /** True when a known conversation already owns it. */
   tracked: boolean;
 }

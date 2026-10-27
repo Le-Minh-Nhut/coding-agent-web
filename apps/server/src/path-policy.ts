@@ -226,11 +226,11 @@ export class WorkspacePathPolicy {
     const paged = page?.limit !== undefined || cursor !== undefined;
     const limit = paged ? Math.min(Math.max(page?.limit ?? DEFAULT_DIRECTORY_PAGE_SIZE, 1), MAX_DIRECTORY_PAGE_SIZE) : Number.POSITIVE_INFINITY;
     const rawNames = await readdir(canonical);
-    const compareRawNames = (left: string, right: string) =>
-      left.normalize("NFC").localeCompare(right.normalize("NFC")) || left.localeCompare(right);
-    rawNames.sort(compareRawNames);
+    const compareNames = (left: string, right: string) =>
+      left.normalize("NFC").localeCompare(right.normalize("NFC")) || (left < right ? -1 : left > right ? 1 : 0);
+    rawNames.sort(compareNames);
     // Cursor keys follow the existing NFC-name order; raw names only break equivalent-name ties deterministically. Additions before the cursor are omitted, while removals cannot shift unrelated rows across it; pages are not snapshots.
-    const remaining = cursor ? rawNames.filter((name) => compareRawNames(name, cursor.rawName) > 0) : rawNames;
+    const remaining = cursor ? rawNames.filter((name) => compareNames(name, cursor.rawName) > 0) : rawNames;
     const candidateNames = Number.isFinite(limit) ? remaining.slice(0, limit + 1) : remaining;
     const names = candidateNames.slice(0, limit);
     const entries = await Promise.all(names.map((name) => this.classifyChild(canonical, name)));

@@ -6,15 +6,16 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createAuthenticationService } from "../../apps/server/src/auth.js";
 import { createRuntimeSpec, launchWithOverlay } from "../../apps/server/src/server.js";
 import { buildApp } from "../../apps/server/src/app.js";
-import type { Conversation } from "@caw/contracts";
+import type { Conversation, NativeSessionSummary } from "@caw/contracts";
 import type { RuntimeLaunchSpec, Supervisor } from "@caw/runtime";
-import type { NativeSessionHistory } from "@caw/omp-adapter";
+import type { CollabHost, NativeSessionHistory } from "@caw/omp-adapter";
+import type { ServerConfig } from "../../apps/server/src/config.js";
 import type { WorkspacePathPolicy } from "../../apps/server/src/path-policy.js";
 import { createMetadataStore } from "../../apps/server/src/store.js";
 
 const dirs: string[] = [];
 afterEach(async () => { await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true }))); });
-async function fixture(options: { paths?: WorkspacePathPolicy; tmuxSocketPath?: string; tmuxServerIdentity?: () => Promise<string | null>; supervisor?: Supervisor; runtimeSpec?: (conversation: Conversation, input: { resumeSessionId?: string; model?: string }) => Promise<RuntimeLaunchSpec> | RuntimeLaunchSpec; modelCatalog?: { listModels(): Promise<string[]>; listModelsDetailed(): Promise<{ models: string[]; source: "omp" | "unavailable"; reason: string | null }> }; readNativeHistory?: (sessionId: string, expectedCwd: string) => Promise<NativeSessionHistory> } = {}) {
+async function fixture(options: { paths?: WorkspacePathPolicy; tmuxSocketPath?: string; tmuxServerIdentity?: () => Promise<string | null>; supervisor?: Supervisor; runtimeSpec?: (conversation: Conversation, input: { resumeSessionId?: string; model?: string }) => Promise<RuntimeLaunchSpec> | RuntimeLaunchSpec; modelCatalog?: { listModels(): Promise<string[]>; listModelsDetailed(): Promise<{ models: string[]; source: "omp" | "unavailable"; reason: string | null }> }; listNativeSessions?: (conversation: { projectPath: string }) => Promise<Array<Omit<NativeSessionSummary, "hasCollabHost">>>; listCollabHosts?: () => Promise<CollabHost[]>; findLiveHost?: (sessionId: string) => Promise<CollabHost | null>; readNativeHistory?: (sessionId: string, expectedCwd: string, options?: { before?: string }) => Promise<NativeSessionHistory> } = {}) {
   const dir = await mkdtemp(join(tmpdir(), "caw-app-")); dirs.push(dir);
   const auth = createAuthenticationService({ stateDir: dir, setupOutput: () => undefined }); await auth.initAuth();
   const config: ServerConfig = { host: "127.0.0.1", port: 8791, stateDir: dir, allowedRoots: [dir], relayPort: 8792, relayAllowedOrigins: [], maxActiveAgents: 3, authTokenTtlHours: 720, trustTailscaleOrigin: false, logLevel: "silent", insecureCookies: false };
@@ -49,6 +50,7 @@ describe("Fastify API security", () => {
       { method: "GET", url: "/api/browse" }, { method: "POST", url: "/api/directories" }, { method: "PATCH", url: "/api/projects/id" },
       { method: "GET", url: "/api/projects/id/conversations" }, { method: "POST", url: "/api/projects/id/conversations" },
       { method: "GET", url: "/api/conversations/id/history" }, { method: "GET", url: "/api/conversations/id/events" }, { method: "PATCH", url: "/api/conversations/id/model" },
+      { method: "POST", url: "/api/projects/id/sessions/session/attach-live" },
       { method: "POST", url: "/api/conversations/id/actions" }, { method: "GET", url: "/api/models" }, { method: "GET", url: "/api/runtime" },
     ];
     for (const request of requests) expect((await app.inject(request)).statusCode, `${request.method} ${request.url}`).toBe(401);
@@ -271,7 +273,7 @@ describe("Fastify API security", () => {
       method: "POST", url: `/api/projects/${project.id}/conversations`, headers,
       payload: { title: "Resumed session", resumeSessionId: "native-session-id" },
     });
-    expect(response.statusCode).toBe(201);
+    expect(response.statusCode, JSON.stringify(response.json())).toBe(201);
     expect(response.json().data.id).not.toBe(existing.id);
     expect(response.json().data.nativeSessionId).toBe("native-session-id");
     expect(launchedSpec?.resumeSessionPath).toBe(join(dir, "existing.jsonl"));
@@ -456,7 +458,7 @@ describe("Fastify API security", () => {
       headers,
       payload: { resumeSessionId: "unknown-session" },
     });
-    expect(unknown.statusCode).toBe(404);
+    expect(unknown.statusCode, JSON.stringify(unknown.json())).toBe(404);
     expect(unknown.json().error.code).toBe("not_found");
     await app.close();
   });
@@ -507,14 +509,18 @@ describe("Fastify API security", () => {
 
 describe("native session history route", () => {
   it("returns bounded history by conversation session and canonical project cwd", async () => {
-    let requested: { sessionId: string; expectedCwd: string } | null = null;
+    let requested: { sessionId: string; expectedCwd: string; before?: string } | null = null;
     const history: NativeSessionHistory = {
       header: { sessionId: "native-123", cwd: "", timestamp: "2026-10-26T00:00:00.000Z", version: 3, title: null },
       entries: [{ type: "message", role: "user", content: "stored" }],
       truncated: true,
+      truncatedByBytes: false,
+      truncatedByEntries: true,
+      hasOlder: true,
+      nextCursor: "cursor",
     };
     const { app, headers, dir, store } = await fixture({
-      readNativeHistory: async (sessionId, expectedCwd) => { requested = { sessionId, expectedCwd }; history.header.cwd = expectedCwd; return history; },
+      readNativeHistory: async (sessionId, expectedCwd, options) => { requested = { sessionId, expectedCwd, ...(options?.before ? { before: options.before } : {}) }; history.header.cwd = expectedCwd; return history; },
     });
     const projectPath = join(dir, "project");
     await mkdir(projectPath);
@@ -523,7 +529,53 @@ describe("native session history route", () => {
     const response = await app.inject({ method: "GET", url: `/api/conversations/${conversation.id}/history?path=/etc/passwd`, headers });
     expect(response.statusCode).toBe(200);
     expect(requested).toEqual({ sessionId: "native-123", expectedCwd: projectPath });
-    expect(response.json().data).toMatchObject({ header: { sessionId: "native-123" }, entries: [{ content: "stored" }], truncated: true });
+    expect(response.json().data).toMatchObject({ header: { sessionId: "native-123" }, entries: [{ content: "stored" }], truncated: true, hasOlder: true, nextCursor: "cursor" });
+    await app.close();
+  });
+
+  it("forwards opaque before cursors and preserves older-page metadata", async () => {
+    let requested: { sessionId: string; before?: string } | null = null;
+    const { app, headers, dir, store } = await fixture({
+      readNativeHistory: async (sessionId, expectedCwd, options) => {
+        requested = { sessionId, before: options?.before };
+        return {
+          header: { sessionId, cwd: expectedCwd, timestamp: null, version: 3, title: null },
+          entries: [{ id: "older", type: "message" }],
+          truncated: true, truncatedByBytes: true, truncatedByEntries: false,
+          hasOlder: true, nextCursor: "next-opaque-cursor",
+        };
+      },
+    });
+    const project = await store.createProject({ path: dir });
+    const conversation = await store.createConversation({ projectId: project.id, nativeSessionId: "native-page" });
+    const response = await app.inject({ method: "GET", url: `/api/conversations/${conversation.id}/history?before=opaque-cursor`, headers });
+    expect(response.statusCode).toBe(200);
+    expect(requested).toEqual({ sessionId: "native-page", before: "opaque-cursor" });
+    expect(response.json().data).toMatchObject({ entries: [{ id: "older" }], truncatedByBytes: true, truncatedByEntries: false, hasOlder: true, nextCursor: "next-opaque-cursor" });
+    await app.close();
+  });
+
+  it("maps a forged history cursor to path_forbidden", async () => {
+    const { app, headers, dir, store } = await fixture({
+      readNativeHistory: async () => { throw Object.assign(new Error("Invalid history cursor"), { code: "path_forbidden" }); },
+    });
+    const project = await store.createProject({ path: dir });
+    const conversation = await store.createConversation({ projectId: project.id, nativeSessionId: "native-page" });
+    const response = await app.inject({ method: "GET", url: `/api/conversations/${conversation.id}/history?before=forged`, headers });
+    expect(response.statusCode).toBe(403);
+    expect(response.json().error.code).toBe("path_forbidden");
+    await app.close();
+  });
+
+  it("preserves live-lease refusal for saved history", async () => {
+    const { app, headers, dir, store } = await fixture({
+      readNativeHistory: async () => { throw Object.assign(new Error("Native session is live"), { code: "conflict_owner" }); },
+    });
+    const project = await store.createProject({ path: dir });
+    const conversation = await store.createConversation({ projectId: project.id, nativeSessionId: "live-history" });
+    const response = await app.inject({ method: "GET", url: `/api/conversations/${conversation.id}/history`, headers });
+    expect(response.statusCode).toBe(409);
+    expect(response.json().error.code).toBe("conflict_owner");
     await app.close();
   });
 
@@ -531,7 +583,7 @@ describe("native session history route", () => {
     const { app, headers, dir, store } = await fixture({
       readNativeHistory: async (sessionId, expectedCwd) => {
         if (sessionId === "missing-native") throw Object.assign(new Error("missing"), { code: "not_found" });
-        return { header: { sessionId, cwd: join(dir, "other"), timestamp: null, version: 3, title: null }, entries: [], truncated: false };
+        return { header: { sessionId, cwd: join(dir, "other"), timestamp: null, version: 3, title: null }, entries: [], truncated: false, truncatedByBytes: false, truncatedByEntries: false, hasOlder: false, nextCursor: null };
       },
     });
     const projectPath = join(dir, "project");
@@ -547,6 +599,140 @@ describe("native session history route", () => {
     const foreignResponse = await app.inject({ method: "GET", url: `/api/conversations/${foreign.id}/history`, headers });
     expect(foreignResponse.statusCode).toBe(403);
     expect(foreignResponse.json().error.code).toBe("path_forbidden");
+    await app.close();
+  });
+});
+
+describe("native session host availability", () => {
+  const session = { sessionId: "native-listed", path: "/workspace/session.jsonl", cwd: "/workspace", title: null, updatedAt: null, live: true as const, tracked: false };
+  const host = { instanceId: "host-listed", generation: 1, pid: 12, sessionId: "native-listed", sessionName: null, cwd: "/workspace", model: null, startedAt: null, participants: 0, relayConnected: true, inputRequired: null, busy: null, access: "view" as const };
+
+  it("reports only matching connected host rows and false when absent", async () => {
+    let registryReads = 0;
+    const { app, headers, dir, store } = await fixture({
+      listNativeSessions: async () => [session, { ...session, sessionId: "no-host" }],
+      listCollabHosts: async () => { registryReads++; return [host]; },
+    });
+    const project = await store.createProject({ path: dir });
+    const response = await app.inject({ method: "GET", url: `/api/projects/${project.id}/sessions`, headers });
+    expect(response.statusCode).toBe(200);
+    expect(response.json().data.map((row: NativeSessionSummary) => [row.sessionId, row.hasCollabHost])).toEqual([["native-listed", true], ["no-host", false]]);
+    expect(registryReads).toBe(1);
+    await app.close();
+  });
+
+  it("does not turn an unreadable registry into a false negative", async () => {
+    const { app, headers, dir, store } = await fixture({
+      listNativeSessions: async () => [session],
+      listCollabHosts: async () => { throw Object.assign(new Error("registry read failed"), { code: "EIO" }); },
+    });
+    const project = await store.createProject({ path: dir });
+    const response = await app.inject({ method: "GET", url: `/api/projects/${project.id}/sessions`, headers });
+    expect(response.statusCode).toBe(500);
+    expect(response.json().error.code).toBe("internal");
+    expect(response.json().data).toBeUndefined();
+    await app.close();
+  });
+});
+
+describe("live native session attachment", () => {
+  const host = {
+    instanceId: "host-live",
+    generation: 3,
+    pid: 42,
+    sessionId: "native-live",
+    sessionName: null,
+    cwd: "",
+    model: null,
+    startedAt: null,
+    participants: 0,
+    relayConnected: true,
+    inputRequired: false,
+    busy: false,
+    access: "view" as const,
+  };
+
+  it("registers an external observer without constructing a launch spec", async () => {
+    let specs = 0;
+    let starts = 0;
+    const supervisor = { start: async () => { starts++; throw new Error("writer must not start"); } } as unknown as Supervisor;
+    const { app, headers, dir, store } = await fixture({
+      supervisor,
+      runtimeSpec: () => { specs++; throw new Error("launch spec must not be built"); },
+      listNativeSessions: async ({ projectPath }) => [{ sessionId: "native-live", path: join(projectPath, "session.jsonl"), cwd: projectPath, title: "Live title", updatedAt: null, live: true, tracked: false }],
+      findLiveHost: async () => ({ ...host, cwd: dir }),
+    });
+    const project = await store.createProject({ path: dir });
+    const url = `/api/projects/${project.id}/sessions/native-live/attach-live`;
+    const first = await app.inject({ method: "POST", url, headers });
+    const second = await app.inject({ method: "POST", url, headers });
+    expect(first.statusCode).toBe(200);
+    expect(first.json().data).toMatchObject({ ownership: "external", nativeSessionId: "native-live", title: "Live title", tmuxSessionId: null, tmuxServerIdentity: null });
+    expect(second.json().data.id).toBe(first.json().data.id);
+    expect((await store.listConversations(project.id))).toHaveLength(1);
+    expect(starts).toBe(0);
+    expect(specs).toBe(0);
+    await app.close();
+  });
+
+  it("refuses missing host, foreign cwd and unknown sessions without registration", async () => {
+    const { app, headers, dir, store } = await fixture({
+      listNativeSessions: async ({ projectPath }) => [
+        { sessionId: "no-host", path: join(projectPath, "a.jsonl"), cwd: projectPath, title: null, updatedAt: null, live: true, tracked: false },
+        { sessionId: "foreign", path: join(projectPath, "b.jsonl"), cwd: join(dir, "other"), title: null, updatedAt: null, live: true, tracked: false },
+      ],
+      findLiveHost: async (id) => id === "no-host" ? null : { ...host, sessionId: id, cwd: dir },
+    });
+    const project = await store.createProject({ path: dir });
+    await mkdir(join(dir, "other"));
+    const missingHost = await app.inject({ method: "POST", url: `/api/projects/${project.id}/sessions/no-host/attach-live`, headers });
+    expect(missingHost.statusCode).toBe(409);
+    expect(missingHost.json().error.code).toBe("link_unavailable");
+    const foreign = await app.inject({ method: "POST", url: `/api/projects/${project.id}/sessions/foreign/attach-live`, headers });
+    expect(foreign.statusCode).toBe(403);
+    expect(foreign.json().error.code).toBe("path_forbidden");
+    const unknown = await app.inject({ method: "POST", url: `/api/projects/${project.id}/sessions/unknown/attach-live`, headers });
+    expect(unknown.statusCode).toBe(404);
+    expect(unknown.json().error.code).toBe("not_found");
+    expect(await store.listConversations(project.id)).toEqual([]);
+    await app.close();
+  });
+
+  it("refuses disconnected hosts and unknown writer leases", async () => {
+    const { app, headers, dir, store } = await fixture({
+      listNativeSessions: async ({ projectPath }) => [
+        { sessionId: "lease-no-host", path: join(projectPath, "a.jsonl"), cwd: projectPath, title: null, updatedAt: null, live: true, tracked: false },
+        { sessionId: "lease-unknown", path: join(projectPath, "b.jsonl"), cwd: projectPath, title: null, updatedAt: null, live: "unknown", tracked: false },
+      ],
+      findLiveHost: async (id) => id === "lease-no-host" ? { ...host, sessionId: id, relayConnected: false, cwd: dir } : null,
+    });
+    const project = await store.createProject({ path: dir });
+    for (const id of ["lease-no-host", "lease-unknown"]) {
+      const response = await app.inject({ method: "POST", url: `/api/projects/${project.id}/sessions/${id}/attach-live`, headers });
+      expect(response.statusCode).toBe(409);
+      expect(response.json().error.code).toBe(id === "lease-unknown" ? "conflict_owner" : "link_unavailable");
+    }
+    expect(await store.listConversations(project.id)).toEqual([]);
+    await app.close();
+  });
+});
+
+describe("external restart refusal", () => {
+  it("refuses before constructing a launch spec or starting a writer", async () => {
+    let specs = 0;
+    let starts = 0;
+    const supervisor = { start: async () => { starts++; throw new Error("writer must not start"); }, stop: async () => { throw new Error("no managed writer"); } } as unknown as Supervisor;
+    const { app, headers, dir, store } = await fixture({
+      supervisor,
+      runtimeSpec: () => { specs++; throw new Error("launch spec must not be built"); },
+    });
+    const project = await store.createProject({ path: dir });
+    const conversation = await store.registerExternalConversation({ projectId: project.id, nativeSessionId: "native-live", title: "Live", hostInstanceId: "host-live", hostGeneration: 3 });
+    const response = await app.inject({ method: "POST", url: `/api/conversations/${conversation.id}/actions`, headers, payload: { action: "restart" } });
+    expect(response.statusCode).toBe(409);
+    expect(response.json().error.code).toBe("conflict_owner");
+    expect(starts).toBe(0);
+    expect(specs).toBe(0);
     await app.close();
   });
 });

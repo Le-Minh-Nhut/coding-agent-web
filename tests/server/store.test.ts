@@ -32,4 +32,14 @@ describe("JSONL MetadataStore fallback", () => {
     expect((await recovered.listEvents(conversation.id))[0]?.seq).toBe(1);
     expect(await recovered.getConversation(conversation.id)).toEqual(conversation);
   });
+
+  it("registers one external conversation per project and native session", async () => {
+    const { store } = await create();
+    const project = await store.createProject({ path: "/tmp/live" });
+    const input = { projectId: project.id, nativeSessionId: "native-live", title: "Live", hostInstanceId: "host-1", hostGeneration: 2 };
+    const [first, second] = await Promise.all([store.registerExternalConversation(input), store.registerExternalConversation(input)]);
+    expect(second).toEqual(first);
+    expect(first).toMatchObject({ ownership: "external", state: "unknown", nativeSessionId: input.nativeSessionId, tmuxSessionId: null, tmuxServerIdentity: null, hostInstanceId: "host-1", hostGeneration: 2 });
+    expect(await store.listConversations(project.id)).toEqual([first]);
+  });
 });

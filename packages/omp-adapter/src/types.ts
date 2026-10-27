@@ -61,19 +61,23 @@ export interface NativeSessionHistory {
   header: NativeSessionHeader;
   entries: Array<Record<string, unknown>>;
   truncated: boolean;
+  truncatedByBytes: boolean;
+  truncatedByEntries: boolean;
+  hasOlder: boolean;
+  nextCursor: string | null;
 }
 
 export interface NativeSessionCatalog {
   /** Journalled sessions for a working directory, newest first. */
-  listForCwd(cwd: string): Promise<NativeSessionSummary[]>;
+  listForCwd(cwd: string): Promise<Array<Omit<NativeSessionSummary, "hasCollabHost">>>;
   /** Journalled sessions across the whole store, newest first. */
-  listAll(limit?: number): Promise<NativeSessionSummary[]>;
+  listAll(limit?: number): Promise<Array<Omit<NativeSessionSummary, "hasCollabHost">>>;
   /** Read one journal's header, or null when it is unreadable or not a session. */
   readHeader(sessionPath: string): Promise<NativeSessionHeader | null>;
   /** Candidate journal paths for a session id (used only inside the adapter). */
   findBySessionId(sessionId: string): Promise<string | null>;
-  /** Read a bounded tail only after matching journal cwd to canonical project path. */
-  readHistory(sessionId: string, expectedCwd: string, limit?: number): Promise<NativeSessionHistory>;
+  /** Read one bounded journal page; before is an opaque cursor issued for this session and project. */
+  readHistory(sessionId: string, expectedCwd: string, options?: number | { before?: string }): Promise<NativeSessionHistory>;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
