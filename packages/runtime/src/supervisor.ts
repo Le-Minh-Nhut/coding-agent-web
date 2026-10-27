@@ -714,9 +714,6 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
       if (currentServerIdentity === "unknown") continue;
 
       if (currentServerIdentity === null) {
-        // `null` proves only that the socket path is unreachable. Only ESRCH for
-        // this conversation's pane PID proves our process exited. PID reuse can
-        // leave a valid stop stuck at `stopping`, but never reports a live agent stopped.
         if (processAlive(conversation.tmuxPanePid) !== false) continue;
         await options.store.recordEvent(conversationId, "agent.stopped", { tmuxSessionId: conversation.tmuxSessionId });
         return (
@@ -725,10 +722,11 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
       }
       if (currentServerIdentity !== conversation.tmuxServerIdentity) continue;
       const probe = await options.adapters.getTmux(conversation.tmuxSessionId);
-      if (!probe.ok) continue; // a failed lookup cannot confirm exit
+      if (!probe.ok) continue;
       if (probe.session && probe.session.serverIdentity !== conversation.tmuxServerIdentity) continue;
       const identityAfterProbe = await options.adapters.tmuxServerIdentity().catch(() => "unknown" as const);
       if (identityAfterProbe !== conversation.tmuxServerIdentity) continue;
+      if (!probe.session && processAlive(conversation.tmuxPanePid) !== false) continue;
       if (!probe.session || !probe.session.alive) {
         await options.store.recordEvent(conversationId, "agent.stopped", { tmuxSessionId: conversation.tmuxSessionId });
         return (

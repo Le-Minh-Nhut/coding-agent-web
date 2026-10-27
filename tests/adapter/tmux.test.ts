@@ -4,6 +4,9 @@ import { homedir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import type { Conversation } from "@caw/contracts";
+import { createSupervisor } from "@caw/runtime";
+import type { ConversationRuntimeStore, RuntimeAdapters } from "@caw/runtime";
 import { DefaultTmuxService } from "../../packages/omp-adapter/src/tmux.js";
 
 const execFileAsync = promisify(execFile);
@@ -118,6 +121,71 @@ describe("tmux", () => {
         name: "caw-restart-orphan",
       }));
       await secondService.kill(session.id, { expectedIdentity: session.serverIdentity });
+    } finally {
+      await execFileAsync("tmux", ["-S", socketPath, "kill-server"]).catch(() => {});
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+  it("settles stop after a recorded tmux session already disappeared", async (ctx) => {
+    if (!tmuxAvailable) {
+      ctx.skip();
+      return;
+    }
+    const directory = path.join(homedir(), ".cache", `caw-tmux-stop-missing-${Date.now()}`);
+    const socketPath = path.join(directory, "tmux.sock");
+    await mkdir(directory, { recursive: true });
+    const privateService = new DefaultTmuxService({ socketPath, ompBinary: "sleep" });
+    try {
+      const session = await privateService.launch({ name: "stop-missing", cwd: directory, args: ["30"] });
+      const sentinel = await privateService.launch({ name: "stop-sentinel", cwd: directory, args: ["30"] });
+      expect(session.panePid).not.toBeNull();
+      await execFileAsync("tmux", ["-S", socketPath, "kill-session", "-t", session.id]);
+
+      const row: Conversation = {
+        id: "c1", projectId: "p1", nativeSessionId: null, nativeSessionPath: null,
+        title: "stopped session", model: null, ownership: "managed", state: "running",
+        tmuxSessionId: session.id, tmuxSessionName: session.name,
+        tmuxServerIdentity: session.serverIdentity, tmuxPanePid: session.panePid,
+        hostInstanceId: null, hostGeneration: null, createdAt: "", updatedAt: "",
+        lastActivityAt: null, statusDetail: null,
+      };
+      const rows = new Map([[row.id, row]]);
+      const store: ConversationRuntimeStore = {
+        getConversation: async (id) => rows.get(id) ?? null,
+        listAllConversations: async () => [...rows.values()],
+        updateConversation: async (id, patch) => {
+          const current = rows.get(id);
+          if (!current) return null;
+          const next = { ...current, ...patch };
+          rows.set(id, next);
+          return next;
+        },
+        recordEvent: async () => null,
+      };
+      const adapters: RuntimeAdapters = {
+        listHosts: async () => [],
+        listManagedTmux: async () => (await privateService.listManaged()).map((item) => ({
+          id: item.id, name: item.name, alive: item.alive, panePid: item.panePid, serverIdentity: item.serverIdentity,
+        })),
+        getTmux: async (id) => {
+          const item = await privateService.getById(id);
+          return { ok: true as const, session: item ? { id: item.id, name: item.name, alive: item.alive, panePid: item.panePid, serverIdentity: item.serverIdentity } : null };
+        },
+        isProcessDescendant: async () => false,
+        tmuxServerIdentity: () => privateService.serverIdentity(),
+        launch: async () => { throw new Error("not used"); },
+        killTmux: (id, expectedIdentity) => privateService.kill(id, { expectedIdentity }),
+        isSessionLive: async () => false,
+        newestSessionFor: async () => null,
+        sessionPathExists: async () => false,
+        findBySessionId: async () => null,
+      };
+      const supervisor = createSupervisor({ store, adapters, maxActive: 1, stopTimeoutMs: 5_000 });
+
+      const stopped = await supervisor.stop("c1");
+      expect(stopped.state).toBe("stopped");
+      expect(await privateService.getById(session.id)).toBeNull();
+      expect((await privateService.getById(sentinel.id))?.alive).toBe(true);
     } finally {
       await execFileAsync("tmux", ["-S", socketPath, "kill-server"]).catch(() => {});
       await rm(directory, { recursive: true, force: true });

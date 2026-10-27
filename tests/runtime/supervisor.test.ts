@@ -1013,7 +1013,7 @@ describe("supervisor.start", () => {
 describe("supervisor.stop", () => {
   it("kills by recorded tmux id and settles to stopped", async () => {
     const world = makeWorld();
-    world.seed({ id: "c1", state: "running", tmuxSessionId: "$4", tmuxSessionName: "caw-c1", tmuxPanePid: process.pid, tmuxServerIdentity: "private-socket:1" });
+    world.seed({ id: "c1", state: "running", tmuxSessionId: "$4", tmuxSessionName: "caw-c1", tmuxPanePid: 2_000_000_000, tmuxServerIdentity: "private-socket:1" });
     world.tmuxSessions.push({ id: "$4", name: "caw-c1", alive: true, panePid: 321, serverIdentity: "private-socket:1" });
     const supervisor = createSupervisor({ store: world.store, adapters: world.adapters, clock: instantClock, maxActive: 3 });
 
@@ -1290,7 +1290,7 @@ describe("supervisor.stop", () => {
 
   it("treats confirmed absence on the same server identity as stopped", async () => {
     const world = makeWorld();
-    world.seed({ id: "c1", state: "running", tmuxSessionId: "$0", tmuxSessionName: "caw-ours", tmuxPanePid: null, tmuxServerIdentity: "private-socket:1" });
+    world.seed({ id: "c1", state: "running", tmuxSessionId: "$0", tmuxSessionName: "caw-ours", tmuxPanePid: 2_000_000_000, tmuxServerIdentity: "private-socket:1" });
     world.adapters.killTmux = async () => {};
     world.adapters.getTmux = async () => ({ ok: true, session: null });
     let t = 0;

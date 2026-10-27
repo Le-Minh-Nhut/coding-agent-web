@@ -8,6 +8,7 @@ const execFileAsync = promisify(execFile);
 
 /** Tmux diagnostics for an absent server or unreachable socket; permission failures stay errors. */
 const NO_SERVER_PATTERNS = [/no server running/i, /error connecting to .*?(?:no such file or directory|enoent)/i];
+const MISSING_SESSION_PATTERNS = [/can't find session/i, /no such session/i];
 const PERMISSION_PATTERNS = [/permission denied/i, /\beacces\b/i, /\beperm\b/i];
 
 /** The child's own output. A spawn failure (missing binary) produces none. */
@@ -316,7 +317,7 @@ export class DefaultTmuxService implements TmuxService {
           `kill-session -t '${sessionId}'`,
         ]);
       } catch (err) {
-        blocked(`kill_failed: ${execErrorText(err)}`);
+        if (!MISSING_SESSION_PATTERNS.some((pattern) => pattern.test(execErrorOutput(err)))) blocked(`kill_failed: ${execErrorText(err)}`);
       }
 
       let afterIdentity: string | null = null;
