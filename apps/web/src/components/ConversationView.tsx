@@ -130,8 +130,8 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
   const modelControlsRef = useRef<HTMLDetailsElement | null>(null);
   const modelInputRef = useRef<HTMLInputElement | null>(null);
   const socketRef = useRef<CollabSocket | null>(null);
-  const pendingUiResponsesRef = useRef(new Set<number>());
-  const sendingPromptTextsRef = useRef(new Set<string>());
+  const pendingUiResponsesRef = useRef(new Map<number, object>());
+  const sendingPromptTextsRef = useRef(new Map<string, object>());
   const pendingPromptRef = useRef<PendingPrompt[]>([]);
   const localIdRef = useRef(0);
   const sendGuardRef = useRef<{ id: number; text: string } | null>(null);
@@ -425,6 +425,7 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
       truncated: current.truncated || result.data.truncated,
       truncatedByBytes: current.truncatedByBytes || result.data.truncatedByBytes,
       truncatedByEntries: current.truncatedByEntries || result.data.truncatedByEntries,
+      skippedOversized: current.skippedOversized || result.data.skippedOversized,
       hasOlder: result.data.hasOlder,
       nextCursor: result.data.nextCursor,
     });
@@ -565,14 +566,14 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
       draftVersion,
     };
     pendingPromptRef.current.push(pendingPrompt);
-    sendingPromptTextsRef.current.add(trimmed);
     const sendToken = { id: sendId, text: trimmed };
+    sendingPromptTextsRef.current.set(trimmed, sendToken);
     sendGuardRef.current = sendToken;
     setSendError(null);
     const startedRunning = status === "running";
     void socket.send({ t: "prompt", text: submitted }).then((sent) => {
+      if (sendingPromptTextsRef.current.get(trimmed) === sendToken) sendingPromptTextsRef.current.delete(trimmed);
       if (!viewActiveRef.current || operationGenerationRef.current !== operationGeneration || connectionGenerationRef.current !== connectionGeneration || conversationIdRef.current !== conversationAtSend) return;
-      sendingPromptTextsRef.current.delete(trimmed);
       if (sendGuardRef.current === sendToken) sendGuardRef.current = null;
       if (sent) {
         const optimisticId = `user-${++localIdRef.current}`;
@@ -629,14 +630,15 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     if (transcriptRef.current.readOnly || targetReqId === undefined || !socketRef.current || pendingUiResponsesRef.current.has(targetReqId)) return;
     const requests = transcriptRef.current.uiRequests;
     if (requests.current?.reqId !== targetReqId && !requests.queue.some((request) => request.reqId === targetReqId)) return;
-    pendingUiResponsesRef.current.add(targetReqId);
+    const responseToken = {};
+    pendingUiResponsesRef.current.set(targetReqId, responseToken);
     const socket = socketRef.current;
     const operationGeneration = operationGenerationRef.current;
     const connectionGeneration = connectionGenerationRef.current;
     const conversationAtResponse = conversationIdRef.current;
     void socket.send({ t: "ui-response", reqId: targetReqId, value }).then((sent) => {
+      if (pendingUiResponsesRef.current.get(targetReqId) === responseToken) pendingUiResponsesRef.current.delete(targetReqId);
       if (!viewActiveRef.current || operationGenerationRef.current !== operationGeneration || connectionGenerationRef.current !== connectionGeneration || conversationIdRef.current !== conversationAtResponse) return;
-      pendingUiResponsesRef.current.delete(targetReqId);
       if (sent) updateTranscript({ t: "ui-request-end", reqId: targetReqId });
       else setSendError("Not connected — approval response not sent. Request remains open; retry when connected.");
     });
@@ -875,11 +877,12 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
         {isShowingSavedHistory && savedHistory ? (
           <>
             <div className="banner idle" role="status">Saved transcript — this session is not running. {savedHistory.header.title ?? savedHistory.header.sessionId}</div>
-            {savedHistory.truncated && <div className="banner unknown" role="status">Saved transcript truncated; some history is omitted.</div>}
+            {savedHistory.skippedOversized && <div className="banner unknown" role="alert">History is incomplete: a record too large to display was skipped; journal intact on disk.</div>}
+            {savedHistory.truncated && (savedHistory.hasOlder || savedHistory.skippedOversized) && <div className="banner unknown" role="status">Saved transcript truncated; some history is omitted.</div>}
             {savedHistory.hasOlder && savedHistory.nextCursor !== null && <button type="button" className="ghost" disabled={olderHistoryLoading} onClick={() => void loadOlderHistory()}>{olderHistoryLoading ? "Loading older…" : "Load older"}</button>}
             {olderHistoryLoading && <p role="status">Loading older history…</p>}
             {olderHistoryError && <p role="alert">{olderHistoryError}</p>}
-            {(!savedHistory.hasOlder || savedHistory.nextCursor === null) && <p role="status">Beginning of history.</p>}
+            {!savedHistory.hasOlder && !savedHistory.skippedOversized && <p role="status">Beginning of history.</p>}
             {savedHistory.messages.map((message) => (
               <MessageRow key={message.id} message={{ id: message.id, role: message.role, text: message.text, ...(message.toolName ? { toolName: message.toolName } : {}), ...(message.isError ? { isError: true } : {}) }} />
             ))}

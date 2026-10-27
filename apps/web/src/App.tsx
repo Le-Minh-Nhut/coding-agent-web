@@ -31,7 +31,10 @@ export function App() {
           if (refreshed.ok) {
             setSetupRequired(true);
             setIsAuthenticated(false);
-          } else setSetupUnavailable(true);
+          } else {
+            setSetupUnavailable(true);
+            setIsAuthenticated(false);
+          }
         } else setIsAuthenticated(false);
         return;
       }

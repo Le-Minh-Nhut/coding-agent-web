@@ -43,10 +43,7 @@ export function SubagentPanel({
     let unchangedPolls = 0;
     let previousCursor = transcriptsRef.current[selectedAgentId]?.newSize ?? 0;
     const poll = () => {
-      if (errorsRef.current[selectedAgentId] || transcriptsRef.current[selectedAgentId]?.error) {
-        clearInterval(timer);
-        return;
-      }
+      if (errorsRef.current[selectedAgentId] || transcriptsRef.current[selectedAgentId]?.error) return;
       if (loadingRef.current.includes(selectedAgentId)) return;
       const cursor = transcriptsRef.current[selectedAgentId]?.newSize ?? 0;
       unchangedPolls = cursor === previousCursor ? unchangedPolls + 1 : 0;

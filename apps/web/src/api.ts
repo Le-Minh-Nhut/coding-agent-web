@@ -28,6 +28,7 @@ export interface SavedConversationHistory {
   truncated: boolean;
   truncatedByBytes: boolean;
   truncatedByEntries: boolean;
+  skippedOversized: boolean;
   hasOlder: boolean;
   nextCursor: string | null;
 }
