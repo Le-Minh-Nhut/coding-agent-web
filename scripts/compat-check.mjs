@@ -161,7 +161,7 @@ if (tmuxVersion.ok) {
   const fmt = await capture("tmux", ["list-sessions", "-F", "#{session_id}\t#{session_name}\t#{session_created}"]);
   check(
     "tmux session_id format available",
-    fmt.ok || /no server running/i.test(fmt.stderr) ? "ok" : "fail",
+    fmt.ok || /no server running|error connecting to .* \(No such file or directory\)/i.test(fmt.stderr) ? "ok" : "fail",
     fmt.ok ? `${fmt.stdout.split("\n").length} session(s)` : fmt.stderr.split("\n")[0],
   );
 }
