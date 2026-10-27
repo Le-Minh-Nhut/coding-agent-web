@@ -95,7 +95,8 @@ describe("Connection status banners", () => {
       const { container } = render(<ConversationView conversationId="c-1" onBack={() => {}} />);
       viewContainer = container;
     });
-    expect(viewContainer?.textContent).toContain("Effective model reported now: claude-3-5");
+    expect(viewContainer?.textContent).toContain("Effective model reported now: not reported");
+    expect(viewContainer?.textContent).not.toContain("Effective model reported now: claude-3-5");
     expect(viewContainer?.textContent).toContain("Model changes apply on the next launch of this conversation, not immediately.");
   });
   it("renders the registry-recorded model for stopped conversations", async () => {
@@ -115,7 +116,8 @@ describe("Connection status banners", () => {
       const { container } = render(<ConversationView conversationId="c-1" onBack={() => {}} />);
       viewContainer = container;
     });
-    expect(viewContainer?.textContent).toContain("Effective model reported now: recorded-model");
+    expect(viewContainer?.textContent).toContain("Effective model reported now: not reported");
+    expect(viewContainer?.textContent).not.toContain("Effective model reported now: recorded-model");
     expect(viewContainer?.textContent).toContain("Model changes apply on the next launch of this conversation, not immediately.");
   });
   it("renders a saved transcript, truncated note, and live-session conflict", async () => {
@@ -123,7 +125,7 @@ describe("Connection status banners", () => {
     const history = {
       header: { sessionId: "session-1", cwd: "/work", timestamp: null, version: null, title: "Saved session" },
       entries: [{ type: "message", id: "saved-1", parentId: null, timestamp: "2026-01-01T00:00:00Z", message: { role: "user", content: "Saved prompt", timestamp: 1 } }],
-      truncated: false,
+      truncated: false, truncatedByBytes: false, truncatedByEntries: false, hasOlder: false, nextCursor: null,
     };
     vi.mocked(api.getConversationHistory).mockResolvedValue({ ok: true, data: history });
     let viewContainer: HTMLElement | null = null;

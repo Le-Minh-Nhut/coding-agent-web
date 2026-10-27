@@ -427,6 +427,13 @@ function applyTranscript(state: TranscriptState, frame: Extract<HostFrame, { t: 
   }
   if (request.fromByte !== previous.newSize) return { ...state, transcriptRequests };
   const reset = frame.newSize < previous.newSize;
+  if (reset && frame.text === "" && request.fromByte >= frame.newSize) {
+    return {
+      ...state,
+      transcriptRequests,
+      transcripts: { ...state.transcripts, [request.agentId]: { text: "", newSize: 0, carry: "" } },
+    };
+  }
   const base = reset ? { text: "", carry: "" } : previous;
   const combined = `${base.carry ?? ""}${frame.text}`;
   const lastNewline = combined.lastIndexOf("\n");

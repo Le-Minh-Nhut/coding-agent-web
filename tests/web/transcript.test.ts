@@ -155,6 +155,34 @@ describe("Collab transcript reducer", () => {
     expect(result.transcriptRequests).toEqual({});
   });
 
+  it("re-reads replacement transcript prefix after host reports empty EOF past shrink", () => {
+    let state = createTranscriptState();
+    state = trackTranscriptRequest(state, 1, "agent-a", 0);
+    state = apply(state, { t: "transcript", reqId: 1, text: "oldtext\n", newSize: 8 });
+    expect(state.transcripts["agent-a"]).toMatchObject({ text: "oldtext\n", newSize: 8, carry: "" });
+
+    state = trackTranscriptRequest(state, 2, "agent-a", 8);
+    state = apply(state, { t: "transcript", reqId: 2, text: "", newSize: 8 });
+    expect(state.transcripts["agent-a"]).toMatchObject({ text: "oldtext\n", newSize: 8 });
+
+    state = trackTranscriptRequest(state, 3, "agent-a", 8);
+    state = apply(state, { t: "transcript", reqId: 3, text: "", newSize: 4 });
+    expect(state.transcripts["agent-a"]).toMatchObject({ text: "", newSize: 0, carry: "" });
+
+    state = trackTranscriptRequest(state, 4, "agent-a", 0);
+    state = apply(state, { t: "transcript", reqId: 4, text: "new\n", newSize: 4 });
+    expect(state.transcripts["agent-a"]).toMatchObject({ text: "new\n", newSize: 4, carry: "" });
+  });
+
+  it("carries only partial trailing lines across appended chunks", () => {
+    let state = trackTranscriptRequest(createTranscriptState(), 1, "agent-a", 0);
+    state = apply(state, { t: "transcript", reqId: 1, text: "first\npart", newSize: 10 });
+    expect(state.transcripts["agent-a"]).toMatchObject({ text: "first\n", carry: "part", newSize: 10 });
+    state = trackTranscriptRequest(state, 2, "agent-a", 10);
+    state = apply(state, { t: "transcript", reqId: 2, text: "ial\n", newSize: 14 });
+    expect(state.transcripts["agent-a"]).toMatchObject({ text: "first\npartial\n", carry: "", newSize: 14 });
+  });
+
   it("cleans expired and panel-closed transcript request correlations", () => {
     let state = trackTranscriptRequest(createTranscriptState(), 10, "agent-a");
     state = trackTranscriptRequest(state, 11, "agent-b");
@@ -162,6 +190,18 @@ describe("Collab transcript reducer", () => {
     expect(state.transcriptRequests).toEqual({ 11: { agentId: "agent-b", fromByte: 0 } });
     expect(forgetTranscriptRequest(state, 99)).toBe(state);
     expect(clearTranscriptRequests(state).transcriptRequests).toEqual({});
+  });
+
+  it("ignores transcript replies after panel close and refetches after reopen", () => {
+    let state = trackTranscriptRequest(createTranscriptState(), 20, "agent-a", 0);
+    state = clearTranscriptRequests(state);
+    const closed = apply(state, { t: "transcript", reqId: 20, text: "late\n", newSize: 5 });
+    expect(closed.transcripts["agent-a"]).toBeUndefined();
+    expect(closed.transcriptRequests).toEqual({});
+
+    state = trackTranscriptRequest(closed, 21, "agent-a", 0);
+    state = apply(state, { t: "transcript", reqId: 21, text: "current\n", newSize: 8 });
+    expect(state.transcripts["agent-a"]).toMatchObject({ text: "current\n", newSize: 8, carry: "" });
   });
 
   it("preserves real approval choices and settles without inventing a timeout", () => {

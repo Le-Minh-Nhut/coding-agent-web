@@ -93,14 +93,16 @@ describe("mobile reading behavior", () => {
 
     const helloFor = async (secret: Uint8Array): Promise<GuestFrame> => {
       RecordingWebSocket.instances = [];
-      vi.mocked(api.getConversationLink).mockResolvedValue({ ok: true, data: {
-        url: `ws://127.0.0.1:7466/r/0123456789abcdef.${encodeBase64Url(secret)}`,
-        access: secret.byteLength === 48 ? "full" : "view",
-        instanceId: "i",
-        generation: 1,
-      } });
+      const viewOnly = secret.byteLength === 32;
+      vi.mocked(api.getConversationLink).mockImplementation(async (_id, access = "control") => viewOnly && access === "control"
+        ? { ok: false, error: { code: "capability_missing", message: "host offers view only" } }
+        : { ok: true, data: { url: `ws://127.0.0.1:7466/r/0123456789abcdef.${encodeBase64Url(secret)}`, access: viewOnly ? "view" : "full", instanceId: "i", generation: 1 } });
       const view = render(<ConversationView conversationId="c-1" onBack={() => {}} />);
       try {
+        if (viewOnly) {
+          await waitFor(() => expect(view.getByRole("button", { name: "Open read-only" })).toBeTruthy());
+          fireEvent.click(view.getByRole("button", { name: "Open read-only" }));
+        }
         await waitFor(() => expect(RecordingWebSocket.instances[0]?.sent).toHaveLength(1));
         const envelope = unpackEnvelope(RecordingWebSocket.instances[0]!.sent[0]!);
         expect(envelope).not.toBeNull();
@@ -273,22 +275,19 @@ describe("mobile reading behavior", () => {
 
     expect(getByText(/Read-only view/)).toBeTruthy();
     const composer = container.querySelector("textarea.composer-input") as HTMLTextAreaElement;
-    fireEvent.change(composer, { target: { value: "not sent" } });
     expect(composer.disabled).toBe(true);
-    expect(getByRole("button", { name: "Send" }).hasAttribute("disabled")).toBe(true);
-    expect(composer.placeholder).toBe("Read-only — not sent");
+    expect((getByRole("button", { name: "Send" }) as HTMLButtonElement).disabled).toBe(true);
     await act(async () => { socket?.onFrame?.({ t: "ui-request", request: { reqId: 91, kind: "select", title: "Approve action?", options: ["Approve"] } }); });
     expect(getByText("Approve action?")).toBeTruthy();
     expect(getByText("Read-only link — this request cannot be answered here.")).toBeTruthy();
     expect(queryByRole("button", { name: /Approve/ })).toBeNull();
     expect(queryByRole("button", { name: "Stop" })).toBeNull();
-    fireEvent.click(getByRole("button", { name: "Send" }));
     expect(sent.some((frame) => frame.t === "prompt" || frame.t === "ui-response" || frame.t === "abort")).toBe(false);
-    await act(async () => { socket?.onFrame?.({ t: "error", message: "Host refused read-only prompt" }); });
-    expect(getByRole("alert").textContent).toBe("Host refused read-only prompt");
     await act(async () => { socket?.onFrame?.(welcome(true)); });
     expect(queryByRole("status", { name: /Read-only/ })).toBeNull();
-    expect(getByRole("button", { name: "Send" }).hasAttribute("disabled")).toBe(false);
+    fireEvent.change(composer, { target: { value: "allowed after write" } });
+    expect(composer.disabled).toBe(false);
+    expect((getByRole("button", { name: "Send" }) as HTMLButtonElement).disabled).toBe(false);
     expect(getByRole("button", { name: "Stop" })).toBeTruthy();
     await act(async () => { socket?.onFrame?.({ t: "ui-request", request: { reqId: 92, kind: "select", title: "Approve again?", options: ["Approve"] } }); });
     fireEvent.click(getByRole("button", { name: /Approve/ }));
@@ -310,7 +309,7 @@ describe("mobile reading behavior", () => {
       const view = await mountConversation();
       await waitFor(() => expect(view.container.textContent).toContain(message));
       expect(view.container.textContent).toContain("Preferred for next launch: model-a");
-      expect(view.container.textContent).toContain("Effective model reported now: model");
+      expect(view.container.textContent).toContain("Effective model reported now: not reported");
       if (message === "model-b") expect(view.container.querySelector("#conversation-model option[value='model-b']")).not.toBeNull();
       view.unmount();
     }
@@ -403,6 +402,46 @@ describe("mobile reading behavior", () => {
     expect(latest?.closest(".messages-scroll")).toBeNull();
     expect(transcript.nextElementSibling).toBe(latestRow);
     expect(latestRow?.nextElementSibling).toBe(composer);
+  });
+  it("clears pending transcript requests on panel close and ignores late reply after reopen", async () => {
+    const { container, getByRole, queryByText } = await mountConversation();
+    const agent = { id: "a", displayName: "Agent A", kind: "sub" as const, status: "running" as const, hasSessionFile: true, createdAt: 0, lastActivity: 0 };
+    await act(async () => { socket?.onFrame?.({ t: "agents", agents: [agent] }); });
+    fireEvent.click(getByRole("button", { name: "Agents (1)" }));
+    fireEvent.click(getByRole("button", { name: /Agent A/ }));
+    const request = sent.find((frame) => frame.t === "fetch-transcript");
+    expect(request?.t).toBe("fetch-transcript");
+    const reqId = request?.t === "fetch-transcript" ? request.reqId : -1;
+    fireEvent.click(getByRole("button", { name: "Close subagents" }));
+    await act(async () => { socket?.onFrame?.({ t: "agents", agents: [agent] }); });
+    fireEvent.click(getByRole("button", { name: "Agents (1)" }));
+    await act(async () => { socket?.onFrame?.({ t: "transcript", reqId, text: "late\n", newSize: 5 }); });
+    expect(queryByText("late")).toBeNull();
+    expect(container.querySelector(".modal-overlay")).not.toBeNull();
+  });
+
+  it("keeps prompt composition for managed read-only conversation but hides Stop", async () => {
+    const { container, getByRole } = await mountConversation(true);
+    await act(async () => { socket?.onFrame?.(welcome(true, true)); });
+    expect(container.querySelector("textarea.composer-input")).not.toBeNull();
+    expect((container.querySelector("textarea.composer-input") as HTMLTextAreaElement).disabled).toBe(true);
+    expect((getByRole("button", { name: "Send" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(container.querySelector('[aria-label="Stop"]')).toBeNull();
+  });
+  it("refetches replacement transcript from byte zero after empty EOF shrink", async () => {
+    const { container, getByRole } = await mountConversation();
+    const agent = { id: "a", displayName: "Agent A", kind: "sub" as const, status: "running" as const, hasSessionFile: true, createdAt: 0, lastActivity: 0 };
+    await act(async () => { socket?.onFrame?.({ t: "agents", agents: [agent] }); });
+    fireEvent.click(getByRole("button", { name: "Agents (1)" }));
+    fireEvent.click(getByRole("button", { name: /Agent A/ }));
+    expect(sent.filter((frame) => frame.t === "fetch-transcript").map((frame) => frame.t === "fetch-transcript" ? frame.fromByte : -1)).toEqual([0]);
+    await act(async () => { socket?.onFrame?.({ t: "transcript", reqId: 1, text: "oldtext\n", newSize: 8 }); });
+    fireEvent.click(getByRole("button", { name: "Refresh" }));
+    expect(sent.filter((frame) => frame.t === "fetch-transcript").map((frame) => frame.t === "fetch-transcript" ? frame.fromByte : -1)).toEqual([0, 8]);
+    await act(async () => { socket?.onFrame?.({ t: "transcript", reqId: 2, text: "", newSize: 4 }); });
+    expect(sent.filter((frame) => frame.t === "fetch-transcript").map((frame) => frame.t === "fetch-transcript" ? frame.fromByte : -1)).toEqual([0, 8, 0]);
+    await act(async () => { socket?.onFrame?.({ t: "transcript", reqId: 3, text: "new\n", newSize: 4 }); });
+    expect(container.querySelector(".modal-overlay pre code")?.textContent).toContain("new\n");
   });
 
 

@@ -103,15 +103,22 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
   const [modelCatalogState, setModelCatalogState] = useState<{ status: "loading" } | { status: "loaded"; models: string[] } | { status: "empty" } | { status: "unavailable"; reason: string } | { status: "error"; message: string }>({ status: "loading" });
   const [modelDraft, setModelDraft] = useState("");
   const [modelMessage, setModelMessage] = useState("");
+  const [effectiveModel, setEffectiveModel] = useState<{ conversationId: string; model: string | null } | null>(null);
+  const [viewAccessOffer, setViewAccessOffer] = useState<string | null>(null);
+  const [linkFailure, setLinkFailure] = useState<string | null>(null);
+  const [linkAccess, setLinkAccess] = useState<"view" | "full" | null>(null);
   const [modelBusy, setModelBusy] = useState(false);
   const [showSubagents, setShowSubagents] = useState(false);
   const [showActivity, setShowActivity] = useState(false);
   const [transcriptErrors, setTranscriptErrors] = useState<Record<string, string>>({});
   const [savedHistory, setSavedHistory] = useState<(SavedConversationHistory & { messages: TranscriptMessage[] }) | null>(null);
-  const [historyError, setHistoryError] = useState<string | null>(null);
   const [historyLive, setHistoryLive] = useState(false);
   const [historyLoading, setHistoryLoading] = useState(false);
+  const [olderHistoryLoading, setOlderHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState<string | null>(null);
+  const [olderHistoryError, setOlderHistoryError] = useState<string | null>(null);
   const [uiEditorValue, setUiEditorValue] = useState("");
+
   const inputValueRef = useRef(draft);
   const messagesScrollRef = useRef<HTMLDivElement | null>(null);
   const messagesContentRef = useRef<HTMLDivElement | null>(null);
@@ -130,12 +137,17 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
   const sendGuardRef = useRef<{ id: number; text: string } | null>(null);
   const sendVersionRef = useRef(0);
   const sendIdRef = useRef(0);
+  const operationGenerationRef = useRef(0);
+  const viewActiveRef = useRef(true);
   const connectionGenerationRef = useRef(0);
   const conversationIdRef = useRef(conversationId);
   conversationIdRef.current = conversationId;
   const watchedTranscriptAgentRef = useRef<string | null>(null);
   const reqIdCounterRef = useRef(1);
   const transcriptRequestsRef = useRef(new Map<number, { agentId: string; fromByte: number; timer: ReturnType<typeof setTimeout> }>());
+  const olderHistoryLoadingRef = useRef(false);
+  const historyScrollAnchorRef = useRef<{ top: number; height: number } | null>(null);
+  const fetchTranscriptRef = useRef<(agentId: string, fromByte: number) => void>(() => {});
   const rawUrlRef = useRef<string | null>(null);
 
   const streamingText = transcript.streamingMessage?.content
@@ -148,6 +160,16 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     : [];
   const agents = transcript.agents;
   const transcripts = transcript.transcripts;
+  const canManageConversation = conversation?.id === conversationId && conversation.ownership === "managed";
+  const canWriteToHost = linkAccess === "full";
+  useLayoutEffect(() => {
+    viewActiveRef.current = true;
+    operationGenerationRef.current++;
+    return () => {
+      viewActiveRef.current = false;
+      operationGenerationRef.current++;
+    };
+  }, [conversationId]);
   const loadingAgentIds = useMemo(() => [...new Set(Object.values(transcript.transcriptRequests).map((request) => request.agentId))], [transcript.transcriptRequests]);
   const activeUiRequest = transcript.uiRequests.current;
   const uiRequestQueue = transcript.uiRequests.queue;
@@ -196,7 +218,11 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     transcriptRef.current = next;
     setTranscript(next);
     setStatus(next.connectionStatus === "live" ? next.turnStatus : next.connectionStatus);
-    if (frame.t === "welcome") sendGuardRef.current = null;
+    if (frame.t === "welcome") {
+      sendGuardRef.current = null;
+      setEffectiveModel({ conversationId, model: frame.state.model?.id ?? null });
+    }
+    if (frame.t === "state" && frame.state.model) setEffectiveModel({ conversationId, model: frame.state.model.id });
     if ((frame.t === "welcome" || frame.t === "state") && next.error === null) setSendError(null);
   };
 
@@ -241,6 +267,9 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
             else delete next[request.agentId];
             return next;
           });
+          if (!frame.error && frame.text === "" && frame.newSize < request.fromByte) {
+            fetchTranscriptRef.current(request.agentId, 0);
+          }
         }
       }
     }
@@ -258,6 +287,13 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     const element = messagesScrollRef.current;
     if (element && followTailRef.current) element.scrollTop = Math.max(0, element.scrollHeight - element.clientHeight);
   }, [messages, streamingText]);
+  useLayoutEffect(() => {
+    const anchor = historyScrollAnchorRef.current;
+    const element = messagesScrollRef.current;
+    if (!anchor || !element) return;
+    element.scrollTop = anchor.top + element.scrollHeight - anchor.height;
+    historyScrollAnchorRef.current = null;
+  }, [savedHistory]);
 
   useEffect(() => {
     const element = messagesScrollRef.current;
@@ -279,6 +315,8 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     if (renderTimerRef.current !== null) clearTimeout(renderTimerRef.current);
     for (const request of transcriptRequestsRef.current.values()) clearTimeout(request.timer);
     transcriptRequestsRef.current.clear();
+    socketRef.current?.close();
+    socketRef.current = null;
   }, []);
 
   useLayoutEffect(() => autosizeComposer(composerRef.current), [inputText]);
@@ -300,10 +338,17 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     transcriptRef.current = createTranscriptState();
     setTranscript(transcriptRef.current);
     setConversation(null);
+    setEffectiveModel(null);
     setLinkUnavailable(false);
+    setViewAccessOffer(null);
+    setLinkFailure(null);
     setSavedHistory(null);
     setHistoryLive(false);
     setHistoryLoading(false);
+    setOlderHistoryLoading(false);
+    olderHistoryLoadingRef.current = false;
+    setHistoryError(null);
+    setOlderHistoryError(null);
 
     sendVersionRef.current++;
     pendingPromptRef.current = [];
@@ -328,6 +373,7 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
       if (!active) return;
       setHistoryLoading(false);
       if (result.ok) {
+        setHistoryError(null);
         setSavedHistory({ ...result.data, messages: transcriptMessagesFromEntries(result.data.entries as unknown as SessionEntry[]) });
       } else if (result.error.code === "conflict_owner") {
         setHistoryLive(true);
@@ -335,13 +381,54 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
         setHistoryError(result.error.message || "Could not load saved transcript.");
       }
     }).catch((error: unknown) => {
-      if (active) {
-        setHistoryLoading(false);
-        setHistoryError(error instanceof Error ? error.message : "Could not load saved transcript.");
-      }
+      if (!active) return;
+      setHistoryLoading(false);
+      setHistoryError(error instanceof Error ? error.message : "Could not load saved transcript.");
     });
     return () => { active = false; };
   }, [conversationId, linkUnavailable]);
+  const loadOlderHistory = async () => {
+    const current = savedHistory;
+    if (!current?.hasOlder || !current.nextCursor || olderHistoryLoadingRef.current) return;
+    olderHistoryLoadingRef.current = true;
+    setOlderHistoryLoading(true);
+    setOlderHistoryError(null);
+    const conversationAtRequest = conversationIdRef.current;
+    const scroll = messagesScrollRef.current;
+    if (scroll) historyScrollAnchorRef.current = { top: scroll.scrollTop, height: scroll.scrollHeight };
+    const result = await api.getConversationHistory(conversationAtRequest, current.nextCursor);
+    if (conversationIdRef.current !== conversationAtRequest) return;
+    olderHistoryLoadingRef.current = false;
+    setOlderHistoryLoading(false);
+    if (!result.ok) {
+      historyScrollAnchorRef.current = null;
+      setOlderHistoryError(result.error.message || "Could not load older history.");
+      return;
+    }
+    const seenMessages = new Set<string>();
+    const messages = [...transcriptMessagesFromEntries(result.data.entries as unknown as SessionEntry[]), ...current.messages].filter((message) => {
+      if (seenMessages.has(message.id)) return false;
+      seenMessages.add(message.id);
+      return true;
+    });
+    const seenEntries = new Set<string>();
+    const entries = [...result.data.entries, ...current.entries].filter((entry) => {
+      const id = typeof entry.id === "string" ? entry.id : JSON.stringify(entry);
+      if (seenEntries.has(id)) return false;
+      seenEntries.add(id);
+      return true;
+    });
+    setSavedHistory({
+      ...current,
+      entries,
+      messages,
+      truncated: current.truncated || result.data.truncated,
+      truncatedByBytes: current.truncatedByBytes || result.data.truncatedByBytes,
+      truncatedByEntries: current.truncatedByEntries || result.data.truncatedByEntries,
+      hasOlder: result.data.hasOlder,
+      nextCursor: result.data.nextCursor,
+    });
+  };
   useEffect(() => {
     let active = true;
     void Promise.resolve().then(() => api.getModels()).then((result) => {
@@ -356,12 +443,15 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     return () => { active = false; };
   }, []);
 
-  const connectToCollab = useCallback(async (retryStale = true) => {
+  const connectToCollab = useCallback(async (retryStale = true, access: "control" | "view" = "control") => {
+    if (!viewActiveRef.current) return;
     const generation = ++connectionGenerationRef.current;
-    const isCurrent = () => connectionGenerationRef.current === generation && conversationIdRef.current === conversationId;
+    const isCurrent = () => viewActiveRef.current && connectionGenerationRef.current === generation && conversationIdRef.current === conversationId;
+    setEffectiveModel(null);
+    setLinkAccess(null);
     socketRef.current?.close();
     socketRef.current = null;
-    const linkRes = await api.getConversationLink(conversationId);
+    const linkRes = await api.getConversationLink(conversationId, access);
     if (!isCurrent()) return;
     if (!linkRes.ok) {
       if (linkRes.error.code === "link_unavailable") {
@@ -371,13 +461,30 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
         setTranscript(transcriptRef.current);
         return;
       }
-      if (linkRes.error.code === "stale_generation" && retryStale) {
-        void connectToCollab(false);
+      if (linkRes.error.code === "capability_missing" && access === "control") {
+        setLinkUnavailable(false);
+        setViewAccessOffer(linkRes.error.message);
+        setLinkFailure(null);
+        setStatus("unknown");
         return;
       }
+      if (linkRes.error.code === "capability_missing") setLinkFailure(`Host access refused: ${linkRes.error.message}`);
+      if (linkRes.error.code === "stale_generation" && retryStale) {
+        void connectToCollab(false, access);
+        return;
+      }
+      setViewAccessOffer(null);
       setStatus("disconnected");
       return;
     }
+    setViewAccessOffer(null);
+    setLinkFailure(null);
+    if (linkRes.data.access !== (access === "control" ? "full" : "view")) {
+      setLinkFailure(`Host access refused: requested ${access}, host returned ${linkRes.data.access}.`);
+      setStatus("disconnected");
+      return;
+    }
+    setLinkAccess(linkRes.data.access);
 
     setLinkUnavailable(false);
     setSavedHistory(null);
@@ -443,6 +550,8 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     const sendId = ++sendIdRef.current;
     const draftVersion = sendVersionRef.current;
     const conversationAtSend = conversationIdRef.current;
+    const operationGeneration = operationGenerationRef.current;
+    const connectionGeneration = connectionGenerationRef.current;
     const hostEchoCount = transcript.messages.filter((message) => message.role === "user" && message.text === trimmed).length;
     const echoAllowance = hostEchoCount + optimisticMessages.filter((message) => message.text === trimmed && hostEchoCount <= (message.hostEchoCount ?? 0)).length;
     const submitted = allowSlashCommand ? text : trimmed;
@@ -462,6 +571,7 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     setSendError(null);
     const startedRunning = status === "running";
     void socket.send({ t: "prompt", text: submitted }).then((sent) => {
+      if (!viewActiveRef.current || operationGenerationRef.current !== operationGeneration || connectionGenerationRef.current !== connectionGeneration || conversationIdRef.current !== conversationAtSend) return;
       sendingPromptTextsRef.current.delete(trimmed);
       if (sendGuardRef.current === sendToken) sendGuardRef.current = null;
       if (sent) {
@@ -521,7 +631,11 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     if (requests.current?.reqId !== targetReqId && !requests.queue.some((request) => request.reqId === targetReqId)) return;
     pendingUiResponsesRef.current.add(targetReqId);
     const socket = socketRef.current;
+    const operationGeneration = operationGenerationRef.current;
+    const connectionGeneration = connectionGenerationRef.current;
+    const conversationAtResponse = conversationIdRef.current;
     void socket.send({ t: "ui-response", reqId: targetReqId, value }).then((sent) => {
+      if (!viewActiveRef.current || operationGenerationRef.current !== operationGeneration || connectionGenerationRef.current !== connectionGeneration || conversationIdRef.current !== conversationAtResponse) return;
       pendingUiResponsesRef.current.delete(targetReqId);
       if (sent) updateTranscript({ t: "ui-request-end", reqId: targetReqId });
       else setSendError("Not connected — approval response not sent. Request remains open; retry when connected.");
@@ -534,9 +648,12 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
   };
 
   const handleSaveModel = async () => {
+    const operationGeneration = operationGenerationRef.current;
+    const conversationAtSave = conversationIdRef.current;
     setModelBusy(true);
     setModelMessage("");
     const result = await api.setConversationModel(conversationId, modelDraft);
+    if (!viewActiveRef.current || operationGenerationRef.current !== operationGeneration || conversationIdRef.current !== conversationAtSave) return;
     setModelBusy(false);
     setModelMessage(result.ok ? "Model saved for next launch." : result.error.message);
     if (result.ok) setConversation(result.data);
@@ -544,9 +661,12 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
 
   const handleRestart = async () => {
     if (!window.confirm("Save this model preference and restart the agent now? The running session may be interrupted.")) return;
+    const operationGeneration = operationGenerationRef.current;
+    const conversationAtRestart = conversationIdRef.current;
     setModelBusy(true);
     setModelMessage("");
     const saved = await api.setConversationModel(conversationId, modelDraft);
+    if (!viewActiveRef.current || operationGenerationRef.current !== operationGeneration || conversationIdRef.current !== conversationAtRestart) return;
     if (!saved.ok) {
       setModelBusy(false);
       setModelMessage(saved.error.message);
@@ -554,6 +674,7 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     }
     setConversation(saved.data);
     const result = await api.restartConversation(conversationId);
+    if (!viewActiveRef.current || operationGenerationRef.current !== operationGeneration || conversationIdRef.current !== conversationAtRestart) return;
     setModelBusy(false);
     if (result.ok) {
       setConversation(result.data);
@@ -561,7 +682,7 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
       setModelMessage("Agent restarted.");
       socketRef.current?.close();
       socketRef.current = null;
-      await connectToCollab(true);
+      if (viewActiveRef.current && operationGenerationRef.current === operationGeneration && conversationIdRef.current === conversationAtRestart) await connectToCollab(true);
     } else setModelMessage(result.error.message);
   };
 
@@ -594,8 +715,18 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
       setTranscriptErrors((prev) => ({ ...prev, [agentId]: "Transcript request timed out. Cursor was kept; retry to continue." }));
     }, TRANSCRIPT_REQUEST_TIMEOUT_MS);
     transcriptRequestsRef.current.set(reqId, { agentId, fromByte: cursor, timer });
-    socketRef.current.send({ t: "fetch-transcript", reqId, agentId, fromByte: cursor });
+    void socketRef.current.send({ t: "fetch-transcript", reqId, agentId, fromByte: cursor }).then((sent) => {
+      if (sent) return;
+      const request = transcriptRequestsRef.current.get(reqId);
+      if (!request) return;
+      clearTimeout(request.timer);
+      transcriptRequestsRef.current.delete(reqId);
+      transcriptRef.current = forgetTranscriptRequest(transcriptRef.current, reqId);
+      setTranscript(transcriptRef.current);
+      setTranscriptErrors((previous) => ({ ...previous, [agentId]: "Transcript request was not accepted. Cursor was kept; retry to continue." }));
+    });
   };
+  fetchTranscriptRef.current = handleFetchTranscript;
 
   const handleWatchTranscript = useCallback((agentId: string | null) => {
     const previousAgentId = watchedTranscriptAgentRef.current;
@@ -658,7 +789,7 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
               <span className="header-action-label">Agents ({agents.length})</span>
             </button>
           )}
-          {status === "running" && !transcript.readOnly && (
+          {status === "running" && canManageConversation && canWriteToHost && !transcript.readOnly && (
             <button type="button" className="danger" aria-label="Stop" title="Stop" onClick={handleStop} style={{ padding: "4px 10px", fontSize: "0.85rem" }}>
               <span className="header-action-icon" aria-hidden="true">■</span>
               <span className="header-action-label">Stop</span>
@@ -680,19 +811,21 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
           {modelCatalogState.status === "empty" && <p role="status">No models reported by OMP. Saved preference is unchanged.</p>}
           {modelCatalogState.status === "unavailable" && <p role="status">Model catalog unavailable: {modelCatalogState.reason} Saved preference is unchanged.</p>}
           {modelCatalogState.status === "error" && <p role="alert">Could not load models: {modelCatalogState.message} Saved preference is unchanged.</p>}
-          <p>Preferred for next launch: <strong>{conversation?.modelPreference || "not set"}</strong></p>
-          <p>Effective model reported now: <strong>{conversation?.model ?? "not reported"}</strong></p>
-          <button type="button" onClick={handleSaveModel} disabled={modelBusy || !modelDraft.trim()}>
-            Save model
-          </button>
-          <button type="button" className="ghost" onClick={handleRestart} disabled={modelBusy || !modelDraft.trim()}>
-            Save &amp; restart agent
-          </button>
-          <span id="model-launch-note">Model changes apply on the next launch of this conversation, not immediately.</span>
+          <p>{conversation?.ownership === "external" ? "Saved preference for app-launched chats:" : "Preferred for next launch:"} <strong>{conversation?.modelPreference || "not set"}</strong></p>
+          <p>Effective model reported now: <strong>{effectiveModel?.conversationId === conversationId ? effectiveModel.model ?? "not reported" : "not reported"}</strong></p>
+          {canManageConversation && <button type="button" onClick={handleSaveModel} disabled={modelBusy || !modelDraft.trim()}>Save model</button>}
+          {canManageConversation && <button type="button" className="ghost" onClick={handleRestart} disabled={modelBusy || !modelDraft.trim()}>Save &amp; restart agent</button>}
+          <span id="model-launch-note">{conversation?.ownership === "external" ? "This model preference applies only to conversations launched by the app." : "Model changes apply on the next launch of this conversation, not immediately."}</span>
           {modelMessage && <span role="status">{modelMessage}</span>}
         </section>
       </details>
-      {transcript.readOnly && <div className="banner unknown" role="status">Read-only view — prompts, approvals and Stop are unavailable.</div>}
+      {(transcript.readOnly || linkAccess === "view") && <div className="banner unknown" role="status">Read-only view — prompts, approvals and Stop are unavailable.</div>}
+      {viewAccessOffer && status === "unknown" && (
+        <div className="banner unknown" role="status">
+          <span>Host offers read-only access: {viewAccessOffer}</span>
+          <button type="button" className="ghost" onClick={() => void connectToCollab(true, "view")}>Open read-only</button>
+        </div>
+      )}
 
       {/* Accessible Status Banners */}
       {status === "disconnected" && (
@@ -728,6 +861,7 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
           <span>Connecting to the agent…</span>
         </div>
       )}
+      {linkFailure && <div className="banner disconnected" role="alert">{linkFailure}</div>}
       {transcript.notice && (
         <div className={`banner ${transcript.notice.level}`} role={transcript.notice.level === "error" ? "alert" : "status"}>
           <span>{transcript.notice.message}</span>
@@ -742,6 +876,10 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
           <>
             <div className="banner idle" role="status">Saved transcript — this session is not running. {savedHistory.header.title ?? savedHistory.header.sessionId}</div>
             {savedHistory.truncated && <div className="banner unknown" role="status">Saved transcript truncated; some history is omitted.</div>}
+            {savedHistory.hasOlder && savedHistory.nextCursor !== null && <button type="button" className="ghost" disabled={olderHistoryLoading} onClick={() => void loadOlderHistory()}>{olderHistoryLoading ? "Loading older…" : "Load older"}</button>}
+            {olderHistoryLoading && <p role="status">Loading older history…</p>}
+            {olderHistoryError && <p role="alert">{olderHistoryError}</p>}
+            {(!savedHistory.hasOlder || savedHistory.nextCursor === null) && <p role="status">Beginning of history.</p>}
             {savedHistory.messages.map((message) => (
               <MessageRow key={message.id} message={{ id: message.id, role: message.role, text: message.text, ...(message.toolName ? { toolName: message.toolName } : {}), ...(message.isError ? { isError: true } : {}) }} />
             ))}
@@ -812,7 +950,7 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
             </div>
             <p style={{ marginBottom: "12px", fontSize: "0.95rem" }}>{activeUiRequest.title}</p>
 
-            {transcript.readOnly ? (
+            {(transcript.readOnly || linkAccess === "view") ? (
               <p role="note">Read-only link — this request cannot be answered here.</p>
             ) : activeUiRequest.kind === "select" ? (
               <>
@@ -850,7 +988,7 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
           <button type="button" className="latest-button" onClick={goToLatest}>↓ Latest</button>
         </div>
       )}
-      {commandSuggestions.length > 0 && !interceptedCommand && !linkUnavailable && (
+      {canWriteToHost && commandSuggestions.length > 0 && !interceptedCommand && !linkUnavailable && (
         <div className="composer-suggestions" aria-label="Slash command suggestions">
           {commandSuggestions.map((command) => (
             <button
@@ -865,7 +1003,7 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
           ))}
         </div>
       )}
-      {interceptedCommand && !linkUnavailable && (
+      {canWriteToHost && interceptedCommand && !linkUnavailable && (
         <div className="slash-command-intercept">
           <strong>{interceptedCommand.name}</strong>
           <p>{interceptedCommand.explanation}</p>
@@ -877,7 +1015,7 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
           <button type="button" className="ghost" onClick={() => setInterceptedCommand(null)}>Cancel</button>
         </div>
       )}
-      {!linkUnavailable && !isShowingSavedHistory && !historyLive && (
+      {canWriteToHost && !linkUnavailable && !isShowingSavedHistory && !historyLive && (
       <form onSubmit={handleSendPrompt} className="composer-container">
         <textarea
           className="composer-input"

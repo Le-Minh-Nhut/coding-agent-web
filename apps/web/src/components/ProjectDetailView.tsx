@@ -2,6 +2,10 @@ import { useState, useEffect } from "react";
 import { api } from "../api.js";
 import type { Conversation, NativeSessionSummary, ProjectWithStats } from "@caw/contracts";
 
+function hasLiveCollabHost(session: NativeSessionSummary): boolean {
+  return session.hasCollabHost;
+}
+
 interface ProjectDetailViewProps {
   projectId: string;
   onBack: () => void;
@@ -19,6 +23,7 @@ export function ProjectDetailView({
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
   const [resumingSessionId, setResumingSessionId] = useState<string | null>(null);
+  const [attachingSessionId, setAttachingSessionId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const loadData = async () => {
@@ -31,15 +36,12 @@ export function ProjectDetailView({
     setLoading(false);
 
     if (projRes.ok) {
-      const found = projRes.data.find((p) => p.id === projectId);
+      const found = projRes.data.find((item) => item.id === projectId);
       if (found) setProject(found);
     }
-    if (convRes.ok) {
-      setConversations(convRes.data);
-    }
-    if (sessRes.ok) {
-      setNativeSessions(sessRes.data);
-    }
+    if (convRes.ok) setConversations(convRes.data);
+    if (sessRes.ok) setNativeSessions(sessRes.data);
+    else setError(sessRes.error.message || "Could not verify native session hosts.");
   };
 
   useEffect(() => {
@@ -67,6 +69,16 @@ export function ProjectDetailView({
     else if (result.error.code === "conflict_owner") {
       setError("This session already has a writer or its lease cannot be verified. Attach in the terminal instead; no second agent was started.");
     } else setError(result.error.message);
+  };
+
+  const handleAttachLive = async (session: NativeSessionSummary) => {
+    if (attachingSessionId !== null || session.tracked || session.live !== true || !hasLiveCollabHost(session)) return;
+    setAttachingSessionId(session.sessionId);
+    setError(null);
+    const result = await api.attachLiveSession(projectId, session.sessionId);
+    setAttachingSessionId(null);
+    if (result.ok) onSelectConversation(result.data.id);
+    else setError(result.error.message);
   };
 
   return (
@@ -157,12 +169,14 @@ export function ProjectDetailView({
                 <p style={{ fontSize: "0.75rem", color: "var(--text-muted)", wordBreak: "break-all" }}>
                   {sess.path}
                 </p>
-                {!sess.tracked && sess.live !== false && (
-                  <p style={{ fontSize: "0.8rem", color: "var(--text-muted)" }}>
-                    {sess.live === true
-                      ? "This session already has a writer. Attach in the terminal instead."
-                      : "Writer lease could not be verified. Resume is disabled to prevent a second writer."}
-                  </p>
+                {!sess.tracked && sess.live === true && !hasLiveCollabHost(sess) && (
+                  <p style={{ fontSize: "0.8rem", color: "var(--text-muted)" }}>This session is live but has no verified Collab host. Attach in the terminal instead.</p>
+                )}
+                {!sess.tracked && sess.live === "unknown" && <p style={{ fontSize: "0.8rem", color: "var(--text-muted)" }}>Writer lease could not be verified. Resume is disabled to prevent a second writer.</p>}
+                {!sess.tracked && sess.live === true && hasLiveCollabHost(sess) && (
+                  <button type="button" className="primary" disabled={attachingSessionId !== null} onClick={() => handleAttachLive(sess)}>
+                    {attachingSessionId === sess.sessionId ? "Opening…" : "Open live session"}
+                  </button>
                 )}
                 {!sess.tracked && sess.live === false && (
                   <button

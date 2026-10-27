@@ -26,6 +26,10 @@ export interface SavedConversationHistory {
   header: { sessionId: string; cwd: string; timestamp: string | null; version: number | null; title: string | null };
   entries: Array<Record<string, unknown>>;
   truncated: boolean;
+  truncatedByBytes: boolean;
+  truncatedByEntries: boolean;
+  hasOlder: boolean;
+  nextCursor: string | null;
 }
 
 export interface CollabLinkResponse {
@@ -191,8 +195,9 @@ export const api = {
   async getConversation(id: string): Promise<ApiResult<Conversation>> {
     return request<Conversation>(`/api/conversations/${encodeURIComponent(id)}`);
   },
-  async getConversationHistory(id: string): Promise<ApiResult<SavedConversationHistory>> {
-    return request<SavedConversationHistory>(`/api/conversations/${encodeURIComponent(id)}/history`);
+  async getConversationHistory(id: string, before?: string): Promise<ApiResult<SavedConversationHistory>> {
+    const cursor = before ? `?${new URLSearchParams({ before }).toString()}` : "";
+    return request<SavedConversationHistory>(`/api/conversations/${encodeURIComponent(id)}/history${cursor}`);
   },
 
   async getConversationEvents(id: string, options?: { after?: number; limit?: number }): Promise<ApiResult<ConversationEventsResponse>> {
@@ -210,13 +215,16 @@ export const api = {
   async getModels(): Promise<ApiResult<ModelCatalog>> {
     return request<ModelCatalog>("/api/models");
   },
-  async getConversationLink(id: string): Promise<ApiResult<CollabLinkResponse>> {
-    return request<CollabLinkResponse>(`/api/conversations/${encodeURIComponent(id)}/link`, {
+  async getConversationLink(id: string, access: "control" | "view" = "control"): Promise<ApiResult<CollabLinkResponse>> {
+    return request<CollabLinkResponse>(`/api/conversations/${encodeURIComponent(id)}/link?access=${access}`, {
       method: "POST",
     });
   },
 
   async listNativeSessions(projectId: string): Promise<ApiResult<NativeSessionSummary[]>> {
     return request<NativeSessionSummary[]>(`/api/projects/${encodeURIComponent(projectId)}/sessions`);
+  },
+  async attachLiveSession(projectId: string, sessionId: string): Promise<ApiResult<Conversation>> {
+    return request<Conversation>(`/api/projects/${encodeURIComponent(projectId)}/sessions/${encodeURIComponent(sessionId)}/attach-live`, { method: "POST" });
   },
 };
