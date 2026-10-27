@@ -287,7 +287,11 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
     let host: RuntimeHost | null = null;
     let hostMatchReason: string | null = null;
     let recoveredHost = false;
-    if (hosts.ok && tmux?.alive) {
+    if (hosts.ok && conversation.nativeSessionId) {
+      host = hosts.rows.find((candidate) => candidate.sessionId === conversation.nativeSessionId) ?? null;
+      recoveredHost = Boolean(host);
+    }
+    if (hosts.ok && !host && tmux?.alive) {
       const panePid = conversation.tmuxPanePid !== null && conversation.tmuxPanePid === tmux.panePid ? conversation.tmuxPanePid : null;
       const match = await matchPublishedHost(hosts.rows, panePid, conversation.nativeSessionId);
       host = match.host;
