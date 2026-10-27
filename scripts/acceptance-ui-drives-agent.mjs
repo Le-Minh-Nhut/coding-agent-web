@@ -1746,27 +1746,65 @@ const checks = {
       skip("check15", "read-only access link", `view link has no browser fragment (${redactLink(link)})`);
       return;
     }
+    const guestConsole = [];
+    const guestPageErrors = [];
+    const guestServerErrors = [];
     const guest = await context.newPage();
+    guest.setDefaultTimeout(20_000);
+    guest.on("console", (message) => guestConsole.push(redactSecretOutput(`[console:${message.type()}] ${message.text().slice(0, 200)}`)));
+    guest.on("pageerror", (error) => guestPageErrors.push(redactSecretOutput(`[pageerror] ${error.message.slice(0, 200)}`)));
+    guest.on("response", async (response) => {
+      if (response.status() < 400) return;
+      const body = await response.text().catch(() => "");
+      guestServerErrors.push(`HTTP ${response.status()} ${redactLink(response.url())} ${redactSecretOutput(body).slice(0, 240)}`);
+    });
     try {
       const guestUrl = new URL("/guest", BASE);
       guestUrl.hash = fragment;
       await guest.goto(guestUrl.href, { waitUntil: "domcontentloaded" });
-      const composer = guest.locator("textarea").first();
-      await composer.waitFor({ state: "visible", timeout: 60_000 });
-      const disabled = await composer.isDisabled();
-      const placeholder = await composer.getAttribute("placeholder");
-      const chip = await guest.locator("text=read-only").count();
+      const composer = guest.locator("textarea.sh-composer-input").first();
+      const composerVisible = await composer.waitFor({ state: "visible", timeout: 60_000 }).then(() => true).catch(() => false);
+      const connectScreen = guest.locator(".sh-connect").first();
+      const connectVisible = await connectScreen.isVisible().catch(() => false);
+      const connectError = redactSecretOutput((await guest.locator(".sh-connect-error").first().innerText().catch(() => "")).trim());
+      const connectHTML = connectVisible ? redactSecretOutput(await connectScreen.evaluate((element) => element.outerHTML.slice(0, 900)).catch(() => "unavailable")) : "not-rendered";
+      const serverReason = redactSecretOutput(JSON.stringify(await guest.evaluate(() => window.__cawHostPromptErrors ?? []).catch(() => [])));
       const approvalControls = guest.locator(".sh-composer-ask button");
       const approvalCount = await approvalControls.count();
       const enabledApprovalCount = await approvalControls.evaluateAll((buttons) => buttons.filter((button) => !button.disabled).length);
-      const evidence = `link=${redactLink(link)} disabled=${disabled} placeholder=${JSON.stringify(placeholder)} readOnlyChip=${chip} approvalControls=${approvalCount} enabledApprovalControls=${enabledApprovalCount}`;
-      if (disabled && chip > 0 && enabledApprovalCount === 0) {
+      const readOnlyChip = guest.locator(".sh-chip").filter({ hasText: "read-only" });
+      if (!composerVisible) {
+        const body = redactSecretOutput((await guest.locator("body").innerText().catch(() => "")).slice(0, 300));
+        const connectInputs = await connectScreen.locator("input").count().catch(() => 0);
+        const connectButtons = await connectScreen.locator("button").count().catch(() => 0);
+        const connectScreenAssertion = connectVisible && connectInputs > 0 && connectButtons > 0;
+        const serverDiagnosticFound = Boolean(connectError || guestServerErrors.length || serverReason !== "[]");
+        const guestVisibleReason = connectError || (await guest.locator(".sh-ended-reason").first().innerText().catch(() => "")).trim() || serverReason;
+        const hostApprovalStillPending = await page.locator(".card", { hasText: "Approval Requested" }).first().isVisible().catch(() => false);
+        const evidence = `link=${redactLink(link)} guestConsole=${JSON.stringify(guestConsole.slice(-2).map((line) => line.slice(0, 140)))} guestPageErrors=${JSON.stringify(guestPageErrors.slice(-2).map((line) => line.slice(0, 140)))} hostApprovalPending=${hostApprovalStillPending} composer=absent connectScreen=${connectVisible ? ".sh-connect" : "absent"} connectScreenAssertion=${connectScreenAssertion} connectInputs=${connectInputs} connectButtons=${connectButtons} visibleGuestReason=${JSON.stringify(guestVisibleReason.slice(0, 180))} serverDiagnosticFound=${serverDiagnosticFound} serverResponses=${JSON.stringify(guestServerErrors.slice(-1).map((line) => line.slice(0, 140)))} connectHTML=${connectHTML.slice(0, 260)} body=${JSON.stringify(body.slice(0, 100))} approvalControls=${approvalCount} enabledApprovalControls=${enabledApprovalCount}`;
+        fail("check15", "view-only guest cannot prompt or answer approval", evidence);
+        return;
+      }
+      const joinedReadOnly = await readOnlyChip.first().waitFor({ state: "visible", timeout: 60_000 }).then(() => true).catch(() => false);
+      const disabled = await composer.isDisabled();
+      let interaction = "not-attempted-disabled";
+      if (!disabled) await composer.fill(`${MARKER}-15-guest-probe`).then(() => { interaction = "textarea accepted typing"; }).catch((error) => { interaction = error instanceof Error ? error.message : String(error); });
+      const sendButton = guest.locator('.sh-composer-actions button[title="send (Enter)"]');
+      const sendButtonCount = await sendButton.count();
+      const enabledSendCount = await sendButton.evaluateAll((buttons) => buttons.filter((button) => !button.disabled).length);
+      const placeholder = await composer.getAttribute("placeholder");
+      const hostApprovalStillPending = await page.locator(".card", { hasText: "Approval Requested" }).first().isVisible().catch(() => false);
+      const evidence = `link=${redactLink(link)} guestConsole=${JSON.stringify(guestConsole.slice(-2).map((line) => line.slice(0, 140)))} guestPageErrors=${JSON.stringify(guestPageErrors.slice(-2).map((line) => line.slice(0, 140)))} hostApprovalPending=${hostApprovalStillPending} composer=rendered disabled=${disabled} readOnlyChip=${joinedReadOnly ? 1 : 0} placeholder=${JSON.stringify(placeholder)} sendButtons=${sendButtonCount} enabledSendButtons=${enabledSendCount} interaction=${JSON.stringify(interaction)} approvalControls=${approvalCount} enabledApprovalControls=${enabledApprovalCount} serverReason=${serverReason.slice(0, 120)} serverResponses=${JSON.stringify(guestServerErrors.slice(-1).map((line) => line.slice(0, 140)) )}`;
+      if (disabled && joinedReadOnly && enabledSendCount === 0 && enabledApprovalCount === 0 && hostApprovalStillPending) {
         pass("check15", "view-only guest cannot prompt or answer approval", evidence);
       } else {
         fail("check15", "view-only guest cannot prompt or answer approval", evidence);
       }
     } catch (error) {
-      fail("check15", "view-only guest cannot prompt or answer approval", `guest page error: ${error instanceof Error ? error.message : String(error)}`);
+      const connectError = redactSecretOutput((await guest.locator(".sh-connect-error").first().innerText().catch(() => "")).trim());
+      const connectHTML = redactSecretOutput(await guest.locator(".sh-connect").evaluate((element) => element.outerHTML.slice(0, 900)).catch(() => "not-rendered"));
+      const serverReason = redactSecretOutput(JSON.stringify(await guest.evaluate(() => window.__cawHostPromptErrors ?? []).catch(() => [])));
+      fail("check15", "view-only guest cannot prompt or answer approval", `link=${redactLink(link)} hostApprovalPending=true guest page error=${redactSecretOutput(error instanceof Error ? error.message : String(error))} connectError=${JSON.stringify(connectError || "none")} connectHTML=${connectHTML} serverReason=${serverReason} serverResponses=${JSON.stringify(guestServerErrors)} guestConsole=${JSON.stringify(guestConsole.slice(-4))} guestPageErrors=${JSON.stringify(guestPageErrors.slice(-4))}`);
     } finally {
       await guest.close().catch(() => {});
     }
