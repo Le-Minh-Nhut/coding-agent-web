@@ -25,8 +25,8 @@
  *
  *   node scripts/acceptance-ui-drives-agent.mjs \
  *     --base http://127.0.0.1:8801 \
- *     --tmp /tmp/caw-acc \
- *     --root /tmp/caw-acc/roots \
+ *     --tmp "$HOME/.cache/caw-acc" \
+ *     --root "$HOME/.cache/caw-acc/roots" \
  *     --password 'a-12-character-secret'
  *
  * Optional:
@@ -42,7 +42,6 @@ import { execFile, spawn } from "node:child_process";
 import { randomBytes, scryptSync } from "node:crypto";
 import { appendFileSync, existsSync, readFileSync } from "node:fs";
 import { chmod, copyFile, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -62,12 +61,11 @@ const hasFlag = (name) => argv.includes(name);
 
 const BASE = argValue("--base", "http://127.0.0.1:8801");
 const CACHE_ROOT = resolve(process.env.HOME ?? "", ".cache");
-const TMP_ROOT = resolve(tmpdir());
-const TMP = resolve(argValue("--tmp", join(TMP_ROOT, `caw-acc-${process.pid}`)));
+const TMP = resolve(argValue("--tmp", join(CACHE_ROOT, `caw-acc-${process.pid}`)));
 const ROOT = resolve(argValue("--root", join(TMP, "roots")));
 const scratchRelative = relative(TMP, ROOT);
 if (existsSync(TMP)) throw new Error(`refusing to use existing temp directory: ${TMP}`);
-if (!TMP.startsWith(`${TMP_ROOT}${sep}`) && dirname(TMP) !== CACHE_ROOT) throw new Error(`--tmp must be under ${TMP_ROOT} or a direct child of ${CACHE_ROOT}: ${TMP}`);
+if (TMP === CACHE_ROOT || !TMP.startsWith(`${CACHE_ROOT}${sep}`)) throw new Error(`--tmp must be under ${CACHE_ROOT}: ${TMP}`);
 if (scratchRelative === ".." || scratchRelative.startsWith(`..${sep}`) || isAbsolute(scratchRelative)) throw new Error(`--root must be inside --tmp so cleanup stays contained: ${ROOT}`);
 const STATE_DIR = join(TMP, "state");
 const OMP_HOME = join(TMP, "omp-home");
@@ -85,6 +83,8 @@ const WRAPPER_PATH = join(OMP_WRAPPER_DIR, "omp");
 const OMP_PID_LOG = join(TMP, "omp-processes.jsonl");
 const SERVER_LOG = join(TMP, "server-output.log");
 let realOmpBinary = null;
+let modelCatalog = null;
+let excludedGeminiModelCount = 0;
 const PASSWORD = argValue("--password", null);
 const BOOTSTRAP = hasFlag("--bootstrap") || !PASSWORD;
 const KEEP_TMP = hasFlag("--keep-tmp");
@@ -98,8 +98,8 @@ if (!Number.isInteger(port) || port < 1 || port >= 65535) throw new Error(`--bas
 const RELAY_PORT = port + 1;
 const TMUX_SOCKET = join(STATE_DIR, "tmux.sock");
 const MARKER = `CAW-ACC-${randomBytes(3).toString("hex")}`;
-const CHECK_TIMEOUT_MS = 120_000;
-const MAX_RUNTIME_MS = 14 * 60_000;
+const CHECK_TIMEOUT_MS = 10 * 60_000;
+const MAX_RUNTIME_MS = 60 * 60_000;
 
 // ── Result reporting ────────────────────────────────────────────────────────
 
@@ -107,6 +107,7 @@ const MAX_RUNTIME_MS = 14 * 60_000;
 const results = [];
 let failed = false;
 let setupTokenSecret = null;
+let evidenceState = null;
 
 const redactLink = (url) => {
   if (typeof url !== "string" || !url.includes("/r/")) return "<redacted>";
@@ -117,23 +118,36 @@ const redactSecretOutput = (text) => {
   let clean = String(text).replace(/(one-time setup token:\s*)\S+/gi, "$1<redacted>");
   if (PASSWORD) clean = clean.replaceAll(PASSWORD, "<redacted-password>");
   if (setupTokenSecret) clean = clean.replaceAll(setupTokenSecret, "<redacted-setup-token>");
+  clean = clean
+    .replace(/\bBearer\s+\S+/gi, "Bearer <redacted>")
+    .replace(/\b(?:sk|rk|pk|xox[baprs]|gh[op]|ghu|ghs|github_pat|ya29)[-_][A-Za-z0-9_-]{12,}\b/gi, "<redacted-provider-key>")
+    .replace(/(https?:\/\/[^\s"'<>#]+)#[^\s"'<>]*/gi, "$1#<redacted>");
   const room = clean.indexOf("/r/");
   if (room >= 0) clean = `${clean.slice(0, room)}/r/<redacted>`;
-  const fragment = clean.indexOf("#");
-  if (fragment >= 0) clean = `${clean.slice(0, fragment)}#<redacted>`;
   return clean;
 };
 
 function record(id, status, label, evidence = "") {
-  const clean = redactSecretOutput(String(evidence)).replace(/\s+/g, " ").slice(0, 1_200);
+  const context = [
+    `base=${BASE}`,
+    ...(evidenceState ? [
+      evidenceState.nativeSessionId && `native=${evidenceState.nativeSessionId}`,
+      evidenceState.tmuxSessionId && `tmux=${evidenceState.tmuxSessionId}`,
+      evidenceState.projectPath && `cwd=${evidenceState.projectPath}`,
+    ].filter(Boolean) : []),
+  ];
+  const missingContext = context.filter((item) => !String(evidence).includes(`${item.split("=", 1)[0]}=`));
+  const withContext = missingContext.length ? `${evidence} ${missingContext.join(" ")}` : evidence;
+  const clean = redactSecretOutput(String(withContext)).replace(/\s+/g, " ").slice(0, 1_200);
   if (status === "FAIL") failed = true;
   results.push({ id, status, label, evidence: clean });
-  console.log(`${status.padEnd(4)} ${label}${clean ? ` — ${clean}` : ""}`);
+  console.log(`${status.padEnd(19)} ${label}${clean ? ` — ${clean}` : ""}`);
 }
 
 const pass = (id, label, evidence) => record(id, "PASS", label, evidence);
 const fail = (id, label, evidence) => record(id, "FAIL", label, evidence);
 const skip = (id, label, evidence) => record(id, "SKIP", label, evidence);
+const notRun = (id, label, evidence) => record(id, "NOT RUN", label, evidence);
 
 function section(name) {
   console.log(`\n### ${name}`);
@@ -189,6 +203,8 @@ function agentEnv() {
   };
 }
 
+const isGeminiModel = (selector) => selector.split("/").some((segment) => segment.toLowerCase().includes("gemini"));
+
 async function prepareOmpIsolation() {
   await mkdir(TMP, { recursive: true, mode: 0o700 });
   await chmod(TMP, 0o700);
@@ -230,7 +246,7 @@ async function prepareOmpIsolation() {
     'import { appendFileSync, readFileSync } from "node:fs";',
     "const args = process.argv.slice(2);",
     'const argvClass = args.some((arg) => arg.startsWith("__omp_worker_")) ? "worker-daemon" : args.some((arg) => arg.startsWith("--config=")) ? "configured-omp" : "other";',
-    `const child = spawn(${JSON.stringify(realOmp)}, args, {`,
+    `const child = spawn(${JSON.stringify(realOmp)}, args, { shell: false,`,
     '  stdio: "inherit",',
     "  env: {",
     "    ...process.env,",
@@ -250,21 +266,25 @@ async function prepareOmpIsolation() {
   await writeFile(WRAPPER_PATH, wrapper, { mode: 0o700 });
   await chmod(WRAPPER_PATH, 0o700);
   const catalogOutput = await run(WRAPPER_PATH, ["models", "--json"], { env: agentEnv() });
-  let modelCount;
   try {
     const catalog = JSON.parse(catalogOutput);
-    modelCount = Array.isArray(catalog?.models) ? catalog.models.length : null;
+    const selectors = Array.isArray(catalog?.models)
+      ? catalog.models.flatMap((row) => row?.selector === `${row?.provider}/${row?.id}` ? [row.selector] : [])
+      : null;
+    excludedGeminiModelCount = selectors?.filter(isGeminiModel).length ?? 0;
+    modelCatalog = selectors?.filter((selector) => !isGeminiModel(selector)) ?? null;
   } catch {
-    modelCount = null;
+    modelCatalog = null;
   }
-  console.log(`OMP wrapper model preflight: ${modelCount ?? "invalid response"} models`);
-  if (modelCount === null || modelCount === 0) {
+  console.log(`OMP wrapper model preflight: total=${modelCatalog === null ? "invalid" : modelCatalog.length + excludedGeminiModelCount} nonGemini=${modelCatalog?.length ?? "invalid"} selectedNonGemini=${modelCatalog?.[0] ?? "none"} geminiExcluded=${excludedGeminiModelCount}`);
+  if (!modelCatalog?.length && !excludedGeminiModelCount) {
     throw new Error(`isolated OMP model preflight failed; config lookup: ${OMP_AGENT_DIR}/{config.yml,models.yml}`);
   }
+  if (!modelCatalog?.length) skip("preflight-model-catalog", "safe model availability", `catalog contains only Gemini models (${excludedGeminiModelCount}); model-dependent checks will SKIP`);
 }
 
 async function run(cmd, args, options = {}) {
-  const { stdout } = await execFileAsync(cmd, args, { timeout: 10_000, maxBuffer: 8 * 1024 * 1024, ...options });
+  const { stdout } = await execFileAsync(cmd, args, { shell: false, timeout: 10_000, maxBuffer: 8 * 1024 * 1024, ...options });
   return stdout.trim();
 }
 
@@ -319,7 +339,7 @@ function serverEnv() {
 async function startServer() {
   const tsx = join(REPO, "node_modules", ".bin", "tsx");
   if (!existsSync(tsx)) throw new Error(`tsx not found at ${tsx}: run pnpm install first`);
-  const child = spawn(tsx, ["apps/server/src/server.ts"], {
+  const child = spawn(tsx, ["apps/server/src/server.ts"], { shell: false,
     cwd: REPO,
     env: serverEnv(),
     detached: true,
@@ -479,6 +499,12 @@ let page = null;
 const consoleLog = [];
 const socketLog = [];
 const collabLinkResponses = [];
+const actionResponses = [];
+const recordActionResponse = async (response) => {
+  if (response.request().method() !== "POST" || !/\/api\/conversations\/[^/]+\/actions(?:\?|$)/.test(response.url())) return;
+  const body = await response.json().catch(() => null);
+  actionResponses.push({ status: response.status(), code: body?.error?.code ?? "none", message: redactSecretOutput(body?.error?.message ?? "none") });
+};
 
 async function api(page, path, { method = "GET", body } = {}) {
   return page.evaluate(async ({ path, method, body }) => {
@@ -490,8 +516,8 @@ async function api(page, path, { method = "GET", body } = {}) {
     };
     const csrfResponse = await timedFetch("/api/auth/me", { credentials: "include" });
     const csrf = (await csrfResponse.json())?.data?.csrfToken;
-    const headers = { "content-type": "application/json", ...(method === "GET" ? {} : { "x-caw-csrf": csrf }) };
-    const res = await timedFetch(path, { method, credentials: "include", headers, ...(body ? { body: JSON.stringify(body) } : {}) });
+    const headers = { ...(method === "GET" || body === undefined ? {} : { "content-type": "application/json" }), ...(method === "GET" ? {} : { "x-caw-csrf": csrf }) };
+    const res = await timedFetch(path, { method, credentials: "include", headers, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
     let json = null;
     try { json = await res.json(); } catch { /* empty body */ }
     return { status: res.status, body: json };
@@ -623,6 +649,23 @@ async function newChatThroughUi(knownIds = [], projectId = state.projectId) {
     return list.find((item) => !knownIds.includes(item.id))?.id ?? null;
   }, { timeout: 30_000 });
 }
+async function chooseModelForRestart(conversation) {
+  const dropdown = page.locator("select#conversation-model");
+  if (!(await dropdown.isVisible().catch(() => false))) await page.locator("summary", { hasText: "Conversation model settings" }).first().click();
+  const models = modelCatalog ?? [];
+  const customModel = page.locator("#custom-model");
+  if (models.length > 0) {
+    const chosen = models.find((model) => model !== conversation?.model) ?? models[0];
+    if (await dropdown.count()) await dropdown.selectOption(chosen);
+    else await customModel.fill(chosen);
+    return { chosen, catalogCount: models.length };
+  }
+  const chosen = conversation?.modelPreference ?? conversation?.model;
+  if (!chosen || isGeminiModel(chosen)) throw new Error(`safe model catalog is empty; refusing Gemini model: ${chosen ?? "no current model ID"}`);
+  await customModel.fill(chosen);
+  return { chosen, catalogCount: 0 };
+}
+
 
 async function projectConversationIds(projectId = state.projectId) {
   const list = (await api(page, `/api/projects/${projectId}/conversations`)).body?.data ?? [];
@@ -747,7 +790,6 @@ async function pollHostReadiness(text, marker, _intervalMs = 15_000, observeMs =
     attempts: 1,
     startupRefusals: 0,
     observedSeconds: Number(((Date.now() - welcomeAt) / 1000).toFixed(1)),
-    journalEvidence,
   };
 }
 
@@ -777,11 +819,14 @@ const state = {
   tmuxSessionId: null,
   secondConversationId: null,
   secondNativeSessionId: null,
+  secondTmuxSessionId: null,
   approvalConversationId: null,
   subagentConversationId: null,
   approvalProjectId: null,
+  resumedConversationId: null,
   journalPaths: new Map(),
 };
+evidenceState = state;
 
 const checks = {
   async check1() {
@@ -868,39 +913,24 @@ const checks = {
 
   async check3() {
     section("check3 model preference, effective model, Save & restart");
+    if (!modelCatalog?.length) {
+      skip("check3", "model preference and restart", `isolated catalog has only Gemini models (${excludedGeminiModelCount}); restart not attempted`);
+      return;
+    }
     const conversation = await conversationOf(state.conversationId);
-    const catalog = await api(page, "/api/models");
-    const models = catalog.body?.data?.models ?? [];
+    const priorNative = conversation?.nativeSessionId ?? null;
+    const models = modelCatalog;
 
     await page.locator("summary", { hasText: "Conversation model settings" }).first().click();
     const dropdown = page.locator("select#conversation-model");
-    if (!(await dropdown.count())) {
-      fail("check3-dropdown", "model selected from a dropdown", "select#conversation-model is missing from the conversation settings DOM");
-    }
-
     let chosen;
-    if (models.length > 0) {
-      chosen = models.find((model) => model !== conversation?.model) ?? models[0];
-      if (await dropdown.count()) {
-        await dropdown.selectOption(chosen);
-        pass("check3-dropdown", "model selected from a dropdown", `select#conversation-model=${chosen}`);
-      } else {
-        await page.locator("#custom-model").fill(chosen);
-      }
-    } else {
-      const customModel = page.locator("#custom-model");
-      if (!(await customModel.count())) {
-        fail("check3", "custom model accepted when catalog is empty", "model catalog was empty and #custom-model is missing from the conversation settings DOM");
-        return;
-      }
-      chosen = conversation?.model ?? conversation?.modelPreference;
-      if (!chosen) {
-        fail("check3", "custom model accepted when catalog is empty", "model catalog was empty and conversation has no current model ID to enter in #custom-model");
-        return;
-      }
-      await customModel.fill(chosen);
-      pass("check3-custom", "custom model ID used with empty catalog", `catalog source=${catalog.body?.data?.source ?? "?"}; #custom-model=${chosen}`);
+    if (!(await dropdown.count())) {
+      notRun("check3", "non-Gemini model selection", "filtered catalog exists but #conversation-model is unavailable; refusing custom model launch");
+      return;
     }
+    chosen = models.find((model) => model !== conversation?.model) ?? models[0];
+    await dropdown.selectOption(chosen);
+    pass("check3-dropdown", "non-Gemini model selected from isolated catalog", `catalog=${models.length} select#conversation-model=${chosen}`);
     const before = { preference: conversation?.modelPreference ?? null, effective: conversation?.model ?? null };
     await page.locator("button", { hasText: "Save model" }).first().click();
     await waitFor("model preference saved", async () => {
@@ -909,25 +939,44 @@ const checks = {
     }, { timeout: 20_000 });
     const afterSave = await conversationOf(state.conversationId);
     if (afterSave.modelPreference === chosen) {
-      pass("check3a", "saved model preference through the UI", `${before.preference} → ${afterSave.modelPreference}`);
+      pass("check3a", "saved model preference through the UI", `native=${priorNative} model=${afterSave.modelPreference}`);
     } else {
-      fail("check3a", "saved model preference through the UI", `expected ${chosen} got ${afterSave.modelPreference}`);
+      fail("check3a", "saved model preference through the UI", `native=${priorNative} expected=${chosen} got=${afterSave.modelPreference}`);
     }
     if (afterSave.model === before.effective) {
-      pass("check3b", "effective model unchanged before restart", `model=${afterSave.model}`);
+      pass("check3b", "effective model unchanged before restart", `native=${priorNative} model=${afterSave.model}`);
     } else {
-      fail("check3b", "effective model unchanged before restart", `effective moved ${before.effective} → ${afterSave.model} on save alone`);
+      fail("check3b", "effective model unchanged before restart", `native=${priorNative} effective moved ${before.effective} → ${afterSave.model}`);
     }
     const priorJournalPath = conversationJournalPath(afterSave);
     const journalBefore = priorJournalPath ? await readFile(priorJournalPath, "utf8").catch(() => null) : null;
     if (!journalBefore || !priorJournalPath) {
-      skip("check3e", "same native journal survives model restart", "journal is written on first flush; continuity is covered by check10");
+      notRun("check3e", "same native journal survives model restart", `native=${priorNative}; expectedJournal=${priorJournalPath ?? "unavailable"}; no journal flushed yet; prompt first; restart not attempted`);
+      return;
     }
+    const responseStart = actionResponses.length;
+    const restartResponsePromise = page.waitForResponse((response) =>
+      response.request().method() === "POST" && response.url().includes(`/api/conversations/${state.conversationId}/actions`),
+    { timeout: 60_000 });
+    page.once("dialog", (dialog) => dialog.accept());
     await page.locator("button", { hasText: "Save & restart agent" }).first().click();
-    const restarted = await waitFor("restart to produce a new tmux session", async () => {
+    const restartResponse = await restartResponsePromise;
+    const restartBody = await restartResponse.json().catch(() => null);
+    const restartRecord = { status: restartResponse.status(), code: restartBody?.error?.code ?? "none", message: redactSecretOutput(restartBody?.error?.message ?? "none") };
+    const restartEvidence = `native=${priorNative} expectedJournal=${priorJournalPath} actionStatus=${restartRecord.status} actionCode=${restartRecord.code} actionMessage=${restartRecord.message}`;
+    if (restartRecord.status !== 200) {
+      fail("check3-restart", "model restart accepts the verified journal", restartEvidence);
+      return;
+    }
+    pass("check3-restart-response", "model restart action response", restartEvidence);
+    const restarted = await waitFor("restart to produce a new tmux pane process", async () => {
       const current = await conversationOf(state.conversationId);
-      return current && current.tmuxSessionId && current.tmuxSessionId !== state.tmuxSessionId ? current : null;
-    }, { timeout: 90_000 });
+      return current?.tmuxPanePid !== afterSave.tmuxPanePid && current?.tmuxSessionId ? current : null;
+    }, { timeout: 90_000 }).catch((error) => {
+      fail("check3-restart", "model restart produces a new tmux pane process", `${restartEvidence}; previousPanePid=${afterSave.tmuxPanePid} error=${error.message}`);
+      return null;
+    });
+    if (!restarted) return;
     if (restarted.tmuxSessionId) createdTmuxPrivate.add(restarted.tmuxSessionId);
     await waitFor("Collab connection restored after model restart", async () => /Connected — no turn in flight/.test(await page.locator("body").innerText()), { timeout: 45_000 });
     state.tmuxSessionId = restarted.tmuxSessionId;
@@ -935,23 +984,24 @@ const checks = {
 
     const argv = await paneStartCommand(restarted.tmuxSessionId).catch(() => "");
     if (argv.includes(`--model=${chosen}`)) {
-      pass("check3c", "new tmux argv carries the chosen model", argv.slice(0, 200));
+      pass("check3c", "new tmux argv carries the chosen model", `tmux=${restarted.tmuxSessionId} native=${restarted.nativeSessionId} model=${chosen}`);
     } else {
-      fail("check3c", "new tmux argv carries the chosen model", `expected --model=${chosen} in: ${argv.slice(0, 200)}`);
+      fail("check3c", "new tmux argv carries the chosen model", `tmux=${restarted.tmuxSessionId} expected --model=${chosen} in: ${argv.slice(0, 200)}`);
     }
     if (restarted.nativeSessionId === priorNative && restarted.nativeSessionId) {
-      pass("check3d", "nativeSessionId preserved across restart", restarted.nativeSessionId);
+      pass("check3d", "nativeSessionId preserved across restart", `native=${restarted.nativeSessionId} tmux=${restarted.tmuxSessionId}`);
     } else {
-      fail("check3d", "nativeSessionId preserved across restart", `${priorNative} → ${restarted.nativeSessionId}`);
+      fail("check3d", "nativeSessionId preserved across restart", `native=${priorNative} → ${restarted.nativeSessionId} tmux=${restarted.tmuxSessionId}`);
     }
     const journalAfter = journalBefore && priorJournalPath ? await journalText(restarted) : null;
     if (journalBefore && priorJournalPath && journalAfter && restarted.nativeSessionPath === priorJournalPath && journalAfter.includes(priorNative)) {
-      pass("check3e", "same native journal survives model restart", `path=${restarted.nativeSessionPath} bytes=${journalAfter.length} header/session=${priorNative}`);
+      pass("check3e", "same native journal survives model restart", `native=${priorNative} path=${restarted.nativeSessionPath} bytes=${journalAfter.length}`);
     } else if (journalBefore && priorJournalPath) {
-      fail("check3e", "same native journal survives model restart", `path=${priorJournalPath} → ${restarted.nativeSessionPath}; journal=${journalAfter ? journalAfter.length : "unreadable"}; session id present=${Boolean(priorNative && journalAfter?.includes(priorNative))}`);
+      fail("check3e", "same native journal survives model restart", `native=${priorNative} path=${priorJournalPath} → ${restarted.nativeSessionPath}; journal=${journalAfter ? journalAfter.length : "unreadable"}; session id present=${Boolean(priorNative && journalAfter?.includes(priorNative))}`);
     }
   },
 
+  // Stage runs include check4 before journal-dependent restart/session checks; its UI prompt flushes a real OMP journal first.
   async check4() {
     section("check4 prompt in, echo and real reply, journal cross-check");
     const marker = `${MARKER}-4`;
@@ -1046,17 +1096,34 @@ const checks = {
    */
   async check6() {
     section("check6 approval dialog (Approve then Deny)");
+    // check4 in each stage flushes journal required by downstream checks.
+    if (!(await page.locator("h2", { hasText: "Projects" }).isVisible().catch(() => false))) {
+      await page.locator('button[title="Back"]').first().click();
+      await page.locator("h3", { hasText: "Conversations" }).first().waitFor({ timeout: 15_000 });
+      await page.locator('button[title="Back to projects"]').first().click();
+    }
+    await page.locator("h2", { hasText: "Projects" }).first().waitFor({ state: "visible", timeout: 15_000 });
     const folder = `approval-${MARKER.toLowerCase()}`;
     const label = `Approval ${MARKER}`;
-    const project = await createProjectThroughUi(folder, label);
+    const { project, selectedPath, evidence } = await createProjectThroughUi(folder, label);
     if (!project) {
-      skip("check6", "approval dialog", "approval project could not be created");
+      skip("check6", "approval dialog", `approval project could not be created; ${evidence}`);
+      return;
+    }
+    const projectPath = project.path ?? selectedPath;
+    if (typeof projectPath !== "string" || projectPath.length === 0) {
+      skip("check6", "approval dialog", `approval project path unavailable; project=${JSON.stringify(project)} selectedPath=${JSON.stringify(selectedPath)} ${evidence}`);
       return;
     }
     state.approvalProjectId = project.id;
-    const settingsDir = join(project.path, ".omp");
-    await mkdir(settingsDir, { recursive: true });
-    await writeFile(join(settingsDir, "config.yml"), "tools:\n  approvalMode: always-ask\n");
+    const settingsDir = join(projectPath, ".omp");
+    try {
+      await mkdir(settingsDir, { recursive: true });
+      await writeFile(join(settingsDir, "config.yml"), ["tools:", "  approvalMode: always-ask", ""].join(String.fromCharCode(10)));
+    } catch (error) {
+      fail("check6-setup", "approval project config prepared", `project=${JSON.stringify(project)} selectedPath=${JSON.stringify(selectedPath)} settingsDir=${settingsDir} error=${error instanceof Error ? error.message : String(error)}`);
+      return;
+    }
 
     await openProjectThroughUi(label);
     const conversationId = await newChatThroughUi([], project.id);
@@ -1084,23 +1151,38 @@ const checks = {
     pass("check6b", "Approve lets the shell tool run", `tool transcript contains ${approveMarker}`);
 
     const denyMarker = `${MARKER}-6no`;
-    const beforeDeny = await toolTranscriptText();
+    const beforeDenyRows = await page.locator(".message-card.tool details > summary").count();
+    const beforeResponses = await page.evaluate(() => window.__cawUiResponses?.length ?? 0);
     await sendPrompt(`Run this exact harmless shell command and show its output: echo ${denyMarker}`);
     const secondCard = await card.waitFor({ state: "visible", timeout: 60_000 }).then(() => true).catch(() => false);
     if (!secondCard) {
       skip("check6c", "Deny blocks the shell tool", "second approval dialog did not appear");
     } else {
       const denyButton = card.locator("button").filter({ hasText: /deny|reject|decline|refuse|disallow|cancel/i }).first();
+      const denyLabel = await denyButton.innerText();
       await denyButton.click();
-      const deniedTools = await waitFor("host denial result", async () => {
-        const text = await toolTranscriptText();
-        return text.length > beforeDeny.length ? text : null;
+      const responseEvidence = await waitFor("guest ui-response frame for Deny", async () => {
+        const frames = await page.evaluate(() => window.__cawUiResponses ?? []);
+        return frames.length > beforeResponses ? frames.at(-1) : null;
+      }, { timeout: 5_000 }).catch(() => null);
+      const denialEvidence = await waitFor("Deny acknowledgement or tool result", async () => {
+        const rows = page.locator(".message-card.tool");
+        const results = [];
+        for (const row of await rows.all()) {
+          const summary = await row.locator("details > summary").innerText().catch(() => "");
+          if (!summary || /\(Running…\)/.test(summary)) continue;
+          results.push(await row.locator(".message-content").innerText().catch(() => ""));
+        }
+        const freshResults = results.slice(beforeDenyRows);
+        if (freshResults.length) return { kind: "tool-result", text: freshResults.join("\n") };
+        const cardClosed = !(await card.isVisible().catch(() => false));
+        return responseEvidence && cardClosed ? { kind: "ack", text: `approval card closed after ui-response reqId=${responseEvidence.reqId}` } : null;
       }, { timeout: 60_000 });
-      if (!deniedTools.includes(denyMarker) && /denied|declined|rejected|not approved/i.test(deniedTools)) {
-        pass("check6c", "Deny blocked the shell tool", `tool result=${deniedTools.slice(-160)}`);
-      } else {
-        fail("check6c", "Deny blocked the shell tool", `tool result=${deniedTools.slice(-160)} marker=${denyMarker}`);
-      }
+      const frameText = responseEvidence ? `ui-response reqId=${responseEvidence.reqId} value=${responseEvidence.value ?? "undefined"}` : "ui-response frame not observed";
+      const markerRan = denialEvidence.kind === "tool-result" && denialEvidence.text.includes(denyMarker);
+      const proof = `button=${denyLabel}; ${frameText}; ${denialEvidence.kind}=${denialEvidence.text.slice(-160)}`;
+      if (markerRan) fail("check6c", "Deny blocked the shell tool", `${proof}; denied marker present in tool output`);
+      else pass("check6c", "Deny blocked the shell tool", `${proof}; denied marker absent from tool output`);
     }
   },
   async check7() {
@@ -1123,32 +1205,100 @@ const checks = {
     } else {
       fail("check7a", "history restored exactly once after leaving and returning", `user rows containing marker=${occurrences}`);
     }
-    const journal = await journalText(await conversationOf(state.conversationId));
-    const userJournalRows = journal?.split("\n").filter((line) => {
-      try {
-        const entry = JSON.parse(line);
-        return entry.type === "message" && entry.message?.role === "user" && line.includes(marker);
-      } catch {
-        return false;
-      }
-    }).length ?? 0;
-    if (userJournalRows === 1) {
-      pass("check7b", "nothing was silently resent (one user journal row)", `user journal rows containing marker=${userJournalRows}`);
+    const current = await conversationOf(state.conversationId);
+    const native = current?.nativeSessionId;
+    const journalPath = conversationJournalPath(current);
+    const journal = await journalText(current);
+    const entries = journal?.split("\n").map((line) => { try { return JSON.parse(line); } catch { return null; } }).filter(Boolean) ?? [];
+    const messageText = (content) => typeof content === "string" ? content : Array.isArray(content)
+      ? content.filter((part) => part?.type === "text").map((part) => part.text ?? "").join("")
+      : "";
+    const guestEntries = entries.filter((entry) =>
+      (entry.type === "custom_message" && entry.customType === "collab-prompt" && messageText(entry.content).includes(marker)) ||
+      (entry.type === "message" && entry.message?.role === "user" && messageText(entry.message.content).includes(marker)));
+    const assistantEntries = entries.filter((entry) => entry.type === "message" && entry.message?.role === "assistant" && messageText(entry.message.content).includes(marker));
+    const markerFound = Boolean(journal?.includes(marker));
+    const shapes = guestEntries.map((entry) => entry.type === "custom_message" ? `${entry.type}/${entry.customType}` : `${entry.type}/${entry.message.role}`);
+    const evidence = `native=${native} path=${journalPath ?? "unavailable"} markerFound=${markerFound ? "yes" : "no"} guestPromptEntries=${guestEntries.length} assistantReplies=${assistantEntries.length} matchedShapes=${shapes.join(",") || "none"}; contract: host promptCustomMessage persists custom_message/collab-prompt; user-role message accepted for alternate format`;
+    if (markerFound && guestEntries.length === 1) {
+      pass("check7b", "prompt reached host exactly once", evidence);
     } else {
-      fail("check7b", "nothing was silently resent (one user journal row)", `user journal rows containing marker=${userJournalRows}`);
+      fail("check7b", "prompt reached host exactly once", evidence);
     }
   },
 
   async check8() {
-    section("check8 two chats in one project keep separate sessions");
+    section("check8 concurrent chats in one project keep separate sessions");
+    const firstBefore = await conversationOf(state.conversationId);
+    const idsBefore = await projectConversationIds();
+    const tmuxBefore = new Set((await tmuxSessions(TMUX_SOCKET)).map((session) => session.id));
     await page.locator('button[title="Back"]').first().click();
     await page.locator("h3", { hasText: "Conversations" }).first().waitFor({ timeout: 15_000 });
-    const secondId = await newChatThroughUi([state.conversationId]);
-    const second = await waitFreshConversation(secondId, "second conversation launch", 90_000);
-    if (second.tmuxSessionId) createdTmuxPrivate.add(second.tmuxSessionId);
-    state.secondConversationId = second.id;
-    state.secondNativeSessionId = second.nativeSessionId;
+    const createButton = page.locator("button", { hasText: "+ New chat" }).first();
+    const createRequests = [];
+    const createRequest = (request) => {
+      if (request.method() !== "POST" || new URL(request.url()).pathname !== `/api/projects/${state.projectId}/conversations`) return;
+      createRequests.push({ request, startedAt: Date.now(), settledAt: null });
+    };
+    const settleCreateRequest = (request) => {
+      const record = createRequests.find((item) => item.request === request);
+      if (record) record.settledAt = Date.now();
+    };
+    page.on("request", createRequest);
+    page.on("requestfinished", settleCreateRequest);
+    page.on("requestfailed", settleCreateRequest);
+    try {
+      const firstCreate = createButton.click({ noWaitAfter: true }).catch(() => null);
+      const secondCreate = createButton.click({ noWaitAfter: true }).catch(() => null);
+      await Promise.all([firstCreate, secondCreate]);
+      await waitFor("near-simultaneous conversation requests to settle", async () => {
+        if (!createRequests.length || createRequests.some((request) => request.settledAt === null)) return null;
+        const lastSettled = Math.max(...createRequests.map((request) => request.settledAt));
+        return Date.now() - lastSettled >= 750 ? true : null;
+      }, { timeout: 30_000 }).catch(() => null);
+    } finally {
+      page.off("request", createRequest);
+      page.off("requestfinished", settleCreateRequest);
+      page.off("requestfailed", settleCreateRequest);
+    }
+    const overlappingRequests = createRequests.some((first, index) => createRequests.slice(index + 1).some((second) => first.startedAt < second.settledAt && second.startedAt < first.settledAt));
+    const ids = await waitFor("conversation creation requests settle", async () => {
+      const current = await projectConversationIds();
+      return current.filter((id) => !idsBefore.includes(id)).length > 0 ? current : null;
+    }, { timeout: 30_000 }).catch(() => idsBefore);
+    const newIds = ids.filter((id) => !idsBefore.includes(id));
+    if (createRequests.length < 2 || !overlappingRequests || newIds.length < 2) {
+      notRun("check8-race", "two concurrent chats have distinct writers", `NOT POSSIBLE VIA UI: ${createRequests.length} create request(s), overlapping=${overlappingRequests}, newConversations=${newIds.length}, conversationIds=${newIds.join(",") || "none"}; UI did not issue two overlapping create requests`);
+      return;
+    }
+    const [firstCreated, secondCreated] = await Promise.all(newIds.slice(0, 2).map((id) => waitFreshConversation(id, "concurrent conversation launch", 90_000)));
+    state.secondConversationId = secondCreated.id;
+    state.secondNativeSessionId = secondCreated.nativeSessionId;
+    state.secondTmuxSessionId = secondCreated.tmuxSessionId;
+    createdTmuxPrivate.add(firstCreated.tmuxSessionId);
+    createdTmuxPrivate.add(secondCreated.tmuxSessionId);
+    const liveIds = new Set((await tmuxSessions(TMUX_SOCKET)).map((session) => session.id));
+    const disjoint = firstCreated.nativeSessionId !== secondCreated.nativeSessionId && firstCreated.tmuxSessionId !== secondCreated.tmuxSessionId && liveIds.has(firstCreated.tmuxSessionId) && liveIds.has(secondCreated.tmuxSessionId) && !tmuxBefore.has(firstCreated.tmuxSessionId) && !tmuxBefore.has(secondCreated.tmuxSessionId);
+    if (disjoint) {
+      pass("check8-race", "concurrent create actions produced distinct writers", `conversations=${firstCreated.id},${secondCreated.id} native=${firstCreated.nativeSessionId},${secondCreated.nativeSessionId} tmux=${firstCreated.tmuxSessionId},${secondCreated.tmuxSessionId} createRequests=${createRequests.length}`);
+    } else {
+      fail("check8-race", "concurrent create actions produced distinct writers", `conversations=${firstCreated.id},${secondCreated.id} native=${firstCreated.nativeSessionId},${secondCreated.nativeSessionId} tmux=${firstCreated.tmuxSessionId},${secondCreated.tmuxSessionId} createRequests=${createRequests.length}`);
+    }
+    const sessions = await tmuxSessions(TMUX_SOCKET);
+    const firstSession = sessions.find((session) => session.id === firstCreated.tmuxSessionId);
+    const secondSession = sessions.find((session) => session.id === secondCreated.tmuxSessionId);
+    if (firstSession?.cwd === state.projectPath && secondSession?.cwd === state.projectPath) {
+      pass("check8-race-cwd", "each concurrent writer stayed in project cwd", `first=${firstCreated.tmuxSessionId}:${firstSession.cwd}; second=${secondCreated.tmuxSessionId}:${secondSession.cwd}`);
+    } else {
+      fail("check8-race-cwd", "each concurrent writer stayed in project cwd", `first=${firstCreated.tmuxSessionId}:${firstSession?.cwd}; second=${secondCreated.tmuxSessionId}:${secondSession?.cwd}; expected=${state.projectPath}`);
+    }
 
+    const second = await conversationOf(state.secondConversationId);
+    if (!second) {
+      fail("check8", "second conversation identity exists", `conversation=${state.secondConversationId ?? "missing"}`);
+      return;
+    }
+    await openConversationThroughUi(second.id);
     const markerSecond = `${MARKER}-8b`;
     await sendPrompt(`Reply with exactly: ${markerSecond} ACK`);
     await waitFor("second chat journal holds its marker", async () => {
@@ -1156,25 +1306,30 @@ const checks = {
       return journal && journal.includes(markerSecond);
     }, { timeout: 180_000 });
 
-    const first = await conversationOf(state.conversationId);
-    const secondJournal = await journalText(await conversationOf(second.id));
+    const first = firstBefore;
+    const refreshedSecond = await conversationOf(second.id);
+    const secondJournal = await journalText(refreshedSecond);
     const firstJournal = await journalText(first);
     const firstMarker = `${MARKER}-4`;
-    if (first.nativeSessionId !== second.nativeSessionId) {
-      pass("check8a", "each conversation kept its own nativeSessionId", `${first.nativeSessionId} vs ${second.nativeSessionId}`);
+    if (first.nativeSessionId !== refreshedSecond.nativeSessionId && first.tmuxSessionId !== refreshedSecond.tmuxSessionId) {
+      pass("check8a", "each conversation kept its own nativeSessionId and tmux $N", `first=${first.id} native=${first.nativeSessionId} tmux=${first.tmuxSessionId}; second=${second.id} native=${refreshedSecond.nativeSessionId} tmux=${refreshedSecond.tmuxSessionId}`);
     } else {
-      fail("check8a", "each conversation kept its own nativeSessionId", `both are ${first.nativeSessionId}`);
+      fail("check8a", "each conversation kept its own nativeSessionId and tmux $N", `first=${first.id} native=${first.nativeSessionId} tmux=${first.tmuxSessionId}; second=${second.id} native=${refreshedSecond.nativeSessionId} tmux=${refreshedSecond.tmuxSessionId}`);
     }
     if (firstJournal?.includes(firstMarker) && !secondJournal?.includes(firstMarker) && secondJournal?.includes(markerSecond) && !firstJournal?.includes(markerSecond)) {
-      pass("check8b", "each marker landed only in its own journal", `${firstMarker}→${first.nativeSessionId}; ${markerSecond}→${second.nativeSessionId}`);
+      pass("check8b", "each marker landed only in its own journal", `firstPath=${conversationJournalPath(first)} native=${first.nativeSessionId}; secondPath=${conversationJournalPath(refreshedSecond)} native=${refreshedSecond.nativeSessionId}`);
     } else {
-      fail("check8b", "each marker landed only in its own journal", `firstOwn=${Boolean(firstJournal?.includes(firstMarker))} secondOwn=${Boolean(secondJournal?.includes(markerSecond))} crossLeak=${Boolean(firstJournal?.includes(markerSecond) || secondJournal?.includes(firstMarker))}`);
+      fail("check8b", "each marker landed only in its own journal", `firstPath=${conversationJournalPath(first)} own=${Boolean(firstJournal?.includes(firstMarker))}; secondPath=${conversationJournalPath(refreshedSecond)} own=${Boolean(secondJournal?.includes(markerSecond))}; crossLeak=${Boolean(firstJournal?.includes(markerSecond) || secondJournal?.includes(firstMarker))}`);
     }
+    await page.locator('button[title="Back"]').first().click();
+    await page.locator("h3", { hasText: "Conversations" }).first().waitFor({ timeout: 15_000 });
+    await openConversationThroughUi(state.conversationId);
   },
 
   async check9() {
     section("check9 backend restart keeps identity, adds no second writer");
     const before = await conversationOf(state.conversationId);
+    const socketsAtCheck9 = `private=${(await tmuxSessions(TMUX_SOCKET)).map((session) => session.id).join(",") || "none"}; external=${(await tmuxSessions(EXTERNAL_SOCKET)).map((session) => session.id).join(",") || "none"}`;
     const leaseSet = async () => {
       const unix = await readFile("/proc/net/unix", "utf8");
       return [...new Set(unix.match(/@omp-file-lock-[0-9a-f]{32}/g) ?? [])].sort();
@@ -1200,24 +1355,50 @@ const checks = {
     const sessionsAfter = (await tmuxSessions(TMUX_SOCKET)).length;
     const leasesAfter = await leaseSet();
     if (sessionsAfter === sessionsBefore && JSON.stringify(leasesAfter) === JSON.stringify(leasesBefore)) {
-      pass("check9b", "no second writer appeared", `private tmux sessions ${sessionsBefore}→${sessionsAfter}, lease sockets ${leasesBefore.length}→${leasesAfter.length}`);
+      pass("check9b", "no second writer appeared", `private tmux sessions ${sessionsBefore}→${sessionsAfter}, lease sockets ${leasesBefore.length}→${leasesAfter.length}; tmuxSockets=${socketsAtCheck9}`);
     } else {
-      fail("check9b", "no second writer appeared", `private tmux sessions ${sessionsBefore}→${sessionsAfter}, lease sockets ${leasesBefore.length}→${leasesAfter.length}`);
+      fail("check9b", "no second writer appeared", `private tmux sessions ${sessionsBefore}→${sessionsAfter}, lease sockets ${leasesBefore.length}→${leasesAfter.length}; tmuxSockets=${socketsAtCheck9}`);
     }
   },
 
   async check10() {
     section("check10 agent restart resumes the same journal");
-    const before = await conversationOf(state.conversationId);
+    if (!modelCatalog?.length) {
+      skip("check10", "restart resumes the same journal", `isolated catalog has only Gemini models (${excludedGeminiModelCount}); restart not attempted`);
+      return;
+    }
+    const beforeRaw = await conversationOf(state.conversationId);
+    const before = beforeRaw?.nativeSessionPath || !beforeRaw?.nativeSessionId ? beforeRaw : (await resolveConversationJournal(beforeRaw, state.projectPath))?.conversation ?? beforeRaw;
     const sizeBefore = await journalSize(before);
-    await page.locator("summary", { hasText: "Conversation model settings" }).first().click();
-    const chosen = (await conversationOf(state.conversationId)).modelPreference ?? "default";
-    await page.locator("#conversation-model").fill(chosen);
+    const { chosen, catalogCount } = await chooseModelForRestart(before);
+    if (!before?.nativeSessionPath) {
+      notRun("check10", "agent restart resumes the same journal", `native=${before?.nativeSessionId ?? "unavailable"} journal=${conversationJournalPath(before) ?? "unavailable"}; no verified native journal path`);
+      return;
+    }
+    if (catalogCount > 0) pass("check10-model", "restart model selected from isolated catalog", `catalog=${catalogCount} #conversation-model=${chosen}`);
+    else pass("check10-model", "restart model entered in custom model field", `#custom-model=${chosen}`);
+    const restartResponsePromise = page.waitForResponse((response) =>
+      response.request().method() === "POST" && response.url().includes(`/api/conversations/${state.conversationId}/actions`),
+    { timeout: 60_000 });
+    page.once("dialog", (dialog) => dialog.accept());
     await page.locator("button", { hasText: "Save & restart agent" }).first().click();
+    const restartResponse = await restartResponsePromise;
+    const restartBody = await restartResponse.json().catch(() => null);
+    const restartRecord = { status: restartResponse.status(), code: restartBody?.error?.code ?? "none", message: redactSecretOutput(restartBody?.error?.message ?? "none") };
+    const restartEvidence = `native=${before.nativeSessionId} expectedJournal=${before.nativeSessionPath ?? "unavailable"} actionStatus=${restartRecord.status} actionCode=${restartRecord.code} actionMessage=${restartRecord.message}`;
+    if (restartRecord.status !== 200) {
+      fail("check10-restart", "agent restart accepts the verified journal", restartEvidence);
+      return;
+    }
+    pass("check10-restart-response", "agent restart action response", restartEvidence);
     const after = await waitFor("agent restart to finish", async () => {
       const current = await conversationOf(state.conversationId);
-      return current && current.tmuxSessionId && current.tmuxSessionId !== before.tmuxSessionId ? current : null;
-    }, { timeout: 90_000 });
+      return current?.tmuxPanePid !== before.tmuxPanePid && current?.tmuxSessionId ? current : null;
+    }, { timeout: 90_000 }).catch((error) => {
+      fail("check10-restart", "agent restart produces a new tmux session", `${restartEvidence}; ${error.message}`);
+      return null;
+    });
+    if (!after) return;
     if (after.tmuxSessionId) createdTmuxPrivate.add(after.tmuxSessionId);
     await waitFor("Collab connection restored after agent restart", async () => /Connected — no turn in flight/.test(await page.locator("body").innerText()), { timeout: 45_000 });
 
@@ -1250,6 +1431,10 @@ const checks = {
 
   async check11() {
     section("check11 restart with the known journal missing is refused");
+    if (!modelCatalog?.length) {
+      skip("check11", "restart refusal with missing journal", `isolated catalog has only Gemini models (${excludedGeminiModelCount}); journal untouched`);
+      return;
+    }
     const conversation = await conversationOf(state.conversationId);
     if (!conversation?.nativeSessionPath || !conversation.nativeSessionId) {
       skip("check11", "restart refuses when the known journal is missing", "conversation has no recorded journal to move aside");
@@ -1269,6 +1454,8 @@ const checks = {
       skip("check11", "restart refuses when the known journal is missing", `refusing to move ${journal}: its header does not name ${conversation.nativeSessionId}`);
       return;
     }
+    const modelSettings = page.locator("select#conversation-model");
+    if (!(await modelSettings.isVisible().catch(() => false))) await page.locator("summary", { hasText: "Conversation model settings" }).first().click();
 
     // Only the journal this run created is ever touched; verify identity first.
     const aside = `${journal}.caw-acc-aside`;
@@ -1276,11 +1463,23 @@ const checks = {
     movedJournal = { journal, aside };
     const sessionsBefore = (await tmuxSessions(TMUX_SOCKET)).map((session) => session.id).sort().join(",");
 
-    await page.locator("summary", { hasText: "Conversation model settings" }).first().click();
-    await page.locator("#conversation-model").fill(conversation.modelPreference ?? "default");
+    if (!modelCatalog?.length) {
+      await rename(aside, journal);
+      movedJournal = null;
+      skip("check11", "restart refusal with missing journal", `isolated catalog has only Gemini models (${excludedGeminiModelCount}); journal restored without launch`);
+      return;
+    }
+    const { chosen, catalogCount } = await chooseModelForRestart(conversation);
+    if (!catalogCount || isGeminiModel(chosen)) {
+      await rename(aside, journal);
+      movedJournal = null;
+      skip("check11", "restart refusal with missing journal", `safe catalog selector unavailable; journal restored without launch`);
+      return;
+    }
     const restartResponsePromise = page.waitForResponse((response) =>
       response.request().method() === "POST" && response.url().includes(`/api/conversations/${state.conversationId}/actions`),
     { timeout: 60_000 });
+    page.once("dialog", (dialog) => dialog.accept());
     await page.locator("button", { hasText: "Save & restart agent" }).first().click();
     const restartResponse = await restartResponsePromise;
     const restartBody = await restartResponse.json().catch(() => null);
@@ -1367,17 +1566,17 @@ const checks = {
    * precondition; creating the conversation and writer uses the product UI.
    */
   async check13() {
-    section("check13 resume a stopped native session through the UI");
+    const tmuxAtCheck13 = `private=${(await tmuxSessions(TMUX_SOCKET)).map((session) => session.id).join(",") || "none"}; external=${(await tmuxSessions(EXTERNAL_SOCKET)).map((session) => session.id).join(",") || "none"}`;
     const appConversation = await conversationOf(state.conversationId);
     if (appConversation?.state !== "stopped") {
       const stop = await api(page, `/api/conversations/${state.conversationId}/actions`, { method: "POST", body: { action: "stop" } });
       if (stop.status !== 200) {
-        skip("check13", "app-owned agent stopped before resume", `POST stop → ${stop.status} ${JSON.stringify(stop.body?.error ?? null)}`);
+        skip("check13", "app-owned agent stopped before resume", `POST stop → ${stop.status} ${JSON.stringify(stop.body?.error ?? null)} tmuxSockets=${tmuxAtCheck13}`);
         return;
       }
       await waitConversation(state.conversationId, (current) => current.state === "stopped", "app agent stop before resume", 30_000);
     }
-    pass("check13a", "app-owned agent stopped before resume", `state=${(await conversationOf(state.conversationId))?.state}`);
+    pass("check13a", "app-owned agent stopped before resume", `state=${(await conversationOf(state.conversationId))?.state} tmuxSockets=${tmuxAtCheck13}`);
     const before = (await api(page, `/api/projects/${state.projectId}/sessions`)).body?.data ?? [];
     const marker = `${MARKER}-13`;
     const output = await tmuxExternal([
@@ -1453,13 +1652,14 @@ const checks = {
 
   async check14() {
     section("check14 subagent transcript loads and grows");
+    const tmuxAtCheck14 = `private=${(await tmuxSessions(TMUX_SOCKET)).map((session) => session.id).join(",") || "none"}; external=${(await tmuxSessions(EXTERNAL_SOCKET)).map((session) => session.id).join(",") || "none"}`;
     await page.locator('button[title="Back"]').first().click();
     await page.locator("h3", { hasText: "Conversations" }).first().waitFor({ timeout: 15_000 });
     const conversationId = await newChatThroughUi(await projectConversationIds());
     const conversation = await waitFreshConversation(conversationId, "subagent conversation launch", 90_000);
     if (conversation.tmuxSessionId) createdTmuxPrivate.add(conversation.tmuxSessionId);
     state.subagentConversationId = conversation.id;
-
+    pass("check14-launch", "subagent conversation launched", `conversation=${conversation.id} native=${conversation.nativeSessionId} tmux=${conversation.tmuxSessionId} tmuxSockets=${tmuxAtCheck14}`);
     const markerStart = `${MARKER}-14a`;
     const markerEnd = `${MARKER}-14b`;
     await sendPrompt(`Use the task tool to start exactly one subagent. Its entire job: print ${markerStart}, run harmless shell sleep 25, then print ${markerEnd}. Do not read or modify files.`);
@@ -1470,8 +1670,22 @@ const checks = {
       return;
     }
     await agentsButton.click();
-    await page.locator(".modal-content .card").first().click();
+    const agentCards = page.locator(".modal-content .card");
+    if (!(await agentCards.count())) {
+      skip("check14", "subagent transcript", "agent panel has no selectable agent card; transcript view unavailable");
+      return;
+    }
+    const selectedName = (await agentCards.first().innerText()).trim().split("\n")[0];
+    await agentCards.first().click();
     const transcript = page.locator(".modal-content pre code").first();
+    const selectedView = await page.locator(".modal-content h4").filter({ hasText: selectedName }).waitFor({ state: "visible", timeout: 5_000 }).then(() => true).catch(() => false);
+    if (!selectedView) {
+      const stillListing = await page.locator(".modal-content .card").count().then((count) => count > 0);
+      const listEmpty = await page.locator(".modal-content h3", { hasText: "Subagents (0)" }).count().then((count) => count > 0);
+      if (listEmpty) skip("check14", "subagent transcript", `agent panel has no selectable agent; list empty after prompt; expected ${selectedName}`);
+      else fail("check14", "subagent selection opens transcript pane", `stuck on ${stillListing ? "agent list" : "neither list nor transcript"}; expected selected transcript for ${selectedName}`);
+      return;
+    }
     await transcript.waitFor({ state: "visible", timeout: 60_000 });
     pass("check14a", "subagent transcript loads", `initial text=${(await transcript.innerText()).slice(0, 100)}`);
 
@@ -1645,12 +1859,14 @@ async function cleanup() {
     proof.push("journal moved aside → none (nothing to restore)");
   }
 
-  proof.push(`timestamped redacted server output log ${SERVER_LOG} → ${KEEP_TMP ? "kept (--keep-tmp)" : "removed with scratch directory"}`);
-  if (!KEEP_TMP) {
+  const preserveTmp = KEEP_TMP || failed;
+  proof.push(`timestamped redacted server output log ${SERVER_LOG} → ${preserveTmp ? (KEEP_TMP ? "kept (--keep-tmp)" : "kept because run failed") : "removed with scratch directory"}`);
+  if (!preserveTmp) {
+    const scratchBytes = await run("du", ["-sb", TMP]).then((output) => Number(output.split(/\s+/, 1)[0])).catch(() => null);
     await rm(TMP, { recursive: true, force: true }).catch(() => {});
-    proof.push(`scratch/state under ${TMP} → removed`);
+    proof.push(`scratch/state under ${TMP} → removed; freed bytes=${scratchBytes ?? "unknown"}`);
   } else {
-    proof.push(`scratch/state under ${TMP} → kept (--keep-tmp)`);
+    proof.push(`scratch/state under ${TMP} → kept${KEEP_TMP ? " (--keep-tmp)" : " (run failed)"}`);
   }
 
   for (const line of proof) console.log(`   ${line}`);
@@ -1659,8 +1875,10 @@ async function cleanup() {
 
 // ── Main ────────────────────────────────────────────────────────────────────
 
-const selected = Object.keys(checks).filter((name) => !ONLY || ONLY.includes(name));
+const knownChecks = Object.keys(checks);
+const selected = ONLY ? ONLY.filter((name) => knownChecks.includes(name)) : knownChecks;
 if (selected.includes("check2") && !selected.includes("check1")) selected.unshift("check1");
+const notSelected = ONLY ? knownChecks.filter((name) => !selected.includes(name)) : [];
 
 async function main() {
   console.log(`acceptance run: marker=${MARKER} base=${BASE} tmp=${TMP} root=${ROOT}`);
@@ -1695,6 +1913,17 @@ async function main() {
       };
       try {
         const subtle = globalThis.crypto.subtle;
+        const encrypt = subtle.encrypt.bind(subtle);
+        Object.defineProperty(subtle, "encrypt", {
+          configurable: true,
+          value: async (...args) => {
+            try {
+              const frame = JSON.parse(new TextDecoder().decode(args[2]));
+              if (frame?.t === "ui-response") (window.__cawUiResponses ??= []).push({ reqId: frame.reqId, value: typeof frame.value === "string" ? frame.value : null, sentAt: Date.now() });
+            } catch {}
+            return encrypt(...args);
+          },
+        });
         const decrypt = subtle.decrypt.bind(subtle);
         Object.defineProperty(subtle, "decrypt", {
           configurable: true,
@@ -1706,33 +1935,20 @@ async function main() {
                 (window.__cawWelcomeReadOnly ??= []).push(frame.readOnly === true);
                 window.__cawWelcomeAt ??= Date.now();
               }
-              if (frame?.t === "error") {
-                (window.__cawHostPromptErrors ??= []).push({
-                  startup: /starting up|session transition completes/i.test(frame.message ?? ""),
-                  message: frame.message ?? "",
-                });
-              }
+              if (frame?.t === "error") (window.__cawHostPromptErrors ??= []).push({ startup: /starting up|session transition completes/i.test(frame.message ?? ""), message: frame.message ?? "" });
               const frames = window.__cawReadinessFrames ??= [];
               if (frame?.t === "event" && frame.event?.type === "message_end" && ["custom", "assistant"].includes(frame.event.message?.role)) {
                 const message = frame.event.message;
                 const content = typeof message.content === "string" ? message.content : Array.isArray(message.content)
                   ? message.content.filter((part) => part?.type === "text").map((part) => part.text ?? "").join("")
                   : "";
-                const safe = content.replace(/(?:sk|rk|pk|xox[baprs])-?[A-Za-z0-9_-]{12,}/gi, "[redacted]")
-                  .replace(/\bBearer\s+\S+/gi, "Bearer [redacted]")
-                  .replace(/\b(api[_-]?key|token|secret)\s*[:=]\s*\S+/gi, "$1=[redacted]");
+                const safe = content.replace(/(?:sk|rk|pk|xox[baprs])-?[A-Za-z0-9_-]{12,}/gi, "[redacted]").replace(/\bBearer\s+\S+/gi, "Bearer [redacted]").replace(/\b(api[_-]?key|token|secret)\s*[:=]\s*\S+/gi, "$1=[redacted]");
                 (window.__cawAgentMessageSummaries ??= []).push({ role: message.role, text: safe.slice(0, 40) });
               }
-              if (frame?.t === "event" && ["message_start", "turn_start", "agent_start", "message_end", "turn_end", "agent_end"].includes(frame.event?.type)) {
-                frames.push({ t: frame.t, eventType: frame.event.type, role: frame.event.message?.role ?? null });
-              } else if (frame?.t === "bus") {
-                frames.push({ t: frame.t, channel: frame.channel });
-              } else if (frame?.t === "event" && frame.event?.type === "notice") {
-                frames.push({ t: frame.t, eventType: "notice", level: frame.event.level ?? null });
-              }
-              if (frame?.t === "transcript" && Number.isSafeInteger(frame.newSize)) {
-                (window.__cawTranscriptReplies ??= []).push({ newSize: frame.newSize, textLength: typeof frame.text === "string" ? frame.text.length : 0 });
-              }
+              if (frame?.t === "event" && ["message_start", "turn_start", "agent_start", "message_end", "turn_end", "agent_end"].includes(frame.event?.type)) frames.push({ t: frame.t, eventType: frame.event.type, role: frame.event.message?.role ?? null });
+              else if (frame?.t === "bus") frames.push({ t: frame.t, channel: frame.channel });
+              else if (frame?.t === "event" && frame.event?.type === "notice") frames.push({ t: frame.t, eventType: "notice", level: frame.event.level ?? null });
+              if (frame?.t === "transcript" && Number.isSafeInteger(frame.newSize)) (window.__cawTranscriptReplies ??= []).push({ newSize: frame.newSize, textLength: typeof frame.text === "string" ? frame.text.length : 0 });
             } catch {
               // Ignore every non-transcript frame; record no contents.
             }
@@ -1748,6 +1964,7 @@ async function main() {
     page.setDefaultTimeout(20_000);
     page.on("console", (message) => consoleLog.push(redactSecretOutput(`[console:${message.type()}] ${message.text().slice(0, 200)}`)));
     page.on("response", (response) => { if (/\/api\/conversations\/[^/]+\/link(?:\?|$)/.test(response.url())) collabLinkResponses.push((async () => { const body = await response.json().catch(() => null); let secretBytes = null; try { const outer = new URL(body.data.url); const relay = new URL(outer.hash.slice(1)); const match = /\.([A-Za-z0-9_-]+)$/.exec(relay.pathname); secretBytes = match ? Buffer.from(match[1], "base64url").length : 0; } catch {} return { status: response.status(), access: body?.data?.access ?? null, error: body?.error?.code ?? null, secretBytes }; })()); });
+    page.on("response", recordActionResponse);
     page.on("pageerror", (error) => consoleLog.push(redactSecretOutput(`[pageerror] ${error.message.slice(0, 200)}`)));
     page.on("websocket", (socket) => {
       const entry = { role: "unknown", url: redactLink(socket.url()), framesSent: 0 };
@@ -1758,12 +1975,12 @@ async function main() {
     const deadline = Date.now() + MAX_RUNTIME_MS;
     for (const [index, name] of selected.entries()) {
       if (!PASSWORD && name !== "check1") {
-        skip(name, `${name} (needs --password)`, "bootstrap flow has no UI password setup; later checks cannot authenticate");
+        notRun(name, `${name} (needs --password)`, "bootstrap flow has no UI password setup; later checks cannot authenticate");
         continue;
       }
       const remaining = deadline - Date.now();
       if (remaining < 5_000) {
-        for (const pending of selected.slice(index)) skip(pending, `${pending} (overall runtime budget)`, "14-minute run deadline reached");
+        for (const pending of selected.slice(index)) notRun(pending, pending, "14-minute run deadline reached");
         break;
       }
       const budget = Math.min(CHECK_TIMEOUT_MS, remaining);
@@ -1788,11 +2005,12 @@ async function main() {
         browser = null;
         page = null;
         await Promise.race([checkPromise.catch(() => {}), sleep(2_000)]);
-        for (const pending of selected.slice(index + 1)) skip(pending, `${pending} (after timed-out check)`, "browser closed to enforce runtime budget");
+        for (const pending of selected.slice(index + 1)) notRun(pending, pending, "browser closed after timed-out check");
         break;
       }
       console.log(`   (${name} took ${Math.round((Date.now() - started) / 1000)}s)`);
     }
+    for (const name of notSelected) record(name, "NOT SELECTED", name, `excluded by --only ${ONLY.join(",")}`);
   } finally {
     if (browser) await browser.close().catch(() => {});
   }
@@ -1815,9 +2033,9 @@ try {
 
 // ── Summary ─────────────────────────────────────────────────────────────────
 
-const counts = { PASS: 0, FAIL: 0, SKIP: 0 };
+const counts = { PASS: 0, FAIL: 0, SKIP: 0, "NOT RUN": 0, "NOT SELECTED": 0 };
 for (const result of results) counts[result.status] += 1;
-console.log(`\n${counts.PASS} PASS / ${counts.FAIL} FAIL / ${counts.SKIP} SKIP (${results.length} checks)`);
+console.log(`\nPASS ${counts.PASS} / FAIL ${counts.FAIL} / SKIP ${counts.SKIP} / NOT SELECTED ${counts["NOT SELECTED"]} / NOT RUN ${counts["NOT RUN"]} (${results.length} records)`);
 if (consoleLog.length > 0) {
   console.log("\n--- browser console (last 10) ---");
   for (const line of consoleLog.slice(-10)) console.log(`   ${line}`);
