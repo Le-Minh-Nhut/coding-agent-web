@@ -340,7 +340,7 @@ test.describe("Screenshot inventory & geometry verification", () => {
         const composer = page.locator("textarea.composer-input");
         await expect(composer).toBeVisible();
         await expect.poll(() => host.guestFrames.find((frame) => frame.t === "hello")?.writeToken).toMatch(/^[A-Za-z0-9_-]{22}$/u);
-        await host.send(welcomeFrame(false));
+        await host.send({ ...welcomeFrame(false), state: { ...welcomeFrame(false).state, model: { id: "effective/model", name: "Effective model", provider: "test", contextWindow: 100000 } } });
         await expect(composer).toBeEnabled();
 
         await page.getByText("Conversation model settings").click();

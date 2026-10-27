@@ -145,7 +145,7 @@ export async function openSeededConversation(page: Page): Promise<string> {
 
 /** The link endpoint is the conversation screen's only source of host state. */
 export async function mockConversationLink(page: Page, body: unknown, status = 200): Promise<void> {
-  await page.route("**/api/conversations/*/link", async (route) => {
+  await page.route("**/api/conversations/*/link*", async (route) => {
     await route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
   });
 }
@@ -370,7 +370,7 @@ export async function installMockCollabHost(page: Page, options: { conversationI
       await closeSocket({ code: 4009, reason: "a host is already connected for this room" });
     },
   };
-  await page.route(`**/api/conversations/${options.conversationId}/link`, async (route) => {
+  await page.route(`**/api/conversations/${options.conversationId}/link*`, async (route) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
