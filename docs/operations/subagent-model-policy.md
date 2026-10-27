@@ -39,10 +39,10 @@ lowest thinking level — observed in a session journal as `"thinkingLevel":"low
 
 State the level in the model id (`cx/gpt-6-luna:xhigh`) and do not pass `effort`.
 
-Owner ruling (2026-10-26): delegated work uses `cx/gpt-6-luna:xhigh` or `cx/gpt-6-luna:high`; do not use the `:max` thinking level.
+Owner ruling (2026-10-26): `cx/gpt-6-luna:xhigh` is the ceiling for delegated work; `:high` is also allowed, but the `max` thinking level is prohibited and must never be used.
 
 ## History
 
 History: Gemini-first → Luna-first → Gemini-first again → Luna-first again →
-Luna-default with DeepSeek on bulk review → owner ruling: delegated work uses
-Luna `:xhigh` or `:high`; never `:max`.
+Luna-default with DeepSeek on bulk review → owner ruling: `:xhigh` ceiling;
+`:high` allowed; `max` prohibited.
