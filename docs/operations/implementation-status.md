@@ -305,10 +305,11 @@ All six findings from the round-10 and round-11 independent audits closed at com
 | 5 | `pnpm --filter @caw/server build` | Pass. |
 | 6 | `TMPDIR=$HOME/.cache CAW_E2E_PORT=4489 CAW_RELAY_PORT=8819 npx playwright test --project=chromium --workers=1` | 43 passed (59.9s). |
 | 7 | `node scripts/compat-check.mjs` | 17 ok, 1 warn, 0 fail. This followed `fix(scripts): accept tmux no-server connect error in compat probe`; tmux 3.6 wording `error connecting to /tmp/tmux-1000/default (No such file or directory)` was previously a false FAIL. |
+| 8 | Real OMP acceptance (harness, all checks) | PASS 38 / FAIL 2 / NOT RUN 2; both FAILs are harness artifacts (check9 composer-wait race after backend restart; check14 selects the Main agent card whose transcript is unreadable) — evidence in the audit report |
 
 ### Known gaps
 
-- Real-OMP acceptance and physical-iPhone validation were NOT RUN THIS ROUND; prior acceptance evidence stands. Round 9 had 15 PASS / 2 FAIL; check8 NOT POSSIBLE VIA UI; check12 SKIP precondition; check6 Deny and check14 subagent fixed but not re-run in acceptance. Physical iPhone remains UNVERIFIED.
+- Real-OMP acceptance ran this round: 38 PASS / 2 FAIL (harness artifacts, not product defects — check9a/check9b backend-restart identity and writer-guard therefore unproven this run; check14 subagent transcript view not exercised). Physical iPhone remains UNVERIFIED. Prior round-9 acceptance: 15 PASS / 2 FAIL.
 - Hosted compat job was never dispatched; it remains manual `workflow_dispatch` only.
 - Oversized records still use bounded reads (2 MiB window); they are now honestly flagged instead of silently dropped.
 - No join/adoption of live untracked session; behavior unchanged.

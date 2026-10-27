@@ -25,8 +25,22 @@ Baseline audited commit: `6aaf087df537063aa39112fe28e5765c0f52d0ff` (`origin/mai
 | 6 | `TMPDIR=$HOME/.cache CAW_E2E_PORT=4489 CAW_RELAY_PORT=8819 npx playwright test --project=chromium --workers=1` | 43 passed (59.9s). |
 | 7 | `node scripts/compat-check.mjs` | 17 ok, 1 warn, 0 fail. This followed `fix(scripts): accept tmux no-server connect error in compat probe`; tmux 3.6 wording `error connecting to /tmp/tmux-1000/default (No such file or directory)` was previously a false FAIL. |
 
+## Real-OMP acceptance (round 12)
+
+Full default run: top-level checks check1–check15. Wall time: 190043 ms (~3m10s). Harness: `node scripts/acceptance-ui-drives-agent.mjs --base http://127.0.0.1:8811 --tmp $HOME/.cache/caw-acc-r12 --root $HOME/.cache/caw-acc-r12/roots --password a-12-character-secret`; `TMPDIR=$HOME/.cache`.
+
+`PASS 38 / FAIL 2 / SKIP 0 / NOT SELECTED 0 / NOT RUN 2 (42 records)`.
+
+- NOT RUN (2): “same native journal survives model restart — no journal flushed yet; prompt first; restart not attempted” (pre-prompt restart probe skipped; later real restart coverage passed); “two concurrent chats have distinct writers — NOT POSSIBLE VIA UI: 1 create request(s), overlapping=false” (known check8 limitation, unchanged from prior rounds).
+- FAIL (2), both evidence-verified harness artifacts per triage; product tests stayed green:
+  - check9 — `locator.waitFor: Timeout 45000ms — textarea.composer-input` immediately after backend restart. `startServer` gates readiness on `fetch('/') < 500` only (`scripts/acceptance-ui-drives-agent.mjs:371-380`); `openConversationThroughUi` waits for composer visibility (`:632-636`) while server boot and relay/host reconnect were still settling. Identical navigation in immediately following check10 succeeded. Navigation abort meant check9a/check9b (backend-restart identity and no-second-writer) were NOT proven this run; this check passed in prior-round acceptance runs. Suggested hardening, not applied: gate restart readiness on collab readiness, not composer visibility alone.
+  - check14 — `locator.waitFor: Timeout 60000ms — .modal-content pre code` resolved hidden 122×. Harness selects `.modal-content .card` first (`scripts/acceptance-ui-drives-agent.mjs:1663-1680`), the Main agent card; its transcript was unreadable (server OMP log records ENOENT reading transcript for agentId Main), leaving empty `<code>` hidden by Playwright (`apps/web/src/components/SubagentPanel.tsx:90-93`). Subagent launched: `PASS: subagent conversation launched — conversation=b0ac9e6f… native=01a17e8e-8275… tmux=$5`. Suggested hardening, not applied: select child-agent card, not Main.
+- PASS highlights: prompt reached host exactly once (`guestPromptEntries=1`, matchedShapes `custom_message/collab-prompt`), fixing round-9 duplicate-resend FAIL; check6 approval Deny blocked shell tool; check10 agent restart completed with argv `--resume <journal path>`, journal grew 12175→12710 bytes, restart refused missing-journal 404, no silent `nativeSessionId` replacement; external host reported `ownership=external` and stop refused with 409 `agent_not_running`; read-only view-only guest could not prompt or answer approval; navigation through login after backend restart succeeded on second attempt (R11-03-relevant).
+- Cleanup: owner's OMP-related process count unchanged (5 before/after, same PIDs); owner process count 93 before/after; harness-owned tmux servers on private sockets were gone (`no server running` on both scratch sockets); owner's default tmux server never contacted; server pid 229068 exited.
+- Disclosure: `--help` probe had no help handler and briefly started bootstrap flow; scratch `caw-acc-225388` was removed. Recorded baseline is from after that interrupted probe. Scratch `caw-acc-r12` was retained on failure and is being deleted now (it contained scratch provider-database copy, mode 0600).
+- Screenshot note: 28 modified `docs/assets/screens/*.png` committed in `249b9b5` are regenerated E2E renders with only byte-level churn; `docs/assets/screens/manifest.md` diff is `Generated:` timestamp only, geometry table unchanged. Refreshed deliberately, not reverted.
+
 ## Not run this round
 
-- Real-OMP acceptance was **NOT RUN THIS ROUND**. Prior evidence from round-9/10/11 acceptance runs: round 9 had 15 PASS / 2 FAIL; check8 NOT POSSIBLE VIA UI; check12 SKIP precondition; check6 Deny and check14 subagent were fixed but not re-run in acceptance.
 - Physical-iPhone validation was **NOT RUN THIS ROUND**; physical iPhone remains UNVERIFIED.
 - Hosted compat CI job was not dispatched; it remains manual `workflow_dispatch` only.
