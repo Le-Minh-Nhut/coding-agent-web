@@ -41,7 +41,7 @@ function makeWorld() {
   let nextId = 1;
   let tmuxServerIdentity: string | null = "private-socket:1";
 
-  const events: Array<{ conversationId: string; type: string; payload: unknown }> = [];
+  const events: Array<{ conversationId: string; type: string; payload: unknown; seq: number }> = [];
   const launches: RuntimeLaunchSpec[] = [];
   const kills: string[] = [];
 
@@ -114,8 +114,9 @@ function makeWorld() {
       return next;
     },
     async recordEvent(conversationId, type, payload) {
-      events.push({ conversationId, type, payload });
-      return { conversationId, type, payload };
+      const event = { conversationId, type, payload, seq: events.filter((item) => item.conversationId === conversationId).length + 1 };
+      events.push(event);
+      return event;
     },
   };
 
@@ -936,9 +937,7 @@ describe("supervisor.start", () => {
       conversationId: "c1", name: "caw-c1", cwd: "/tmp/project", resumeSessionPath: "/tmp/expected.jsonl",
     });
 
-    expect(result.hostInstanceId).toBeNull();
-    expect(result.nativeSessionId).toBe("expected-native");
-    expect(result.state).toBe("starting");
+    expect(result.statusDetail).toMatch(/could not be positively matched/i);
   });
 
   it("reports unknown rather than idle when publish registry polling fails", async () => {
@@ -1379,7 +1378,7 @@ describe("supervisor.stop", () => {
 describe("supervisor.reconcile", () => {
   it("adopts a live managed process with its room", async () => {
     const world = makeWorld();
-    world.seed({ id: "c1", state: "starting", tmuxSessionId: "$1", tmuxSessionName: "caw-c1", tmuxPanePid: null, tmuxServerIdentity: "private-socket:1", nativeSessionId: "sess-1" });
+    world.seed({ id: "c1", state: "starting", tmuxSessionId: "$1", tmuxSessionName: "caw-c1", tmuxPanePid: 42, tmuxServerIdentity: "private-socket:1", nativeSessionId: "sess-1" });
     world.tmuxSessions.push({ id: "$1", name: "caw-c1", alive: true, panePid: 42, serverIdentity: "private-socket:1" });
     world.hosts.push({
       instanceId: "inst-1",

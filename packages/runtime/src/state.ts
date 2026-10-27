@@ -54,6 +54,13 @@ export function evaluateState(observations: Observations): StateVerdict {
       detail: observations.tmuxEnumerationReason ?? "The tmux session list could not be read, so the process state is unknown.",
     };
   }
+  if ((!tmux || !tmux.alive) && !host && leaseLive === true) {
+    return {
+      state: "unknown",
+      ownership: "external",
+      detail: "Another process is writing this session, but it is not managed here.",
+    };
+  }
   // We could not read the journal we recorded. That is not "the history is gone":
   // reporting `error` here would claim a data loss we have not observed.
   if (sessionPathExists === "unknown" && hasNativeSession) {
@@ -125,7 +132,7 @@ export function evaluateState(observations: Observations): StateVerdict {
       return {
         state: "unknown",
         ownership: "managed",
-        detail: "The agent process is live but has not published a Collab host; activity is unknown.",
+        detail: observations.hostMatchReason ?? "The agent process is live but has not published a Collab host; activity is unknown.",
       };
     }
     if (host.relayConnected === null) {
@@ -154,17 +161,14 @@ export function evaluateState(observations: Observations): StateVerdict {
     return { state: "idle", ownership: "managed", detail: "No turn in flight." };
   }
 
-  // No tmux session of ours and no host row: nothing is running for this conversation.
-  if (leaseLive !== false) {
+
+  if (leaseLive === "unknown") {
     return {
       state: "unknown",
       ownership: "managed",
-      detail: leaseLive === true
-        ? "Another process is writing this session, but it is not managed here."
-        : "The session writer lease could not be checked, so the live state is unknown.",
+      detail: "The session writer lease could not be checked, so the live state is unknown.",
     };
   }
-
   // We launched a process before and it is gone now. That is a stop or a crash,
   // never a launch in progress — reporting "starting" here would hide a dead agent.
   if (everLaunched) {

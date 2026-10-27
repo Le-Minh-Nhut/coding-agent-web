@@ -202,6 +202,50 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
       return { ok: false, reason: error instanceof Error ? error.message : String(error) };
     }
   }
+  async function matchPublishedHost(
+    hosts: RuntimeHost[],
+    panePid: number | null,
+    expectedSessionId: string | null,
+  ): Promise<{ host: RuntimeHost | null; detail: string | null; uncertain: boolean }> {
+    if (panePid === null) return { host: null, detail: "The published host could not be positively matched because the managed tmux pane PID was not recorded.", uncertain: true };
+    const matched: RuntimeHost[] = [];
+    let lineageUnknown = false;
+    let missingHostPid = false;
+    for (const candidate of hosts) {
+      if (candidate.pid === null) {
+        missingHostPid = true;
+        continue;
+      }
+      let descendant: Tri;
+      try {
+        descendant = await options.adapters.isProcessDescendant(candidate.pid, panePid);
+      } catch {
+        descendant = "unknown";
+      }
+      if (descendant === true) matched.push(candidate);
+      else if (descendant === "unknown") lineageUnknown = true;
+    }
+    if (lineageUnknown || missingHostPid) {
+      return {
+        host: null,
+        detail: missingHostPid
+          ? "A published host has no PID, so its lineage cannot be verified."
+          : "Host process lineage could not be determined from the managed tmux pane.",
+        uncertain: true,
+      };
+    }
+    if (matched.length > 1) return { host: null, detail: "More than one host could be positively matched to the managed tmux pane; identity is ambiguous.", uncertain: true };
+    if (matched.length === 0) return { host: null, detail: "No published host could be positively matched to the managed tmux pane.", uncertain: false };
+    const host = matched[0]!;
+    if (expectedSessionId && host.sessionId !== expectedSessionId) {
+      return {
+        host: null,
+        detail: `The host could not be positively matched: it belongs to native session ${host.sessionId}, not recorded session ${expectedSessionId}.`,
+        uncertain: true,
+      };
+    }
+    return { host, detail: null, uncertain: false };
+  }
 
   /** Read everything we can about a conversation without changing anything. */
   async function observationsFor(conversation: Conversation): Promise<Observations> {
@@ -237,12 +281,24 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
       sessionPathProbe,
     ]);
 
-    const unseen = managedResult.ok
-      ? unobservableManagedProcesses([conversation], managedResult.sessions)[0]
-      : undefined;
+    const managed = managedResult.ok ? managedResult.sessions : [];
+    const unseen = managedResult.ok ? unobservableManagedProcesses([conversation], managed)[0] : undefined;
+    const tmux = findManagedTmux(conversation, managed);
+    let host: RuntimeHost | null = null;
+    let hostMatchReason: string | null = null;
+    let recoveredHost = false;
+    if (hosts.ok && tmux?.alive) {
+      const panePid = conversation.tmuxPanePid !== null && conversation.tmuxPanePid === tmux.panePid ? conversation.tmuxPanePid : null;
+      const match = await matchPublishedHost(hosts.rows, panePid, conversation.nativeSessionId);
+      host = match.host;
+      hostMatchReason = match.detail;
+      recoveredHost = Boolean(match.host);
+    }
     return {
-      tmux: findManagedTmux(conversation, managedResult.ok ? managedResult.sessions : []),
-      host: conversation.nativeSessionId ? hosts.rows.find((row) => row.sessionId === conversation.nativeSessionId) ?? null : null,
+      tmux,
+      host,
+      hostMatchReason,
+      recoveredHost,
       leaseLive,
       sessionPathExists,
       sessionPathReason,
@@ -275,20 +331,29 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
   async function refresh(conversationId: string): Promise<Conversation | null> {
     const conversation = await options.store.getConversation(conversationId);
     if (!conversation) return null;
-    const verdict: StateVerdict = evaluateState(await observationsFor(conversation));
+    const observations = await observationsFor(conversation);
+    const verdict: StateVerdict = evaluateState(observations);
 
     // Only write when something changed: the store is append-only, and a log that
     // grows on every poll is a log nobody can read.
+    const host = observations.recoveredHost ? observations.host : null;
     const unchanged =
       conversation.state === verdict.state &&
       conversation.ownership === verdict.ownership &&
-      conversation.statusDetail === verdict.detail;
+      conversation.statusDetail === verdict.detail &&
+      (!host || (conversation.nativeSessionId === host.sessionId && conversation.hostInstanceId === host.instanceId && conversation.hostGeneration === host.generation));
     if (unchanged) return conversation;
 
     return options.store.updateConversation(conversationId, {
       state: verdict.state,
       ownership: verdict.ownership,
       statusDetail: verdict.detail,
+      ...(host ? {
+        nativeSessionId: host.sessionId,
+        hostInstanceId: host.instanceId,
+        hostGeneration: host.generation ?? conversation.hostGeneration,
+        model: host.model ?? conversation.model,
+      } : {}),
     });
   }
 
@@ -301,25 +366,6 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
       if (header) patch.nativeSessionId = header;
     }
 
-    const tmux = findManagedTmux(conversation, managed);
-    if (tmux && tmux.id !== conversation.tmuxSessionId) {
-      patch.tmuxSessionId = tmux.id;
-      patch.tmuxSessionName = tmux.name;
-    }
-
-    const host = conversation.nativeSessionId
-      ? hosts.find((row) => row.sessionId === conversation.nativeSessionId)
-      : undefined;
-    if (host) {
-      if (host.instanceId !== conversation.hostInstanceId) patch.hostInstanceId = host.instanceId;
-      // A listing that omits the generation is not evidence of a rotation, so it
-      // must not overwrite one we recorded; `null` here means "the CLI did not say".
-      if (host.generation !== null && host.generation !== conversation.hostGeneration) {
-        patch.hostGeneration = host.generation;
-      }
-      if (host.model && host.model !== conversation.model) patch.model = host.model;
-      if (host.sessionId !== conversation.nativeSessionId) patch.nativeSessionId = host.sessionId;
-    }
 
     if (Object.keys(patch).length === 0) return conversation;
     return (await options.store.updateConversation(conversation.id, patch)) ?? conversation;
@@ -358,7 +404,8 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
     let heldKeys: string[] = [];
     let ownershipRetained = false;
     try {
-      const { launched, preexistingInstances } = await withLaunchLock(async () => {
+      let launched!: RuntimeTmuxSession;
+      await withLaunchLock(async () => {
         const conversation = await options.store.getConversation(conversationId);
         if (!conversation) throw new RuntimeFailure("agent_not_running", `Unknown conversation ${conversationId}`);
         // Reserve by the identity of what will actually be written. A recorded
@@ -381,7 +428,6 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
             throw new RuntimeFailure("registry_unreadable", "The OMP Collab registry could not be read.");
           });
           const managedResult = await readManagedTmux();
-          const preexistingInstances = new Set(hosts.map((host) => host.instanceId));
           // Count running agents from what the machine shows *now*, not from what
           // the store last recorded. A stored state goes stale the moment a process
           // exits (crash, manual kill, machine reboot), and since nothing polls in
@@ -459,7 +505,7 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
             throw new RuntimeFailure(verdict.code, verdict.message);
           }
 
-          const launched = await options.adapters.launch({ ...spec, conversationId });
+          launched = await options.adapters.launch({ ...spec, conversationId });
           try {
             const recorded = await options.store.updateConversation(conversationId, {
               tmuxSessionId: launched.id,
@@ -514,16 +560,12 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
             if (!undone) ownershipRetained = true;
             throw error;
           }
-          await options.store.recordEvent(conversationId, "agent.launched", {
-            tmuxSessionId: launched.id,
-            tmuxSessionName: launched.name,
-          });
-          return { launched, preexistingInstances };
         } catch (error) {
           throw error;
         }
+        await options.store.recordEvent(conversationId, "agent.launched", { tmuxSessionId: launched.id, tmuxSessionName: launched.name });
       });
-      return await waitForPublish(conversationId, launched, spec, preexistingInstances);
+      return await waitForPublish(conversationId, launched, spec);
     } finally {
       // Released unless ownership was deliberately retained for a process that
       // really exists: then the reservation is what stops a retry forking the
@@ -533,27 +575,16 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
       }
     }
   }
-
-  /**
-   * Wait for the agent we just launched to publish a room, then record it.
-   *
-   * Adoption is by process lineage: accept only a new host whose PID is a
-   * descendant of the exact tmux pane launched for this conversation. Matching
-   * by working directory or PID order could point the conversation at a stranger's
-   * session when multiple agents share a project tree.
-   *
-   * A timeout is not a failure: the process may be alive but not hosting. We
-   * report exactly that rather than pretending the launch failed.
-   */
+  /** Wait for a newly published host and record it only after positive lineage confirmation. */
   async function waitForPublish(
     conversationId: string,
     launched: RuntimeTmuxSession,
     spec: RuntimeLaunchSpec,
-    preexistingInstances: ReadonlySet<string>,
   ): Promise<Conversation> {
     const deadline = clock.now() + publishTimeoutMs;
     let registryReadable = true;
     let identityUnverified = false;
+    let identityReason: string | null = null;
 
     while (clock.now() < deadline) {
       await clock.sleep(publishPollMs);
@@ -582,36 +613,16 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
           })) ?? conversation
         );
       }
-
-      const published = hosts.filter((row) =>
-        !preexistingInstances.has(row.instanceId) &&
-        row.cwd === spec.cwd &&
-        (!conversation.nativeSessionId || row.sessionId === conversation.nativeSessionId),
-      );
-      const matched: RuntimeHost[] = [];
-      let lineageUnknown = false;
-      if (still.panePid !== null) {
-        for (const candidate of published) {
-          if (candidate.pid === null) {
-            lineageUnknown = true;
-            continue;
-          }
-          let descendant: Tri;
-          try {
-            descendant = await options.adapters.isProcessDescendant(candidate.pid, still.panePid);
-          } catch {
-            descendant = "unknown";
-          }
-          if (descendant === true) matched.push(candidate);
-          else if (descendant === "unknown") lineageUnknown = true;
-        }
-      } else if (published.length > 0) {
-        lineageUnknown = true;
+      const recordedPanePid = conversation.tmuxPanePid !== null && conversation.tmuxPanePid === still.panePid
+        ? conversation.tmuxPanePid
+        : null;
+      const match = await matchPublishedHost(hosts, recordedPanePid, conversation.nativeSessionId);
+      if (match.uncertain) {
+        identityUnverified = true;
+        identityReason = match.detail;
       }
-      if (lineageUnknown || matched.length > 1) identityUnverified = true;
-      // More than one matching room or any undecidable candidate is ambiguous; never choose by cwd or PID order.
-      const host = !lineageUnknown && matched.length === 1 ? matched[0] : undefined;
 
+      const host = match.host;
       if (host) {
         await options.store.recordEvent(conversationId, "agent.hosted", {
           instanceId: host.instanceId,
@@ -622,8 +633,6 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
         return (
           (await options.store.updateConversation(conversationId, {
             hostInstanceId: host.instanceId,
-            // An omitted generation is not a rotation: keep what we had recorded
-            // rather than erasing it with an unknown.
             hostGeneration: host.generation ?? conversation.hostGeneration,
             nativeSessionId: host.sessionId,
             model: host.model ?? conversation.model,
@@ -646,7 +655,7 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
         statusDetail: !registryReadable
           ? "The OMP Collab registry could not be read during startup, so session publication is unknown."
           : identityUnverified
-            ? "The agent is running, but the published host process could not be positively matched to its tmux process."
+            ? identityReason ?? "The agent is running, but the published host process could not be positively matched to its tmux process."
             : "The agent is running, but no Collab host was positively matched to its tmux process before startup timed out.",
       })) ?? latest
     );
@@ -834,6 +843,7 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
         if (leaseLive !== false) {
           await options.store.updateConversation(conversation.id, {
             state: "unknown",
+            ...(leaseLive === true ? { ownership: "external" as const } : {}),
             statusDetail: leaseLive === true
               ? "Another process is writing this session, but it is not managed here."
               : "The session writer lease could not be checked, so the live state is unknown.",

@@ -73,6 +73,10 @@ export interface Observations {
   tmux: RuntimeTmuxSession | null;
   /** The host row matching this conversation's native session, if any. */
   host: RuntimeHost | null;
+  /** Why a published host could not be safely matched to the recorded pane process. */
+  hostMatchReason?: string | null;
+  /** Host positively matched by lineage after its native session id was unknown. */
+  recoveredHost?: boolean;
   /** Whether the native session's writer lease is currently held. */
   leaseLive: Tri;
   /** Whether the journal file we recorded still exists; unknown when it could not be read. */

@@ -193,6 +193,22 @@ describe("evaluateState", () => {
     expect(verdict.state).toBe("unknown");
     expect(verdict.detail).toMatch(/not managed here/i);
   });
+  it("marks a held writer lease external after its host disappears and still blocks launch", () => {
+    const verdict = evaluateState(obs({ leaseLive: true, everLaunched: true, hasNativeSession: true, sessionPathExists: true }));
+    expect(verdict).toEqual({
+      state: "unknown",
+      ownership: "external",
+      detail: "Another process is writing this session, but it is not managed here.",
+    });
+    expect(launchVerdict({ liveTmux: null, host: null, leaseLive: true, activeCount: 0, maxActive: 3 }).allowed).toBe(false);
+  });
+
+  it("keeps stopped and error classifications unchanged when the lease is free", () => {
+    const stopped = evaluateState(obs({ leaseLive: false, everLaunched: true, hasNativeSession: true, sessionPathExists: true }));
+    const error = evaluateState(obs({ leaseLive: false, everLaunched: true, hasNativeSession: true, sessionPathExists: false }));
+    expect(stopped).toMatchObject({ state: "stopped", ownership: "managed" });
+    expect(error).toMatchObject({ state: "error", ownership: "managed" });
+  });
 });
 
 describe("launchVerdict — the duplicate-writer guard", () => {
