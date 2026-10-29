@@ -5,8 +5,9 @@ Symptom-first. Every command here is read-only unless marked.
 ## The app will not start
 
 **`omp not found on PATH`** — the server reports `capability_missing` and refuses
-to launch agents. Install OMP or set `CAW_OMP_PATH` to the binary. Confirm with
-`omp --version`.
+to launch agents. Install OMP (the launch and capability paths resolve `omp` from
+`PATH` and `~/.local/bin`); there is no environment variable to point the server
+at a different agent binary. Confirm with `omp --version`.
 
 **`tmux not found`** — same shape. Without tmux there is no process that outlives
 the browser connection, so the product will not pretend it can keep one alive.
