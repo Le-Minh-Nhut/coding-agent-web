@@ -198,8 +198,12 @@ function displayMessage(entry: SessionEntry): TranscriptMessage | null {
   switch (message.role) {
     case "user":
       return { id: entry.id, identity: entry.id, eventIdentity: messageCorrelation(message), role: "user", text: textFromContent(message.content), source: "entry" };
-    case "assistant":
-      return { id: entry.id, identity: entry.id, eventIdentity: messageCorrelation(message), role: "assistant", text: textFromContent(message.content), source: "entry" };
+    case "assistant": {
+      const content = textFromContent(message.content);
+      const isError = message.stopReason === "error" || message.stopReason === "aborted";
+      const errorText = message.stopReason === "aborted" ? "Assistant response aborted" : message.errorMessage ?? "Assistant response failed";
+      return { id: entry.id, identity: entry.id, eventIdentity: messageCorrelation(message), role: "assistant", text: isError ? `${content}${content ? "\n\n" : ""}${errorText}` : content, isError, source: "entry" };
+    }
     case "toolResult":
       return {
         id: entry.id,
@@ -314,8 +318,12 @@ function liveMessage(message: WireMessage, sequence: number): TranscriptMessage 
   const identity = message.role === "toolResult" ? eventIdentity : `event:${sequence}`;
   const id = `live:${identity}`;
   switch (message.role) {
-    case "assistant":
-      return { id, identity, eventIdentity, role: "assistant", text: textFromContent(message.content), source: "event" };
+    case "assistant": {
+      const content = textFromContent(message.content);
+      const isError = message.stopReason === "error" || message.stopReason === "aborted";
+      const errorText = message.stopReason === "aborted" ? "Assistant response aborted" : message.errorMessage ?? "Assistant response failed";
+      return { id, identity, eventIdentity, role: "assistant", text: isError ? `${content}${content ? "\n\n" : ""}${errorText}` : content, isError, source: "event" };
+    }
     case "user":
       return { id, identity, eventIdentity, role: "user", text: textFromContent(message.content), source: "event" };
     case "developer":

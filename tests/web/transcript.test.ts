@@ -94,6 +94,29 @@ describe("Collab transcript reducer", () => {
     expect(state.messages).toHaveLength(1);
     expect(state.messages[0]).toMatchObject({ id: "entry-42", identity: "entry-42", text: "one response", source: "entry" });
   });
+  it("preserves assistant errors, partial content, and aborts in live and durable rows", () => {
+    const failed: AssistantMessage = { ...message(43, "partial output"), stopReason: "error", errorMessage: "Provider quota exhausted" };
+    const aborted: AssistantMessage = { ...message(44, ""), stopReason: "aborted" };
+    const noReason: AssistantMessage = { ...message(45, ""), stopReason: "error" };
+    let state = apply(createTranscriptState(), { t: "event", event: { type: "message_end", message: failed } });
+    state = apply(state, { t: "event", event: { type: "message_end", message: aborted } });
+    state = apply(state, { t: "event", event: { type: "message_end", message: noReason } });
+    expect(state.messages.map(({ text, isError }) => [text, isError])).toEqual([
+      ["partial output\n\nProvider quota exhausted", true],
+      ["Assistant response aborted", true],
+      ["Assistant response failed", true],
+    ]);
+    const persisted = [failed, aborted, noReason].map((message, index): SessionEntry => ({
+      type: "message", id: `error-${index}`, parentId: null, timestamp: new Date(message.timestamp).toISOString(), message,
+    }));
+    state = apply(createTranscriptState(), welcome(persisted.length));
+    state = apply(state, { t: "snapshot-chunk", entries: persisted, final: true });
+    expect(state.messages.map(({ text, isError }) => [text, isError])).toEqual([
+      ["partial output\n\nProvider quota exhausted", true],
+      ["Assistant response aborted", true],
+      ["Assistant response failed", true],
+    ]);
+  });
 
   it("keeps distinct durable messages with colliding role and millisecond timestamp", () => {
     let state = createTranscriptState();

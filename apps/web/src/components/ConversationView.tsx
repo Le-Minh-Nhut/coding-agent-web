@@ -39,6 +39,8 @@ interface PendingPrompt {
   sent: boolean;
   refusalMessage?: string;
   draftVersion: number;
+  connectionGeneration: number;
+  token: object;
 }
 
 
@@ -67,9 +69,9 @@ export function shouldSubmitOnEnter(
 
 const MessageRow = memo(function MessageRow({ message }: { message: DisplayMessage }) {
   return (
-    <div className={`message-card ${message.role}`}>
-      <div style={{ fontSize: "0.75rem", color: "var(--text-muted)", marginBottom: "4px", textTransform: "capitalize" }}>
-        {message.role} {message.toolName ? `(${message.toolName})` : ""}
+    <div className={`message-card ${message.role}${message.isError ? " error" : ""}`}>
+      <div style={{ fontSize: "0.75rem", color: message.isError ? "var(--danger)" : "var(--text-muted)", marginBottom: "4px", textTransform: "capitalize" }}>
+        {message.role} {message.toolName ? `(${message.toolName})` : ""}{message.isError ? " · error" : ""}
         {message.awaitingHost ? " · sent while active; awaiting host" : ""}
       </div>
       {message.role === "tool" ? (
@@ -106,6 +108,7 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
   const [effectiveModel, setEffectiveModel] = useState<{ conversationId: string; model: string | null } | null>(null);
   const [viewAccessOffer, setViewAccessOffer] = useState<string | null>(null);
   const [linkFailure, setLinkFailure] = useState<string | null>(null);
+  const [roomRetired, setRoomRetired] = useState(false);
   const [linkAccess, setLinkAccess] = useState<"view" | "full" | null>(null);
   const [modelBusy, setModelBusy] = useState(false);
   const [showSubagents, setShowSubagents] = useState(false);
@@ -246,7 +249,7 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     if (frame.t === "entry" || frame.t === "snapshot-chunk" || (frame.t === "event" && frame.event.type === "message_end" && frame.event.message.role === "user")) removeAcknowledgedPrompts();
     if (frame.t === "error") {
       if (frame.message === STARTUP_PROMPT_REFUSAL) {
-        const prompt = pendingPromptRef.current.find((pending) => !pending.refusalMessage);
+        const prompt = pendingPromptRef.current.find((pending) => pending.connectionGeneration === connectionGenerationRef.current && !pending.refusalMessage);
         if (prompt) {
           prompt.refusalMessage = frame.message;
           if (prompt.sent) recoverRefusedPrompt(prompt);
@@ -448,6 +451,7 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     if (!viewActiveRef.current) return;
     const generation = ++connectionGenerationRef.current;
     const isCurrent = () => viewActiveRef.current && connectionGenerationRef.current === generation && conversationIdRef.current === conversationId;
+    setRoomRetired(false);
     setEffectiveModel(null);
     setLinkAccess(null);
     socketRef.current?.close();
@@ -509,9 +513,10 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
       socket.onFrame = (frame) => {
         if (isCurrent() && socketRef.current === socket) handleHostFrameRef.current(frame);
       };
-      socket.onClose = (_reason, willReconnect) => {
+      socket.onClose = (_reason, willReconnect, roomRetired) => {
         if (!isCurrent() || socketRef.current !== socket) return;
         const connection = willReconnect ? "reconnecting" : "disconnected";
+        setRoomRetired(roomRetired === true);
         setStatus(connection);
         transcriptRef.current = setConnectionStatus(transcriptRef.current, connection);
         setTranscript(transcriptRef.current);
@@ -534,6 +539,16 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
   }, [connectToCollab]);
 
 
+  const retryUnavailableConversation = async (): Promise<void> => {
+    const currentId = conversationIdRef.current;
+    const result = await api.getConversation(currentId);
+    if (conversationIdRef.current !== currentId) return;
+    if (result.ok) {
+      setConversation(result.data);
+      setModelDraft(result.data.modelPreference ?? result.data.model ?? "");
+    }
+    await connectToCollab(true);
+  };
   const sendPrompt = (text: string, allowSlashCommand = false): void => {
     const trimmed = text.trim();
     const socket = socketRef.current;
@@ -553,6 +568,7 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     const conversationAtSend = conversationIdRef.current;
     const operationGeneration = operationGenerationRef.current;
     const connectionGeneration = connectionGenerationRef.current;
+    const sendToken = { id: sendId, text: trimmed };
     const hostEchoCount = transcript.messages.filter((message) => message.role === "user" && message.text === trimmed).length;
     const echoAllowance = hostEchoCount + optimisticMessages.filter((message) => message.text === trimmed && hostEchoCount <= (message.hostEchoCount ?? 0)).length;
     const submitted = allowSlashCommand ? text : trimmed;
@@ -564,15 +580,17 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
       sent: false,
       refusalMessage: undefined,
       draftVersion,
+      connectionGeneration,
+      token: sendToken,
     };
     pendingPromptRef.current.push(pendingPrompt);
-    const sendToken = { id: sendId, text: trimmed };
     sendingPromptTextsRef.current.set(trimmed, sendToken);
     sendGuardRef.current = sendToken;
     setSendError(null);
     const startedRunning = status === "running";
     void socket.send({ t: "prompt", text: submitted }).then((sent) => {
       if (sendingPromptTextsRef.current.get(trimmed) === sendToken) sendingPromptTextsRef.current.delete(trimmed);
+      if (!sent) pendingPromptRef.current = pendingPromptRef.current.filter((prompt) => prompt.token !== sendToken);
       if (!viewActiveRef.current || operationGenerationRef.current !== operationGeneration || connectionGenerationRef.current !== connectionGeneration || conversationIdRef.current !== conversationAtSend) return;
       if (sendGuardRef.current === sendToken) sendGuardRef.current = null;
       if (sent) {
@@ -598,7 +616,6 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
         }
         return;
       }
-      pendingPromptRef.current = pendingPromptRef.current.filter((prompt) => prompt !== pendingPrompt);
       setSendError("Socket did not accept prompt. Draft kept; retry when connected.");
     });
   };
@@ -830,11 +847,19 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
       )}
 
       {/* Accessible Status Banners */}
-      {status === "disconnected" && (
+      {status === "disconnected" && !roomRetired && (
         <div className="banner disconnected" role="status">
           <span>Disconnected — Connection lost</span>
           <button type="button" className="ghost" style={{ padding: "2px 8px", fontSize: "0.8rem", color: "#ffffff" }} onClick={() => connectToCollab(true)}>
             Retry
+          </button>
+        </div>
+      )}
+      {roomRetired && (
+        <div className="banner disconnected" role="status">
+          <span>Room retired — reconnect with a fresh link.</span>
+          <button type="button" className="ghost" style={{ padding: "2px 8px", fontSize: "0.8rem", color: "#ffffff" }} onClick={() => void connectToCollab(true)}>
+            Get new link
           </button>
         </div>
       )}
@@ -889,11 +914,11 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
           </>
         ) : linkUnavailable ? (
           <div className="card" style={{ borderColor: "var(--warning)", backgroundColor: "#1e180d" }}>
-            <h4 style={{ color: "var(--warning)", marginBottom: "8px" }}>No live agent to attach to</h4>
+            <h4 style={{ color: "var(--warning)", marginBottom: "8px" }}>{historyLive ? "Live host available" : "Live host unavailable"}</h4>
             <p style={{ fontSize: "0.9rem", color: "var(--text-muted)", marginBottom: "12px" }}>
-              {historyLive ? "This session is live. Open the live view to read it." : historyLoading ? "Checking for a saved transcript…" : historyError ?? "There is currently no active host agent process running for this conversation."}
+              {historyLive ? "This session is live. Open the live view to read it." : historyLoading ? "Checking for a saved transcript…" : historyError ?? "Host presence is not yet verified. No saved transcript is available; retry to check for a live host."}
             </p>
-            {historyLive && <button type="button" className="primary" onClick={() => void connectToCollab(true)}>Open live view</button>}
+            {(historyLive || !historyLoading) && <button type="button" className="primary" onClick={() => void retryUnavailableConversation()}>{historyLive ? "Open live view" : "Retry"}</button>}
             {attachInfo?.command ? (
               <div>
                 <span style={{ fontSize: "0.8rem", color: "var(--text-muted)" }}>How to attach in terminal:</span>

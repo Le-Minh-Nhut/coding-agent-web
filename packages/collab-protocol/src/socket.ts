@@ -30,7 +30,7 @@ export class CollabSocket {
   onOpen?: () => void;
   onFrame?: (frame: HostFrame, fromPeer: number) => void;
   onControl?: (msg: RelayControlMessage) => void;
-  onClose?: (reason: string, willReconnect: boolean) => void;
+  onClose?: (reason: string, willReconnect: boolean, roomRetired?: boolean) => void;
 
   readonly #opts: CollabSocketOptions;
   #role: "host" | "guest";
@@ -174,8 +174,14 @@ export class CollabSocket {
     if (this.#closed) return;
     const fatalReason = RELAY_CLOSE_REASONS[code];
     const closeReason = fatalReason ?? (reason || `connection lost (code ${code})`);
-    const retryRoom =
-      this.#role === "guest" && (code === 4001 || (code === 4004 && this.#retryMissingRoom));
+    const retryRoom = this.#role === "guest" && code === 4001;
+
+    if (this.#role === "guest" && code === 4004 && this.#retryMissingRoom) {
+      this.#closed = true;
+      this.#retryMissingRoom = false;
+      this.onClose?.(closeReason, false, true);
+      return;
+    }
 
     if (retryRoom) {
       this.#retryMissingRoom = true;
