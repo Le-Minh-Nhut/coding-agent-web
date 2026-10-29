@@ -192,4 +192,30 @@ describe("round14/15 web regressions", () => {
     await act(async () => { pending[1]!.resolve({ ok: true, data: { ...projects[1]!, favorite: true } }); });
     expect(card("B").queryByTitle("Unstar")).not.toBeNull();
   });
+
+  it("V15 favorite overlay: a star settling mid-reload must not drop a rename from the list", async () => {
+    const base = { id: "A", label: "A", path: "/work/A", favorite: false, conversationCount: 0, lastActivityAt: null, createdAt: "", updatedAt: "" };
+    const renamed = { ...base, label: "A renamed" };
+    const listDeferred: Array<(value: ApiResult<ProjectWithStats[]>) => void> = [];
+    let finishFavorite!: (value: ApiResult<ProjectWithStats>) => void;
+    vi.mocked(api.listProjects).mockResolvedValueOnce({ ok: true, data: [base] })
+      .mockImplementation(() => new Promise((resolve) => { listDeferred.push(resolve); }));
+    vi.mocked(api.updateProject).mockImplementation((_id, patch) => patch.favorite !== undefined
+      ? new Promise((resolve) => { finishFavorite = resolve; }) as never
+      : Promise.resolve({ ok: true, data: renamed }));
+    await act(async () => { render(<ProjectsView onSelectProject={() => {}} onOpenSettings={() => {}} />); });
+    const card = () => within(screen.getByText("/work/A").closest(".card")! as HTMLElement);
+
+    fireEvent.click(card().getByTitle("Star"));
+    fireEvent.click(card().getByRole("button", { name: "Rename" }));
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "A renamed" } });
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Save" })); });
+    // The star settles while the reload is still in flight. The snapshot predates
+    // the star (favorite:false) but is the only carrier of the rename, so it must
+    // land with the star column overlaid, not be dropped whole.
+    await act(async () => { finishFavorite({ ok: true, data: { ...base, favorite: true } }); });
+    await act(async () => { listDeferred[0]!({ ok: true, data: [renamed] }); });
+    expect(screen.getByText("A renamed")).not.toBeNull();
+    expect(card().queryByTitle("Unstar")).not.toBeNull();
+  });
 });

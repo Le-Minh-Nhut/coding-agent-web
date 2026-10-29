@@ -28,6 +28,8 @@ export function ProjectsView({ onSelectProject, onOpenSettings }: ProjectsViewPr
   const favoriteIntentRef = useRef<Map<string, { desired: boolean; base: boolean }>>(new Map());
   /** Bumped whenever a favorite response is applied; a list request started before that carries a stale star column. */
   const favoriteEpochRef = useRef(0);
+  /** Star values actually applied per project, so a stale list snapshot keeps the fresh star column. */
+  const favoriteValueRef = useRef<Map<string, boolean>>(new Map());
   /** Orders list requests so an older snapshot cannot replace a newer one. */
   const listSeqRef = useRef(0);
   const [creating, setCreating] = useState(false);
@@ -48,11 +50,14 @@ export function ProjectsView({ onSelectProject, onOpenSettings }: ProjectsViewPr
     const epoch = favoriteEpochRef.current;
     const res = await api.listProjects();
     setLoading(false);
-    // Drop a superseded snapshot, and a snapshot taken before a favorite settled
-    // (its star column is stale and must not revert what the PATCH applied).
-    if (seq !== listSeqRef.current || epoch !== favoriteEpochRef.current) return;
+    // Drop a superseded snapshot. A snapshot taken before a favorite settled still
+    // carries the rest of the list (create/rename/delete results), so keep it and
+    // overlay the star column with the values the favorite path last applied.
+    if (seq !== listSeqRef.current) return;
     if (res.ok) {
-      setProjects(res.data);
+      setProjects(epoch === favoriteEpochRef.current
+        ? res.data
+        : res.data.map((p) => ({ ...p, favorite: favoriteValueRef.current.get(p.id) ?? p.favorite })));
     } else {
       setError(res.error.message);
     }
@@ -80,6 +85,7 @@ export function ProjectsView({ onSelectProject, onOpenSettings }: ProjectsViewPr
     favoriteAppliedSeqRef.current.set(project.id, seq);
     if (res.ok) {
       favoriteEpochRef.current++;
+      favoriteValueRef.current.set(project.id, res.data.favorite);
       setProjects((prev) => prev.map((p) => (p.id === project.id ? { ...p, favorite: res.data.favorite } : p)));
     } else setError(res.error.message);
   };
