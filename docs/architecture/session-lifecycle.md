@@ -183,16 +183,33 @@ journal is a local, owner-writable file, so this is accepted rather than
 defended against. The store re-verifies each row at delete time and drops only
 those that still read process-free, so a conversation restarted between the
 observation and the delete is refused rather than deleted out from under its new
-process. Because a row whose launch is reserved but has not yet recorded its
-process reads exactly like a never-launched row, the caller's launch-reservation
-predicate is consulted *inside* the queued delete, after the request's own awaits.
-`start()` registers that reservation eagerly and synchronously, before its first
-`await`, so a launch that has begun at any point during the request is already
-visible when the predicate runs, and the delete refuses instead of dropping the
-only pointer to a starting process. The equivalent guarantee on the write side is
-that the reservation is released on every exit of `start()` — the early
-not-found throw, a refusal, a failed launch, an exception from the journal — with
-one deliberate exception, below.
+process.
+
+A row whose launch is reserved but has not yet recorded its process reads exactly
+like a never-launched row (`starting`, no identity), so the re-read alone cannot
+tell them apart. That reservation is therefore **owned by the store**, not by the
+supervisor: `reserveLaunch` (taken by `start()` before it calls any adapter) and
+the queued delete are both sections of the store's **single** operation queue, so
+exactly one of them commits first and each sees the other:
+
+| Order | What happens |
+| --- | --- |
+| reserve, then delete | the delete's queued section finds the reservation and refuses with `has_conversations`; nothing is written |
+| delete, then reserve | the row is already gone, `reserveLaunch` returns `false`, and `start()` throws `agent_not_running` **before any adapter call** — no process exists, so there is nothing to strand |
+
+Both orderings are deterministic, and there is no third: with one queue there is
+no window in which the delete's check has run and the commit has not, so the
+earlier shape (a reservation registered under a supervisor-local mutex, re-checked
+just before the write syscall) is gone, and with it the one-syscall window it
+could not close. The equivalent guarantee on the write side is that the
+reservation is released on every exit of `start()` — the early not-found throw, a
+refusal, a failed launch, an exception from the journal — with one deliberate
+exception, below.
+
+`isLaunchReserved` is a non-queued read, used by observers (the DELETE route's
+own pre-check, `supervisor.isLaunching`). A stale answer there is harmless: it can
+only make the caller ask a question that the authoritative queued check — inside
+`deleteProject` — answers for real.
 
 ### A retained launch reservation
 

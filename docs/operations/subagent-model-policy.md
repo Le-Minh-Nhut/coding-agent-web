@@ -5,26 +5,28 @@ several times during the project and an unrecorded reversal gets re-litigated.
 
 ## Current priority
 
+**Temporary policy (2026-10-30): every lane routes to `cx-cap/wdb/deepseek-ai/DeepSeek-V4.1-Flash:high`.**
+Banned models may remain listed in the catalog/`models.yml` and as
+`retry.fallbackChains` keys, but nothing routes to them — every fallback target
+is `cx-cap/…` or `wdb/…` DeepSeek. Revert path: `~/.omp/agent/config.yml.bak-20261029-r17`
+(previous state) or `-r14` (older).
+
 | Priority | Agent definition | Model | Use for |
 | --- | --- | --- | --- |
-| 1 | `caw-luna`, `caw-luna-scout` | `cx/gpt-6-luna:high` | Everything else, including reading images. Luna remains the image reader; never give images to DeepSeek. |
-| 2 | `caw-deepseek` | `wdb/deepseek-ai/DeepSeek-V4.1-Flash:high` | Long-horizon or token-heavy reviews: whole-file audits, multi-file independent reviews, full test inventories, regression sweeps, bulk doc-consistency passes, and second-opinion passes. |
-| 3 | `caw-gemini` | — | Prohibited; quota exhausted. |
+| 1 | all delegated agents | `cx-cap/wdb/deepseek-ai/DeepSeek-V4.1-Flash:high` | Everything, including image reading. |
+| 2 | `caw-gemini`, `caw-luna` lanes | — | Prohibited this round; quota exhausted. |
 
-### Why Luna remains default, DeepSeek handles bulk review
+### Why all lanes are DeepSeek (temporary)
 
-The owner's Gemini quota is exhausted. Do not use Gemini until the owner
-restores quota. Long-horizon review runs are dominated by reading volume rather
-than hard reasoning, and Luna's quota/throughput is the scarce resource. Route
-that bulk reading to DeepSeek, the cheap, high-capacity lane; keep Luna for all
-other work and all image reading.
+The owner's Gemini quota is exhausted and GPT/Gemini lanes are banned this round.
+Everything — including bulk reading and image inspection — routes to the
+`cx-cap` DeepSeek lane. Revert when the owner restores quota (see revert path above).
 
 ## Image reading
 
-The main agent must never put image bytes in its own context. Screenshot
-inspection is always delegated to `caw-luna` / `caw-luna-scout`. If Luna refuses
-an image payload, say so plainly rather than silently falling back to Gemini;
-Gemini cannot run while its quota is exhausted.
+Image bytes are still never placed in the main agent's context; screenshot
+inspection is delegated. This round the delegate runs on
+`cx-cap/wdb/deepseek-ai/DeepSeek-V4.1-Flash:high`.
 
 
 ## Effort: never pass the coarse `effort` hint
@@ -37,11 +39,14 @@ range is `minimal,low,medium,high`, `effort: "med"` resolves to index
 `(4-1)>>1 = 1` = **`low`**. So a "medium" hint silently downgrades a worker to its
 lowest thinking level — observed in a session journal as `"thinkingLevel":"low"`.
 
-State the level in the model id (`cx/gpt-6-luna:high`) and do not pass `effort`.
+State the level in the model id (`cx-cap/wdb/deepseek-ai/DeepSeek-V4.1-Flash:high`) and do not pass `effort`.
 
-Owner ruling (2026-10-29): GPT subagents and vision use `:high`; never use `:xhigh` or `:max` for them. Gemini is prohibited while its quota is exhausted. Subagent/delegated workers (including coordinator-spawned sessions) resolve to `modelRoles.task` and run `:high`; never `:xhigh`/`:max` for GPT subagents; Gemini prohibited.
+Owner ruling (2026-10-30): all subagent/vision/delegated lanes route to
+`cx-cap/wdb/deepseek-ai/DeepSeek-V4.1-Flash:high` at `:high`; GPT (`gpt-6-luna`) and
+Gemini lanes are prohibited this round (quota exhausted). Delegated workers
+resolve to `modelRoles.task`; never `:xhigh`/`:max`.
 
 ## History
 
 History: Gemini-first → Luna-first → Gemini-first again → Luna-first again →
-Luna-default with DeepSeek on bulk review → owner ruling: GPT subagents and vision at `:high`; Gemini prohibited; delegated workers resolve to `modelRoles.task`.
+Luna-default with DeepSeek on bulk review → owner ruling (2026-10-29): GPT subagents and vision at `:high`; Gemini prohibited; delegated workers resolve to `modelRoles.task` → **owner ruling (2026-10-30): temporary all-DeepSeek (`cx-cap`) policy; GPT and Gemini lanes banned; revert via `config.yml.bak-20261029-r17` / `-r14`.**
