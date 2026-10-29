@@ -170,13 +170,49 @@ files. Once every conversation is verified stopped, their rows are removed with
 the project, so a folder re-added later can offer its native sessions again
 rather than hiding them behind a row that points at a deleted project.
 
-The removal is one journal write: the conversation rows and the project row land
-together or not at all, so a failed delete leaves every row in place for a retry.
-The store re-verifies each row at delete time and drops only those that still
-read process-free, so a conversation restarted between the observation and the
-delete is refused rather than deleted out from under its new process.
-A `conversation-delete` row also drops that conversation's event and command rows
-on replay — they have no parent left — so the log does not accumulate orphans.
+The removal is one journal record — `project-cascade-delete`, carrying the
+project id and every conversation id it drops — so the whole cascade is
+all-or-nothing on replay: a torn write is a truncated line at EOF, never "some
+children gone, project still here". A file written before that record existed
+still replays, because the older `conversation-delete` and `project-delete` rows
+are still honored. The `conversationIds` in that record are trusted: a
+hand-edited journal could name another project's conversation and drop it on
+replay. The blast radius is metadata only — the native session file on disk is
+never touched, so the conversation can be re-added from its folder — and the
+journal is a local, owner-writable file, so this is accepted rather than
+defended against. The store re-verifies each row at delete time and drops only
+those that still read process-free, so a conversation restarted between the
+observation and the delete is refused rather than deleted out from under its new
+process. Because a row whose launch is reserved but has not yet recorded its
+process reads exactly like a never-launched row, the caller's launch-reservation
+predicate is consulted *inside* the queued delete, after the request's own awaits.
+`start()` registers that reservation eagerly and synchronously, before its first
+`await`, so a launch that has begun at any point during the request is already
+visible when the predicate runs, and the delete refuses instead of dropping the
+only pointer to a starting process. The equivalent guarantee on the write side is
+that the reservation is released on every exit of `start()` — the early
+not-found throw, a refusal, a failed launch, an exception from the journal — with
+one deliberate exception, below.
+
+### A retained launch reservation
+
+If a launch created a process it could not record *and* could not kill (the
+guarded kill failed, or the pane process could not be confirmed gone), the
+reservation is deliberately **retained**: releasing it would let a retry launch a
+second writer onto a session something is already writing. Retention is
+conversation-scoped in memory and has no in-process release path — `stop` does
+not clear it, a retry is refused by the same key, and the DELETE above refuses
+while it is held. So a conversation in this state stays unstartable and
+undeletable until the process is accounted for and the backend restarts (the
+reservation set is in-memory; `reconcile` then re-reads the machine). Nothing
+kills the process automatically, by design: killing a process we could not
+attribute is exactly the destructive guess this codebase refuses to make. This is
+a known, operator-recoverable state, not a bug: the row records the tmux identity
+and server identity it could not record, and the `agent.launch_unrecorded` event
+carries them.
+A `conversation-delete` or `project-cascade-delete` row also drops the affected
+conversations' event and command rows on replay — they have no parent left — so
+the log does not accumulate orphans.
 
 ## Explicitly refused behaviours
 
