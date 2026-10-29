@@ -84,7 +84,7 @@ const OMP_PID_LOG = join(TMP, "omp-processes.jsonl");
 const SERVER_LOG = join(TMP, "server-output.log");
 let realOmpBinary = null;
 let modelCatalog = null;
-let excludedGeminiModelCount = 0;
+let excludedModelCount = 0;
 const PASSWORD = argValue("--password", null);
 const BOOTSTRAP = hasFlag("--bootstrap") || !PASSWORD;
 const KEEP_TMP = hasFlag("--keep-tmp");
@@ -203,7 +203,10 @@ function agentEnv() {
   };
 }
 
-const isGeminiModel = (selector) => selector.split("/").some((segment) => segment.toLowerCase().includes("gemini"));
+// Models the harness must never select: Gemini is prohibited by policy, and the
+// GPT lanes are banned by the owner and currently broken provider-side
+// (cx/gpt-6-luna verified failing), so every `gpt*` selector is excluded too.
+const isExcludedModel = (selector) => /gemini|gpt/i.test(selector);
 
 async function prepareOmpIsolation() {
   await mkdir(TMP, { recursive: true, mode: 0o700 });
@@ -271,16 +274,16 @@ async function prepareOmpIsolation() {
     const selectors = Array.isArray(catalog?.models)
       ? catalog.models.flatMap((row) => row?.selector === `${row?.provider}/${row?.id}` ? [row.selector] : [])
       : null;
-    excludedGeminiModelCount = selectors?.filter(isGeminiModel).length ?? 0;
-    modelCatalog = selectors?.filter((selector) => !isGeminiModel(selector)) ?? null;
+    excludedModelCount = selectors?.filter(isExcludedModel).length ?? 0;
+    modelCatalog = selectors?.filter((selector) => !isExcludedModel(selector)) ?? null;
   } catch {
     modelCatalog = null;
   }
-  console.log(`OMP wrapper model preflight: total=${modelCatalog === null ? "invalid" : modelCatalog.length + excludedGeminiModelCount} nonGemini=${modelCatalog?.length ?? "invalid"} selectedNonGemini=${modelCatalog?.[0] ?? "none"} geminiExcluded=${excludedGeminiModelCount}`);
-  if (!modelCatalog?.length && !excludedGeminiModelCount) {
+  console.log(`OMP wrapper model preflight: total=${modelCatalog === null ? "invalid" : modelCatalog.length + excludedModelCount} nonExcluded=${modelCatalog?.length ?? "invalid"} selectedNonExcluded=${modelCatalog?.[0] ?? "none"} excluded=${excludedModelCount}`);
+  if (!modelCatalog?.length && !excludedModelCount) {
     throw new Error(`isolated OMP model preflight failed; config lookup: ${OMP_AGENT_DIR}/{config.yml,models.yml}`);
   }
-  if (!modelCatalog?.length) skip("preflight-model-catalog", "safe model availability", `catalog contains only Gemini models (${excludedGeminiModelCount}); model-dependent checks will SKIP`);
+  if (!modelCatalog?.length) skip("preflight-model-catalog", "safe model availability", `catalog contains only excluded models (Gemini/GPT) (${excludedModelCount}); model-dependent checks will SKIP`);
 }
 
 async function run(cmd, args, options = {}) {
@@ -432,7 +435,13 @@ async function writeConfig() {
     relayPort: RELAY_PORT,
     stateDir: STATE_DIR,
     allowedRoots: [ROOT],
-    maxActiveAgents: 4,
+    // The scenario keeps several writers live at once: the main chat, the
+    // approval chat, check8's two concurrent race chats, the resumed writer and
+    // the check14 subagent chat. Round 12 stayed under 4 only because its check8
+    // returned early without creating anything; this scratch ceiling is raised so
+    // the app's own limit (proven to refuse with `conflict_limit`) is not what
+    // decides a check's outcome.
+    maxActiveAgents: 8,
     relayAllowedOrigins: [BASE],
     logLevel: process.env.CAW_LOG_LEVEL ?? "warn",
   };
@@ -637,6 +646,31 @@ async function openConversationThroughUi(conversationId, projectId = state.proje
 }
 
 /**
+ * Round-12 gap: `startServer` gates readiness on `GET /` only, so right after a
+ * backend restart the composer could be missing while the Collab host had not
+ * yet re-published its room, and `openConversationThroughUi` timed out waiting
+ * for `textarea.composer-input`. The app's own readiness signal is the Collab
+ * registry's `relayConnected` flag, which the server already exposes per native
+ * session as `hasCollabHost` (`apps/server/src/app.ts:256`) — the same flag the
+ * UI's link-mint path reads before it renders the composer. `/api/capabilities`
+ * is behind `protectedHook` (401 without a session), so this probe runs AFTER
+ * login and gates on BOTH the authenticated capabilities endpoint and the
+ * conversation's session reporting a connected Collab host. It is read-only: it
+ * never mints a room, so polling it cannot create throwaway rooms.
+ */
+async function waitForCollabReadiness(projectId, nativeSessionId, timeout = 45_000) {
+  await waitFor("authenticated capabilities after restart", async () => {
+    const probe = await api(page, "/api/capabilities");
+    return probe.status === 200 ? true : null;
+  }, { timeout, interval: 500 });
+  await waitFor("conversation's Collab host to reconnect after restart", async () => {
+    const response = await api(page, `/api/projects/${projectId}/sessions`);
+    const sessions = response.body?.data ?? [];
+    return sessions.some((session) => session.sessionId === nativeSessionId && session.hasCollabHost === true) ? true : null;
+  }, { timeout, interval: 500 });
+}
+
+/**
  * Create a chat with the UI's own button. Returns the conversation the app
  * created: the UI navigates into it, so we diff the project's list against the
  * ids we already know rather than trusting a position.
@@ -661,7 +695,7 @@ async function chooseModelForRestart(conversation) {
     return { chosen, catalogCount: models.length };
   }
   const chosen = conversation?.modelPreference ?? conversation?.model;
-  if (!chosen || isGeminiModel(chosen)) throw new Error(`safe model catalog is empty; refusing Gemini model: ${chosen ?? "no current model ID"}`);
+  if (!chosen || isExcludedModel(chosen)) throw new Error(`safe model catalog is empty; refusing excluded (Gemini/GPT) model: ${chosen ?? "no current model ID"}`);
   await customModel.fill(chosen);
   return { chosen, catalogCount: 0 };
 }
@@ -805,10 +839,6 @@ async function assistantTranscriptRows() {
   return page.locator(".message-card.assistant .message-content").allInnerTexts();
 }
 
-async function toolTranscriptText() {
-  return (await page.locator(".message-card.tool").allInnerTexts()).join("\\n");
-}
-
 // ── Checks ──────────────────────────────────────────────────────────────────
 
 const state = {
@@ -914,7 +944,7 @@ const checks = {
   async check3() {
     section("check3 model preference, effective model, Save & restart");
     if (!modelCatalog?.length) {
-      skip("check3", "model preference and restart", `isolated catalog has only Gemini models (${excludedGeminiModelCount}); restart not attempted`);
+      skip("check3", "model preference and restart", `isolated catalog has only excluded models (Gemini/GPT) (${excludedModelCount}); restart not attempted`);
       return;
     }
     const conversation = await conversationOf(state.conversationId);
@@ -925,12 +955,12 @@ const checks = {
     const dropdown = page.locator("select#conversation-model");
     let chosen;
     if (!(await dropdown.count())) {
-      notRun("check3", "non-Gemini model selection", "filtered catalog exists but #conversation-model is unavailable; refusing custom model launch");
+      notRun("check3", "non-excluded model selection", "filtered catalog exists but #conversation-model is unavailable; refusing custom model launch");
       return;
     }
     chosen = models.find((model) => model !== conversation?.model) ?? models[0];
     await dropdown.selectOption(chosen);
-    pass("check3-dropdown", "non-Gemini model selected from isolated catalog", `catalog=${models.length} select#conversation-model=${chosen}`);
+    pass("check3-dropdown", "model selected from isolated catalog outside the excluded lanes", `catalog=${models.length} select#conversation-model=${chosen}`);
     const before = { preference: conversation?.modelPreference ?? null, effective: conversation?.model ?? null };
     await page.locator("button", { hasText: "Save model" }).first().click();
     await waitFor("model preference saved", async () => {
@@ -1141,12 +1171,19 @@ const checks = {
     }
     pass("check6a", "approval dialog appears", `title=${(await card.locator("p").first().innerText().catch(() => "")).slice(0, 120)}`);
 
-    const beforeApprove = await toolTranscriptText();
     const approveButton = card.locator("button").filter({ hasNotText: /deny|reject|decline|refuse|disallow|cancel/i }).first();
     await approveButton.click();
     await waitFor("approved tool result", async () => {
-      const text = await toolTranscriptText();
-      return text.length > beforeApprove.length && text.includes(approveMarker) ? text : null;
+      // `approveMarker` also appears in the pending row's pretty printed command
+      // JSON, so presence alone is not proof. Require a tool row that shows the
+      // marker and has left its running state; a length comparison is no good
+      // because the finished row replaces the JSON with the (shorter) result.
+      const rows = await page.locator(".message-card.tool").all();
+      for (const row of rows) {
+        const text = (await row.textContent()) ?? "";
+        if (text.includes(approveMarker) && !/Running…/.test(text)) return text;
+      }
+      return null;
     }, { timeout: 90_000 });
     pass("check6b", "Approve lets the shell tool run", `tool transcript contains ${approveMarker}`);
 
@@ -1171,7 +1208,8 @@ const checks = {
         for (const row of await rows.all()) {
           const summary = await row.locator("details > summary").innerText().catch(() => "");
           if (!summary || /\(Running…\)/.test(summary)) continue;
-          results.push(await row.locator(".message-content").innerText().catch(() => ""));
+          // textContent, not innerText: a finished tool row's <details> is collapsed.
+          results.push((await row.locator(".message-content").textContent().catch(() => "")) ?? "");
         }
         const freshResults = results.slice(beforeDenyRows);
         if (freshResults.length) return { kind: "tool-result", text: freshResults.join("\n") };
@@ -1234,41 +1272,71 @@ const checks = {
     const tmuxBefore = new Set((await tmuxSessions(TMUX_SOCKET)).map((session) => session.id));
     await page.locator('button[title="Back"]').first().click();
     await page.locator("h3", { hasText: "Conversations" }).first().waitFor({ timeout: 15_000 });
-    const createButton = page.locator("button", { hasText: "+ New chat" }).first();
+    // Round-12 gap: two clicks in ONE page are one UI, so the app's own
+    // double-submit guard (`creating` in ProjectDetailView.tsx:60-61) collapses
+    // them and only one create request ever leaves the browser. Two independent
+    // Playwright contexts on the same origin are two real users, which is the
+    // condition under which the backend's per-session reservation has to hold.
+    const secondContext = await browser.newContext({
+      viewport: { width: 390, height: 844 },
+      deviceScaleFactor: 2,
+      isMobile: true,
+      hasTouch: true,
+    });
+    const secondPage = await secondContext.newPage();
+    secondPage.setDefaultTimeout(20_000);
     const createRequests = [];
-    const createRequest = (request) => {
+    const trackCreate = (source) => (request) => {
       if (request.method() !== "POST" || new URL(request.url()).pathname !== `/api/projects/${state.projectId}/conversations`) return;
-      createRequests.push({ request, startedAt: Date.now(), settledAt: null });
+      createRequests.push({ source, request, startedAt: Date.now(), settledAt: null });
     };
-    const settleCreateRequest = (request) => {
+    const settleCreate = (request) => {
       const record = createRequests.find((item) => item.request === request);
       if (record) record.settledAt = Date.now();
     };
-    page.on("request", createRequest);
-    page.on("requestfinished", settleCreateRequest);
-    page.on("requestfailed", settleCreateRequest);
+    // Each context gets its own cookie jar and its own session, so neither page's
+    // double-submit guard can see the other's click.
+    const openProjectInContext = async (targetPage) => {
+      await targetPage.goto(BASE, { waitUntil: "domcontentloaded" });
+      const passwordInput = targetPage.locator("input[type=password]");
+      await passwordInput.waitFor({ state: "visible", timeout: 20_000 });
+      await passwordInput.fill(PASSWORD);
+      await targetPage.locator("form button[type=submit]").first().click();
+      await targetPage.locator("text=Projects").first().waitFor({ state: "visible", timeout: 20_000 });
+      await targetPage.locator(".card", { hasText: `Acceptance ${MARKER}` }).first().click();
+      await targetPage.locator("h3", { hasText: "Conversations" }).first().waitFor({ timeout: 15_000 });
+    };
+    let overlappingRequests = false;
+    let newIds = [];
     try {
-      const firstCreate = createButton.click({ noWaitAfter: true }).catch(() => null);
-      const secondCreate = createButton.click({ noWaitAfter: true }).catch(() => null);
-      await Promise.all([firstCreate, secondCreate]);
+      await openProjectInContext(secondPage);
+      for (const [targetPage, source] of [[page, "A"], [secondPage, "B"]]) {
+        const handler = trackCreate(source);
+        targetPage.on("request", handler);
+        targetPage.on("requestfinished", settleCreate);
+        targetPage.on("requestfailed", settleCreate);
+      }
+      // Fire both clicks without awaiting either, so the two POSTs leave the
+      // browser as close to simultaneously as the event loops allow.
+      const clickA = page.locator("button", { hasText: "+ New chat" }).first().click({ noWaitAfter: true }).catch(() => null);
+      const clickB = secondPage.locator("button", { hasText: "+ New chat" }).first().click({ noWaitAfter: true }).catch(() => null);
+      await Promise.all([clickA, clickB]);
       await waitFor("near-simultaneous conversation requests to settle", async () => {
-        if (!createRequests.length || createRequests.some((request) => request.settledAt === null)) return null;
+        if (createRequests.length < 2 || createRequests.some((request) => request.settledAt === null)) return null;
         const lastSettled = Math.max(...createRequests.map((request) => request.settledAt));
         return Date.now() - lastSettled >= 750 ? true : null;
       }, { timeout: 30_000 }).catch(() => null);
+      overlappingRequests = createRequests.some((first, index) => createRequests.slice(index + 1).some((second) => first.startedAt < second.settledAt && second.startedAt < first.settledAt));
+      const ids = await waitFor("conversation creation requests settle", async () => {
+        const current = await projectConversationIds();
+        return current.filter((id) => !idsBefore.includes(id)).length > 0 ? current : null;
+      }, { timeout: 30_000 }).catch(() => idsBefore);
+      newIds = ids.filter((id) => !idsBefore.includes(id));
     } finally {
-      page.off("request", createRequest);
-      page.off("requestfinished", settleCreateRequest);
-      page.off("requestfailed", settleCreateRequest);
+      await secondContext.close().catch(() => {});
     }
-    const overlappingRequests = createRequests.some((first, index) => createRequests.slice(index + 1).some((second) => first.startedAt < second.settledAt && second.startedAt < first.settledAt));
-    const ids = await waitFor("conversation creation requests settle", async () => {
-      const current = await projectConversationIds();
-      return current.filter((id) => !idsBefore.includes(id)).length > 0 ? current : null;
-    }, { timeout: 30_000 }).catch(() => idsBefore);
-    const newIds = ids.filter((id) => !idsBefore.includes(id));
     if (createRequests.length < 2 || !overlappingRequests || newIds.length < 2) {
-      notRun("check8-race", "two concurrent chats have distinct writers", `NOT POSSIBLE VIA UI: ${createRequests.length} create request(s), overlapping=${overlappingRequests}, newConversations=${newIds.length}, conversationIds=${newIds.join(",") || "none"}; UI did not issue two overlapping create requests`);
+      notRun("check8-race", "two concurrent chats have distinct writers", `NOT POSSIBLE VIA UI: ${createRequests.length} create request(s) from two independent browser contexts (sources=${createRequests.map((item) => item.source).join(",") || "none"}), overlapping=${overlappingRequests}, newConversations=${newIds.length}, conversationIds=${newIds.join(",") || "none"}; two real UIs did not overlap the create request`);
       return;
     }
     const [firstCreated, secondCreated] = await Promise.all(newIds.slice(0, 2).map((id) => waitFreshConversation(id, "concurrent conversation launch", 90_000)));
@@ -1291,6 +1359,17 @@ const checks = {
       pass("check8-race-cwd", "each concurrent writer stayed in project cwd", `first=${firstCreated.tmuxSessionId}:${firstSession.cwd}; second=${secondCreated.tmuxSessionId}:${secondSession.cwd}`);
     } else {
       fail("check8-race-cwd", "each concurrent writer stayed in project cwd", `first=${firstCreated.tmuxSessionId}:${firstSession?.cwd}; second=${secondCreated.tmuxSessionId}:${secondSession?.cwd}; expected=${state.projectPath}`);
+    }
+
+    // The two independent UIs each navigated into the chat they created, so the
+    // page under test is inside a conversation view, not the project list that
+    // `openConversationThroughUi` addresses by card index. Go back first.
+    if (!(await page.locator("textarea.composer-input").isVisible().catch(() => false))) {
+      await page.locator("h2", { hasText: "Projects" }).first().waitFor({ state: "visible", timeout: 15_000 });
+      await openProjectThroughUi(`Acceptance ${MARKER}`);
+    } else {
+      await page.locator('button[title="Back"]').first().click();
+      await page.locator("h3", { hasText: "Conversations" }).first().waitFor({ timeout: 15_000 });
     }
 
     const second = await conversationOf(state.secondConversationId);
@@ -1345,6 +1424,7 @@ const checks = {
     await startServer();
     await loginThroughUi();
     await openProjectThroughUi(`Acceptance ${MARKER}`);
+    await waitForCollabReadiness(state.projectId, before?.nativeSessionId);
     await openConversationThroughUi(state.conversationId);
     const after = await conversationOf(state.conversationId);
     if (after.nativeSessionId === before.nativeSessionId && after.tmuxSessionId === before.tmuxSessionId) {
@@ -1364,7 +1444,7 @@ const checks = {
   async check10() {
     section("check10 agent restart resumes the same journal");
     if (!modelCatalog?.length) {
-      skip("check10", "restart resumes the same journal", `isolated catalog has only Gemini models (${excludedGeminiModelCount}); restart not attempted`);
+      skip("check10", "restart resumes the same journal", `isolated catalog has only excluded models (Gemini/GPT) (${excludedModelCount}); restart not attempted`);
       return;
     }
     const beforeRaw = await conversationOf(state.conversationId);
@@ -1432,7 +1512,7 @@ const checks = {
   async check11() {
     section("check11 restart with the known journal missing is refused");
     if (!modelCatalog?.length) {
-      skip("check11", "restart refusal with missing journal", `isolated catalog has only Gemini models (${excludedGeminiModelCount}); journal untouched`);
+      skip("check11", "restart refusal with missing journal", `isolated catalog has only excluded models (Gemini/GPT) (${excludedModelCount}); journal untouched`);
       return;
     }
     const conversation = await conversationOf(state.conversationId);
@@ -1466,11 +1546,11 @@ const checks = {
     if (!modelCatalog?.length) {
       await rename(aside, journal);
       movedJournal = null;
-      skip("check11", "restart refusal with missing journal", `isolated catalog has only Gemini models (${excludedGeminiModelCount}); journal restored without launch`);
+      skip("check11", "restart refusal with missing journal", `isolated catalog has only excluded models (Gemini/GPT) (${excludedModelCount}); journal restored without launch`);
       return;
     }
     const { chosen, catalogCount } = await chooseModelForRestart(conversation);
-    if (!catalogCount || isGeminiModel(chosen)) {
+    if (!catalogCount || isExcludedModel(chosen)) {
       await rename(aside, journal);
       movedJournal = null;
       skip("check11", "restart refusal with missing journal", `safe catalog selector unavailable; journal restored without launch`);
@@ -1675,15 +1755,32 @@ const checks = {
       skip("check14", "subagent transcript", "agent panel has no selectable agent card; transcript view unavailable");
       return;
     }
-    const selectedName = (await agentCards.first().innerText()).trim().split("\n")[0];
-    await agentCards.first().click();
+    // The panel lists the Main agent first (SubagentPanel.tsx:105-113 renders
+    // `agents` in order) and its own transcript is unreadable by design, which is
+    // what made round 12 select a card with an empty <code>. Pick the child agent
+    // card instead: the first card whose name is not the Main agent. The child
+    // appears only once its snapshot reaches the panel, so poll rather than
+    // reading the list once (measured lag: the poll below sees it in ~3.5s).
+    const found = await waitFor("child agent card in the subagents panel", async () => {
+      const names = await agentCards.evaluateAll((cards) => cards.map((card) => (card.innerText ?? "").trim().split("\n")[0] ?? ""));
+      const index = names.findIndex((name) => !/^main\b/i.test(name.trim()) && name.trim().length > 0);
+      return index >= 0 ? { index, name: names[index] } : null;
+    }, { timeout: 30_000 }).catch(() => null);
+    const cardNames = await agentCards.evaluateAll((cards) => cards.map((card) => (card.innerText ?? "").trim().split("\n")[0] ?? ""));
+    if (!found) {
+      skip("check14", "subagent transcript", `agent panel lists no child agent card; names=${JSON.stringify(cardNames)}`);
+      return;
+    }
+    const childCard = agentCards.nth(found.index);
+    const selectedName = found.name;
+    await childCard.click();
     const transcript = page.locator(".modal-content pre code").first();
     const selectedView = await page.locator(".modal-content h4").filter({ hasText: selectedName }).waitFor({ state: "visible", timeout: 5_000 }).then(() => true).catch(() => false);
     if (!selectedView) {
       const stillListing = await page.locator(".modal-content .card").count().then((count) => count > 0);
       const listEmpty = await page.locator(".modal-content h3", { hasText: "Subagents (0)" }).count().then((count) => count > 0);
       if (listEmpty) skip("check14", "subagent transcript", `agent panel has no selectable agent; list empty after prompt; expected ${selectedName}`);
-      else fail("check14", "subagent selection opens transcript pane", `stuck on ${stillListing ? "agent list" : "neither list nor transcript"}; expected selected transcript for ${selectedName}`);
+      else fail("check14", "subagent selection opens transcript pane", `stuck on ${stillListing ? "agent list" : "neither list nor transcript"}; expected selected transcript for child agent ${selectedName}; cards=${JSON.stringify(cardNames)}`);
       return;
     }
     await transcript.waitFor({ state: "visible", timeout: 60_000 });
