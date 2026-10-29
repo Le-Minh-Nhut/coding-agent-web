@@ -20,6 +20,7 @@ export function FolderBrowser({ onSelect, onCancel }: FolderBrowserProps) {
   const [refreshVersion, setRefreshVersion] = useState(0);
   const [loadingMore, setLoadingMore] = useState(false);
   const createdPathRef = useRef<{ directory: string; path: string } | null>(null);
+  const navigationGenerationRef = useRef(0);
   useEffect(() => {
     let active = true;
     setLoading(true);
@@ -98,14 +99,17 @@ export function FolderBrowser({ onSelect, onCancel }: FolderBrowserProps) {
     if (!listing?.path || creatingFolder) return;
     setCreatingFolder(true);
     setNewFolderError(null);
-    const result = await api.createDirectory(listing.path, newFolderName);
+    const generation = navigationGenerationRef.current;
+    const directory = listing.path;
+    const result = await api.createDirectory(directory, newFolderName);
     setCreatingFolder(false);
+    if (generation !== navigationGenerationRef.current) return;
     if (!result.ok) {
       setNewFolderError(result.error.message);
       return;
     }
     setSelectedPath(result.data.path);
-    createdPathRef.current = { directory: listing.path, path: result.data.path };
+    createdPathRef.current = { directory, path: result.data.path };
     setNewFolderName("");
     setShowNewFolder(false);
     setRefreshVersion((version) => version + 1);
@@ -128,7 +132,7 @@ export function FolderBrowser({ onSelect, onCancel }: FolderBrowserProps) {
             type="button"
             className="ghost"
             style={{ padding: "4px 6px", fontSize: "0.85rem" }}
-          onClick={() => { setSelectedPath(null); setCurrentPath(undefined); }}
+          onClick={() => { navigationGenerationRef.current++; setSelectedPath(null); setCurrentPath(undefined); }}
           >
             Roots
           </button>
@@ -139,7 +143,7 @@ export function FolderBrowser({ onSelect, onCancel }: FolderBrowserProps) {
                 type="button"
                 className="ghost"
                 style={{ padding: "4px 6px", fontSize: "0.85rem" }}
-                onClick={() => { setSelectedPath(null); setCurrentPath(path); }}
+                onClick={() => { navigationGenerationRef.current++; setSelectedPath(null); setCurrentPath(path); }}
               >
                 {part}
               </button>
@@ -150,7 +154,7 @@ export function FolderBrowser({ onSelect, onCancel }: FolderBrowserProps) {
         {!currentPath && listing?.roots && listing.roots.length > 1 && (
           <div aria-label="Workspace roots" style={{ display: "flex", flexWrap: "wrap", gap: "6px", margin: "8px 0" }}>
             {listing.roots.map((root) => (
-              <button type="button" key={root} className="ghost" onClick={() => { setSelectedPath(null); setCurrentPath(root); }}>
+              <button type="button" key={root} className="ghost" onClick={() => { navigationGenerationRef.current++; setSelectedPath(null); setCurrentPath(root); }}>
                 {root}
               </button>
             ))}
@@ -171,7 +175,7 @@ export function FolderBrowser({ onSelect, onCancel }: FolderBrowserProps) {
                   <button type="submit" className="primary" disabled={creatingFolder || !newFolderName.trim()}>
                     {creatingFolder ? "Creating…" : "Create folder"}
                   </button>
-                  <button type="button" onClick={() => { setShowNewFolder(false); setNewFolderError(null); }}>Cancel</button>
+                  <button type="button" onClick={() => { navigationGenerationRef.current++; setShowNewFolder(false); setNewFolderError(null); }}>Cancel</button>
                 </div>
                 {newFolderError && <div role="alert" style={{ color: "var(--danger)", marginTop: "6px" }}>{newFolderError}</div>}
               </form>
@@ -187,7 +191,7 @@ export function FolderBrowser({ onSelect, onCancel }: FolderBrowserProps) {
               <div
                 className="folder-item"
                 style={{ cursor: "pointer" }}
-                onClick={() => { setSelectedPath(null); setCurrentPath(listing.parent!); }}
+                onClick={() => { navigationGenerationRef.current++; setSelectedPath(null); setCurrentPath(listing.parent!); }}
               >
                 <span>📁 .. (Up)</span>
               </div>
@@ -203,6 +207,7 @@ export function FolderBrowser({ onSelect, onCancel }: FolderBrowserProps) {
                   style={{ cursor: disabled ? "not-allowed" : "pointer", borderColor: selected ? "var(--primary)" : undefined }}
                   onClick={() => {
                     if (!disabled) {
+                      navigationGenerationRef.current++;
                       setSelectedPath(null);
                       setCurrentPath(entry.path);
                     }
