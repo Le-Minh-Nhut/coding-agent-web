@@ -13,20 +13,21 @@ is `cx-cap/…` or `wdb/…` DeepSeek. Revert path: `~/.omp/agent/config.yml.bak
 
 | Priority | Agent definition | Model | Use for |
 | --- | --- | --- | --- |
-| 1 | all delegated agents | `cx-cap/wdb/deepseek-ai/DeepSeek-V4.1-Flash:high` | Everything, including image reading. |
+| 1 | all delegated agents | `cx-cap/wdb/deepseek-ai/DeepSeek-V4.1-Flash:high` | Everything except image reading. |
 | 2 | `caw-gemini`, `caw-luna` lanes | — | Prohibited this round; quota exhausted. |
 
 ### Why all lanes are DeepSeek (temporary)
 
 The owner's Gemini quota is exhausted and GPT/Gemini lanes are banned this round.
-Everything — including bulk reading and image inspection — routes to the
-`cx-cap` DeepSeek lane. Revert when the owner restores quota (see revert path above).
+Everything — including bulk reading — routes to the `cx-cap` DeepSeek lane.
+Revert when the owner restores quota (see revert path above).
 
-## Image reading
+## Image reading: NOT RUN this round
 
-Image bytes are still never placed in the main agent's context; screenshot
-inspection is delegated. This round the delegate runs on
-`cx-cap/wdb/deepseek-ai/DeepSeek-V4.1-Flash:high`.
+Visual/image reading is **not run** this round (owner-deferred). No lane may read
+images — no OCR, no vision calls — regardless of which model the lane resolves to.
+DOM/geometry assertions in the specs are the substitute for screenshot inspection:
+layout claims are verified from the live DOM, not from image bytes.
 
 
 ## Effort: never pass the coarse `effort` hint

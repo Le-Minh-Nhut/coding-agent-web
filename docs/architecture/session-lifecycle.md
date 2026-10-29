@@ -181,9 +181,21 @@ replay. The blast radius is metadata only — the native session file on disk is
 never touched, so the conversation can be re-added from its folder — and the
 journal is a local, owner-writable file, so this is accepted rather than
 defended against. The store re-verifies each row at delete time and drops only
-those that still read process-free, so a conversation restarted between the
+those that still pass the gate, so a conversation restarted between the
 observation and the delete is refused rather than deleted out from under its new
-process.
+process. A row passes when it reads process-free *or* when its lifecycle epoch
+still equals the one the observer verified — that is how a cached `idle`/`running`
+label stops blocking a delete after the machine was freshly and positively
+observed dead. Both halves are evaluated in the queued section, alongside the
+launch reservation described below, so the verdict and the mutation cannot
+interleave with a launch.
+
+The epoch is the store-owned `lifecycleEpoch` on the row: the store bumps it
+whenever a patch changes a lifecycle field (state, ownership, tmux identity,
+host identity), so the guarantee does not depend on callers remembering to stamp
+it. Observations are committed through `updateConversationIfCurrent`, which
+compares the caller's epoch against the stored row *inside the same queued
+section* as the write and drops the patch when a newer life took the row.
 
 A row whose launch is reserved but has not yet recorded its process reads exactly
 like a never-launched row (`starting`, no identity), so the re-read alone cannot
