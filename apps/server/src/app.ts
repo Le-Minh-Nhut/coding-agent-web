@@ -5,6 +5,7 @@ import { z } from "zod";
 import type { Capabilities, CollabLinkResponse, Conversation, ErrorCode, NativeSessionSummary, ProjectWithStats } from "@caw/contracts";
 import type { CapabilityService, CollabHost, ModelCatalogService, NativeSessionHistory } from "@caw/omp-adapter";
 import type { Supervisor, RuntimeLaunchSpec } from "@caw/runtime";
+import { evaluateState } from "@caw/runtime";
 import type { AuthenticationService } from "./auth.js";
 import { resolve } from "node:path";
 import { findRepoRoot, resolveDistDir, type ServerConfig } from "./config.js";
@@ -230,8 +231,46 @@ export function buildApp(deps: AppDependencies): FastifyInstance<HttpServer> {
   app.delete("/api/projects/:id", { preHandler: protectedHook }, async (request, reply) => {
     const params = idParams.safeParse(request.params);
     if (!params.success) return reply.code(400).send(fail("bad_request", "Invalid project ID"));
-    const deleted = await deps.store.deleteProject(params.data.id);
-    return deleted ? ok({ deleted: true, filesRemoved: false }) : reply.code(404).send(fail("not_found", "Project not found"));
+    const project = (await deps.store.listProjects()).find((item) => item.id === params.data.id);
+    if (!project) return reply.code(404).send(fail("not_found", "Project not found"));
+    const conversations = await deps.store.listConversations(project.id);
+    // Observe each conversation rather than trusting its stored label: a row that
+    // still says `running` may be long dead, and a row that says `stopped` may have
+    // been restarted behind our back. A row that never had a process launched for it
+    // is not blocking — deleting it only removes a list entry. Nothing is killed
+    // here, ever: the user stops the agent first, then deletes.
+    const blocking: Conversation[] = [];
+    const verified: string[] = [];
+    for (const conversation of conversations) {
+      // A launch in flight has not recorded its process yet, so every stored field
+      // still says "nothing running". Deleting the row now would drop the only
+      // pointer to a process that is being started this instant.
+      if (deps.supervisor?.isLaunching?.(conversation.id)) { blocking.push(conversation); continue; }
+      const observations = deps.supervisor ? await deps.supervisor.observe(conversation.id) : null;
+      const state = observations ? evaluateState(observations).state : conversation.state;
+      // `stopped`/`error` both mean observed as not running (error: the process is
+      // gone and its journal is missing).
+      if (state === "stopped" || state === "error") { verified.push(conversation.id); continue; }
+      // Anything else is only deletable when the observations positively show no
+      // writer: no process we launched, no unverifiable pane, no held lease and no
+      // registry host. An external session with a live writer reads as `unknown`
+      // (or a host state) and must be refused like any other running agent.
+      const mayHaveProcess = observations
+        ? observations.everLaunched || observations.tmuxOwnershipUnknown || observations.leaseLive !== false || observations.host !== null
+        : true;
+      if (mayHaveProcess) blocking.push(conversation);
+      else verified.push(conversation.id);
+    }
+    if (blocking.length > 0) {
+      return reply.code(409).send(fail("conflict_owner", `This project still has agents that are running or cannot be verified as stopped (${blocking.map((conversation) => conversation.title).join(", ")}). Stop them before deleting the project.`));
+    }
+    // Verified stopped: drop our rows for them too, in the same queued write as the
+    // delete. Leaving the rows behind would point at a project that no longer
+    // exists, and a re-added folder would then hide their native sessions as
+    // "already tracked" with nothing that can open them.
+    const deleted = await deps.store.deleteProject(project.id, verified);
+    if (deleted !== "deleted") return reply.code(409).send(fail("conflict_owner", "This project still has conversations. Stop them before deleting the project."));
+    return ok({ deleted: true, filesRemoved: false });
   });
   app.get("/api/projects/:id/sessions", { preHandler: protectedHook }, async (request, reply) => {
     const params = idParams.safeParse(request.params);
@@ -343,6 +382,16 @@ export function buildApp(deps: AppDependencies): FastifyInstance<HttpServer> {
       const spec = await deps.runtimeSpec(conversation, { resumeSessionId: body.data.resumeSessionId });
       return reply.code(201).send(ok(await deps.supervisor.start(conversation.id, spec)));
     } catch (error) {
+      // A row left at `starting` with no process would sit in every listing as an
+      // agent that is launching forever. But the launch may equally have created a
+      // process it could not record — that is exactly what `agent.launch_unrecorded`
+      // means, and deleting such a row would lose the only pointer to a live writer.
+      // So the row is dropped only when nothing records a process against it *and*
+      // no launch is still in flight for it.
+      const started = await deps.store.getConversation(conversation.id);
+      if (started && started.tmuxSessionId === null && !deps.supervisor?.isLaunching?.(conversation.id)) {
+        await deps.store.removeConversation(conversation.id).catch(() => false);
+      }
       const code = runtimeErrorCode(error);
       return reply.code(code === "internal" ? 500 : code === "not_found" ? 404 : 409).send(fail(code, error instanceof Error ? String(redactLogValue(error.message)) : "Agent launch failed."));
     }

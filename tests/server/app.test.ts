@@ -719,6 +719,129 @@ describe("live native session attachment", () => {
   });
 });
 
+describe("project deletion guard", () => {
+  it("refuses to delete a project that still records conversations, and keeps their rows", async () => {
+    const { app, headers, dir, store } = await fixture();
+    const project = await store.createProject({ path: dir });
+    const conversation = await store.createConversation({ projectId: project.id });
+    // No supervisor is configured, so the gate falls back to the stored label.
+    // `starting` may have a launch in progress; it must not be deleted.
+    const refused = await app.inject({ method: "DELETE", url: `/api/projects/${project.id}`, headers });
+    expect(refused.statusCode).toBe(409);
+    expect(refused.json().error.code).toBe("conflict_owner");
+    expect((await store.listProjects()).map((item) => item.id)).toEqual([project.id]);
+    expect((await store.listConversations(project.id)).map((item) => item.id)).toEqual([conversation.id]);
+    await app.close();
+  });
+
+  it("deletes a project whose conversations are recorded as stopped, without touching files", async () => {
+    const { app, headers, dir, store } = await fixture();
+    const projectDir = join(dir, "project"); await mkdir(projectDir);
+    const project = await store.createProject({ path: projectDir });
+    const conversation = await store.createConversation({ projectId: project.id });
+    await store.updateConversation(conversation.id, { state: "stopped" });
+    const deleted = await app.inject({ method: "DELETE", url: `/api/projects/${project.id}`, headers });
+    expect(deleted.statusCode).toBe(200);
+    expect(deleted.json().data.filesRemoved).toBe(false);
+    expect(await store.listProjects()).toEqual([]);
+    // The conversation row goes with it: a row pointing at a deleted project can
+    // neither be navigated nor restarted, and would hide the native session as
+    // "already tracked" if the folder were added again.
+    expect(await store.listConversations(project.id)).toEqual([]);
+    expect((await stat(projectDir)).isDirectory()).toBe(true);
+    await app.close();
+  });
+
+  it("refuses to delete a conversation whose launch is still in flight", async () => {
+    // The launch window: the process may already exist but nothing is recorded yet,
+    // so every stored field still reads "nothing running". Deleting the row here
+    // would drop the only pointer to a process that is being started this instant.
+    const supervisor = { isLaunching: () => true, observe: async () => null } as unknown as Supervisor;
+    const { app, headers, dir, store } = await fixture({ supervisor });
+    const project = await store.createProject({ path: dir });
+    const conversation = await store.createConversation({ projectId: project.id });
+    const refused = await app.inject({ method: "DELETE", url: `/api/projects/${project.id}`, headers });
+    expect(refused.statusCode).toBe(409);
+    expect(refused.json().error.code).toBe("conflict_owner");
+    expect((await store.listConversations(project.id)).map((item) => item.id)).toEqual([conversation.id]);
+    await app.close();
+  });
+
+  it("refuses to delete a project holding an external session with a live writer", async () => {
+    // An external (attach-live) row has no managed pane, but a live writer still
+    // exists behind it. The gate must consult the observation, not just the label.
+    const supervisor = {
+      isLaunching: () => false,
+      observe: async () => ({
+        tmux: null, host: null, leaseLive: true, sessionPathExists: true, sessionPathReason: null,
+        hasNativeSession: true, everLaunched: false, stopRequested: false, registryUnreadable: false,
+        tmuxOwnershipUnknown: false, tmuxEnumerationFailed: false, hostMatchReason: null, recoveredHost: false,
+      }),
+    } as unknown as Supervisor;
+    const { app, headers, dir, store } = await fixture({ supervisor });
+    const project = await store.createProject({ path: dir });
+    const conversation = await store.registerExternalConversation({ projectId: project.id, nativeSessionId: "native-live", title: "Live", hostInstanceId: "host-1", hostGeneration: 1 });
+    const refused = await app.inject({ method: "DELETE", url: `/api/projects/${project.id}`, headers });
+    expect(refused.statusCode).toBe(409);
+    expect(refused.json().error.code).toBe("conflict_owner");
+    expect((await store.listConversations(project.id)).map((item) => item.id)).toEqual([conversation.id]);
+    await app.close();
+  });
+});
+
+describe("refused conversation creation", () => {
+  it("removes the row when the launch was refused before any process existed", async () => {
+    const supervisor = { start: async () => { throw new RuntimeError("conflict_limit", "No active slots"); } } as unknown as Supervisor;
+    const { app, headers, dir, store } = await fixture({ supervisor, runtimeSpec: () => ({} as RuntimeLaunchSpec) });
+    const project = await store.createProject({ path: dir });
+    const response = await app.inject({ method: "POST", url: `/api/projects/${project.id}/conversations`, headers, payload: {} });
+    expect(response.statusCode).toBe(409);
+    expect(await store.listConversations(project.id)).toEqual([]);
+    await app.close();
+  });
+
+  it("keeps the row when the launch recorded a process it could not complete", async () => {
+    // The launch may have created a writer it could not record. Deleting the row
+    // would lose the only pointer to a live process, so it is kept as `unknown`.
+    let conversationId = "";
+    const supervisor = {
+      start: async (id: string) => {
+        conversationId = id;
+        await store.updateConversation(id, { state: "unknown", tmuxSessionId: "$7", tmuxServerIdentity: "private:1", tmuxPanePid: 4321, statusDetail: "The agent process was launched but could not be recorded." });
+        throw new RuntimeError("agent_launch_failed", "The conversation disappeared before its launched agent could be recorded.");
+      },
+    } as unknown as Supervisor;
+    const { app, headers, dir, store } = await fixture({ supervisor, runtimeSpec: () => ({} as RuntimeLaunchSpec) });
+    const project = await store.createProject({ path: dir });
+    const response = await app.inject({ method: "POST", url: `/api/projects/${project.id}/conversations`, headers, payload: {} });
+    expect(response.statusCode).toBe(409);
+    const rows = await store.listConversations(project.id);
+    expect(rows.map((row) => row.id)).toEqual([conversationId]);
+    expect(rows[0]).toMatchObject({ state: "unknown", tmuxSessionId: "$7" });
+    await app.close();
+  });
+
+  it("keeps the row when the launch failed while the launch was still in flight", async () => {
+    // The POST catch runs after `start` threw, but the reservation may still be held
+    // because the process exists and could not be recorded. Removing the row would
+    // lose that pointer, so the in-flight signal keeps it.
+    let conversationId = "";
+    const supervisor = {
+      isLaunching: (id: string) => id === conversationId,
+      start: async (id: string) => {
+        conversationId = id;
+        throw new RuntimeError("agent_launch_failed", "The agent process could not be recorded.");
+      },
+    } as unknown as Supervisor;
+    const { app, headers, dir, store } = await fixture({ supervisor, runtimeSpec: () => ({} as RuntimeLaunchSpec) });
+    const project = await store.createProject({ path: dir });
+    const response = await app.inject({ method: "POST", url: `/api/projects/${project.id}/conversations`, headers, payload: {} });
+    expect(response.statusCode).toBe(409);
+    expect((await store.listConversations(project.id)).map((row) => row.id)).toEqual([conversationId]);
+    await app.close();
+  });
+});
+
 describe("external restart refusal", () => {
   it("refuses before constructing a launch spec or starting a writer", async () => {
     let specs = 0;
