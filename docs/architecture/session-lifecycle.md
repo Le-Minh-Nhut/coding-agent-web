@@ -129,6 +129,54 @@ Two inferences are forbidden:
   the recorded pane PID: `ESRCH` confirms that agent process exited; live,
   permission-denied, invalid, or legacy-null PID stays unknown and cannot settle
   stop. PID reuse can delay a valid stop, but only in the safe direction.
+- **A missing pane is not a dead process either.** The same corroboration applies
+  wherever a pane is simply not found: the stop preflight and the startup publish
+  wait both check the recorded pane PID before concluding "gone". A renamed or
+  racing session leaves the verdict `unknown` (stop refuses; startup keeps
+  waiting) instead of writing `stopped`/`agent.exited` for a process nobody
+  observed exiting.
+- **A registry row is not proof of ownership.** When a live managed pane exists,
+  it is paired with a host only through the lineage check (`matchPublishedHost`);
+  a row that merely carries the recorded `nativeSessionId` while belonging to a
+  different process keeps the conversation `unknown` rather than `managed`. The
+  exception is a conversation with no managed pane at all, where the row is the
+  truth and the ownership is `external`. A registry row with no PID cannot prove
+  anything either way, so it takes no part in the match instead of poisoning it
+  for every conversation.
+- **A failed journal load is not permanent.** Recovery is byte-accurate (offsets
+  come from the file's bytes, never from a decoded string, so an invalid byte
+  cannot push a "restored" delimiter past the real end), the evidence file is
+  checked with `lstat` so a FIFO cannot block the load, and a load that fails
+  still fails — but the next call retries, so a human repair takes effect without
+  a restart. A refused append rolls the file back to the offset it had before the
+  write; only an offset actually read from the file is ever truncated, and if the
+  rollback itself fails the store refuses further writes rather than appending
+  onto a torn journal.
+- **A missing pane PID is backfilled, not guessed.** When a launch's follow-up
+  listing failed, the row holds no pane PID and nothing ever filled it in, which
+  left the conversation unstoppable and permanently unknown. Refresh takes the
+  PID from the enumerated session only after that session has been qualified by
+  both its id and its server lifetime.
+
+## Project deletion
+
+`DELETE /api/projects/:id` observes each conversation's runtime (not its stored
+state) and refuses with `conflict_owner` while any of them is running, in
+progress, or cannot be verified as stopped; a launch that is still in flight
+(its process may exist but not be recorded yet) counts as in progress, as does an
+external session whose writer is still live. Rows that never had a process
+launched for them are not blocking. It never kills an agent and never removes
+files. Once every conversation is verified stopped, their rows are removed with
+the project, so a folder re-added later can offer its native sessions again
+rather than hiding them behind a row that points at a deleted project.
+
+The removal is one journal write: the conversation rows and the project row land
+together or not at all, so a failed delete leaves every row in place for a retry.
+The store re-verifies each row at delete time and drops only those that still
+read process-free, so a conversation restarted between the observation and the
+delete is refused rather than deleted out from under its new process.
+A `conversation-delete` row also drops that conversation's event and command rows
+on replay — they have no parent left — so the log does not accumulate orphans.
 
 ## Explicitly refused behaviours
 
