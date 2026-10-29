@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { api } from "../api.js";
 import { FolderBrowser } from "./FolderBrowser.js";
 import type { ProjectWithStats } from "@caw/contracts";
@@ -14,6 +14,9 @@ export function ProjectsView({ onSelectProject, onOpenSettings }: ProjectsViewPr
   const [showBrowser, setShowBrowser] = useState(false);
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [newLabel, setNewLabel] = useState("");
+  const [favoritePending, setFavoritePending] = useState<string | null>(null);
+  /** Desired favorite per project while a PATCH is in flight: repeat clicks re-express the same intent instead of toggling the stale prop. */
+  const favoriteDesiredRef = useRef<Record<string, boolean>>({});
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -39,12 +42,19 @@ export function ProjectsView({ onSelectProject, onOpenSettings }: ProjectsViewPr
 
   const handleToggleFavorite = async (e: React.MouseEvent, project: ProjectWithStats) => {
     e.stopPropagation();
-    const res = await api.updateProject(project.id, { favorite: !project.favorite });
+    if (favoritePending === project.id) return;
+    setFavoritePending(project.id);
+    // State is async, so a second click can land before the re-render disables the
+    // button. The ref records the intent of the first click and later clicks during
+    // that flight repeat it rather than toggling a stale prop.
+    const desired = favoriteDesiredRef.current[project.id] ?? !project.favorite;
+    favoriteDesiredRef.current[project.id] = desired;
+    const res = await api.updateProject(project.id, { favorite: desired });
+    delete favoriteDesiredRef.current[project.id];
+    setFavoritePending(null);
     if (res.ok) {
-      setProjects((prev) =>
-        prev.map((p) => (p.id === project.id ? { ...p, favorite: !p.favorite } : p))
-      );
-    }
+      setProjects((prev) => prev.map((p) => (p.id === project.id ? { ...p, favorite: res.data.favorite } : p)));
+    } else setError(res.error.message);
   };
 
   const handleCreateProject = async (e: React.FormEvent) => {
@@ -160,6 +170,7 @@ export function ProjectsView({ onSelectProject, onOpenSettings }: ProjectsViewPr
                       className="ghost"
                       style={{ padding: "2px 4px", fontSize: "1.1rem" }}
                       onClick={(e) => handleToggleFavorite(e, project)}
+                      disabled={favoritePending === project.id}
                       title={project.favorite ? "Unstar" : "Star"}
                     >
                       {project.favorite ? "★" : "☆"}
