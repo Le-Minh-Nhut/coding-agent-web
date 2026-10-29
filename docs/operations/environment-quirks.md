@@ -77,3 +77,14 @@ medium.
 
 Full detail and the rule: `docs/operations/subagent-effort-policy.md`. Short version:
 state the level in the model id and do not pass `effort`.
+
+## CPU parallelism allowance (2026-10-29, operator directive)
+
+Operator directive for the CIR workbench host (`heheboiz`, 16-thread laptop): CPU-heavy
+subagent work SHOULD use up to 8 cores in parallel. Previously every pytest/suite run was
+launched with `OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1`
+to avoid oversubscription while GPU jobs ran alongside. That single-thread cap is no longer
+required for CPU-only runs; drop the four env caps so numpy/torch/pytest workers can use
+8 threads. Keep GPU model runs sequential and single-threaded BLAS caps ONLY for processes
+that coexist with a running GPU model job (RAM/VRAM pressure), and never parallelize GPU
+model work itself.
