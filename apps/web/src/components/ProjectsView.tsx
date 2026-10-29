@@ -15,17 +15,15 @@ export function ProjectsView({ onSelectProject, onOpenSettings }: ProjectsViewPr
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [newLabel, setNewLabel] = useState("");
   /**
-   * Star bookkeeping, all keyed per project so one project's flight never clears
-   * another's:
-   * - `seq`/`appliedSeq`: order clicks and their responses; a superseded response
-   *   never writes the UI.
-   * - `intent`: the desired value of the latest unsettled click. A click while a
-   *   request is open re-asserts that intent (double-tap) instead of toggling a
-   *   `favorite` prop that may have drifted; released once its response settles.
+   * Star bookkeeping, keyed per project so one project's write never blocks
+   * another's: at most one favorite PATCH is in flight per project. Ordering
+   * responses on the client cannot order the writes the server applies, so a
+   * click while a write is open only records the newest desired value (`pending`)
+   * instead of racing a second PATCH that could arrive late and win. When the
+   * write settles, a recorded value that still differs from what the server
+   * applied is sent once — last intent wins regardless of arrival order.
    */
-  const favoriteSeqRef = useRef<Map<string, number>>(new Map());
-  const favoriteAppliedSeqRef = useRef<Map<string, number>>(new Map());
-  const favoriteIntentRef = useRef<Map<string, { desired: boolean; base: boolean }>>(new Map());
+  const favoriteFlightRef = useRef<Map<string, { desired: boolean; base: boolean; pending: boolean | null }>>(new Map());
   /** Bumped whenever a favorite response is applied; a list request started before that carries a stale star column. */
   const favoriteEpochRef = useRef(0);
   /** Star values actually applied per project, so a stale list snapshot keeps the fresh star column. */
@@ -67,27 +65,49 @@ export function ProjectsView({ onSelectProject, onOpenSettings }: ProjectsViewPr
     loadProjects();
   }, []);
 
-  const handleToggleFavorite = async (e: React.MouseEvent, project: ProjectWithStats) => {
-    e.stopPropagation();
-    // A click while this project's request is still open re-asserts the same
-    // intent (double-tap) instead of toggling a prop a stale list response may
-    // have rewound. When nothing is pending the user decides against what they
-    // see right now.
-    const recorded = favoriteIntentRef.current.get(project.id);
-    const desired = recorded && recorded.base === project.favorite ? recorded.desired : !project.favorite;
-    const seq = (favoriteSeqRef.current.get(project.id) ?? 0) + 1;
-    favoriteSeqRef.current.set(project.id, seq);
-    favoriteIntentRef.current.set(project.id, { desired, base: project.favorite });
-    const res = await api.updateProject(project.id, { favorite: desired });
-    // Only release the intent if no newer click replaced it meanwhile.
-    if (favoriteIntentRef.current.get(project.id)?.desired === desired) favoriteIntentRef.current.delete(project.id);
-    if (seq <= (favoriteAppliedSeqRef.current.get(project.id) ?? 0)) return;
-    favoriteAppliedSeqRef.current.set(project.id, seq);
+  /**
+   * Sends one favorite write, applies its result, then chains the newest intent
+   * recorded while it was open. The chain is what makes the last click win on the
+   * server: a value the user asked for after this write started cannot be left
+   * unsent just because this one settled first.
+   */
+  const writeFavorite = async (projectId: string, record: { desired: boolean; base: boolean; pending: boolean | null }): Promise<void> => {
+    const res = await api.updateProject(projectId, { favorite: record.desired });
     if (res.ok) {
       favoriteEpochRef.current++;
-      favoriteValueRef.current.set(project.id, res.data.favorite);
-      setProjects((prev) => prev.map((p) => (p.id === project.id ? { ...p, favorite: res.data.favorite } : p)));
-    } else setError(res.error.message);
+      favoriteValueRef.current.set(projectId, res.data.favorite);
+      setProjects((prev) => prev.map((p) => (p.id === projectId ? { ...p, favorite: res.data.favorite } : p)));
+    } else {
+      setError(res.error.message);
+    }
+    // The newest intent differs from what this write asked for: send exactly one
+    // follow-up so the server converges on the user's last click. A double-tap
+    // records the value already requested, so it coalesces instead of re-sending.
+    // The follow-up is chained even after a failure, so a rejected write never
+    // swallows the intent the user expressed while it was open.
+    if (record.pending !== null && record.pending !== record.desired) {
+      const next = { desired: record.pending, base: record.desired, pending: null as boolean | null };
+      favoriteFlightRef.current.set(projectId, next);
+      await writeFavorite(projectId, next);
+      return;
+    }
+    favoriteFlightRef.current.delete(projectId);
+  };
+
+  const handleToggleFavorite = (e: React.MouseEvent, project: ProjectWithStats) => {
+    e.stopPropagation();
+    const flight = favoriteFlightRef.current.get(project.id);
+    if (flight) {
+      // One write per project: never race a second PATCH whose arrival order the
+      // server decides. A click while a write is open records the newest intent,
+      // re-asserting the intent already in flight for a double-tap on the same
+      // displayed value instead of toggling a prop a stale snapshot may have rewound.
+      flight.pending = flight.base === project.favorite ? flight.desired : !project.favorite;
+      return;
+    }
+    const record = { desired: !project.favorite, base: project.favorite, pending: null as boolean | null };
+    favoriteFlightRef.current.set(project.id, record);
+    void writeFavorite(project.id, record);
   };
 
   const handleCreateProject = async (e: React.FormEvent) => {
@@ -96,9 +116,11 @@ export function ProjectsView({ onSelectProject, onOpenSettings }: ProjectsViewPr
     setCreating(true);
     setError(null);
 
+    // Pending belongs to this form: a fresh token is minted by every way a form
+    // opens (Cancel, folder pick), so a response from an abandoned form cannot
+    // clear — or fail to clear — the pending of the form on screen now.
     const token = createOperationRef.current;
     const res = await api.createProject(selectedPath, newLabel.trim());
-    // A stale response must not clear the spinner of a newer create form.
     if (createOperationRef.current === token) setCreating(false);
     if (res.ok) {
       if (createOperationRef.current === token) {
@@ -177,7 +199,16 @@ export function ProjectsView({ onSelectProject, onOpenSettings }: ProjectsViewPr
             <button type="submit" className="primary" disabled={creating}>
               Create
             </button>
-            <button type="button" onClick={() => setSelectedPath(null)}>
+            <button
+              type="button"
+              onClick={() => {
+                // Closing the form ends its operation: the next form gets a fresh
+                // token and a clean pending flag instead of inheriting this one's.
+                createOperationRef.current = {};
+                setCreating(false);
+                setSelectedPath(null);
+              }}
+            >
               Cancel
             </button>
           </form>
@@ -262,7 +293,10 @@ export function ProjectsView({ onSelectProject, onOpenSettings }: ProjectsViewPr
           onCancel={() => setShowBrowser(false)}
           onSelect={(path) => {
             setShowBrowser(false);
+            // Opening a form for a new folder starts its own operation: it must
+            // not inherit the pending of a create form left in flight.
             createOperationRef.current = {};
+            setCreating(false);
             setSelectedPath(path);
             const defaultName = path.split("/").filter(Boolean).pop() ?? "New Project";
             setNewLabel(defaultName);

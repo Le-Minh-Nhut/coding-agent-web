@@ -1,5 +1,6 @@
 import { expect, test } from "@playwright/test";
 import {
+  assertNoUnexpectedAppErrors,
   harnessFixture,
   login,
   openFolderRow,
@@ -65,6 +66,7 @@ test("V13-03 late folder create cannot replace currently displayed directory", a
   expect((await projectByLabel(page, projectLabel)).path).toBe(currentlyDisplayedPath);
   expect(createdPath).toBe(`${fixture.rootsDir}/${folderName}`);
   expect((await readBrowse(page, fixture.rootsDir)).entries.some((entry) => entry.path === createdPath && entry.isDirectory)).toBe(true);
+  await assertNoUnexpectedAppErrors(page);
 });
 
 test("V13-07 conversation and activity failures render errors, not empty states", async ({ page }) => {
@@ -89,9 +91,11 @@ test("V13-07 conversation and activity failures render errors, not empty states"
   await page.getByRole("button", { name: "Activity" }).click();
   await expect(page.getByRole("alert")).toBeVisible();
   await expect(page.getByText("No activity recorded for this conversation yet.")).toHaveCount(0);
+  // Both 500s were injected; what must not appear is an error the app did not ask for.
+  await assertNoUnexpectedAppErrors(page);
 });
 
-test("V13-09 rapid star clicks send same desired value and follow server result", async ({ page }) => {
+test("V13-09 rapid star clicks express the desired value and follow server result", async ({ page }) => {
   const fixture = harnessFixture();
   await page.setViewportSize({ width: 375, height: 812 });
   await login(page);
@@ -101,7 +105,9 @@ test("V13-09 rapid star clicks send same desired value and follow server result"
   const card = page.locator(".card").filter({ hasText: "Seeded Fixture" });
   const star = card.getByRole("button", { name: "☆", exact: true });
   const favoriteBodies: unknown[] = [];
-  // Mocked latency around real backend PATCH responses; both requests must express desired state.
+  // Mocked latency around real backend PATCH responses. One write per project is
+  // in flight at a time, so the invariant is the end state — the desired value
+  // reaches the server and the UI follows — not a request per activation.
   await page.route(`**/api/projects/${project.id}`, async (route) => {
     if (route.request().method() !== "PATCH") return route.continue();
     favoriteBodies.push(route.request().postDataJSON());
@@ -117,9 +123,10 @@ test("V13-09 rapid star clicks send same desired value and follow server result"
     element.click();
     element.click();
   });
-  await expect.poll(() => favoriteBodies.length).toBe(2);
-  expect(favoriteBodies).toEqual([{ favorite: true }, { favorite: true }]);
   await expect(card.getByRole("button", { name: "★", exact: true })).toBeVisible();
+  // The repeat activation coalesced into the write already in flight; it must not
+  // have raced a second PATCH whose arrival order the server would decide.
+  expect(favoriteBodies).toEqual([{ favorite: true }]);
   expect((await projectByLabel(page, "Seeded Fixture")).favorite).toBe(true);
   // One server, one fixture: put the seeded project back the way the next test
   // expects it, through the same path the user would take (an API request from
@@ -127,6 +134,7 @@ test("V13-09 rapid star clicks send same desired value and follow server result"
   await card.getByRole("button", { name: "★", exact: true }).click();
   await expect(card.getByRole("button", { name: "☆", exact: true })).toBeVisible();
   expect((await projectByLabel(page, "Seeded Fixture")).favorite).toBe(false);
+  await assertNoUnexpectedAppErrors(page);
 });
 
 test("V13-09 failed star update does not claim success", async ({ page }) => {
@@ -145,6 +153,7 @@ test("V13-09 failed star update does not claim success", async ({ page }) => {
   await expect(card.getByRole("button", { name: "☆", exact: true })).toBeVisible();
   await expect(card.getByRole("button", { name: "★", exact: true })).toHaveCount(0);
   expect((await projectByLabel(page, "Seeded Fixture")).favorite).toBe(false);
+  await assertNoUnexpectedAppErrors(page);
 });
 
 test("V12-03 retry rechecks host link without launching a conversation", async ({ page }) => {
@@ -173,6 +182,9 @@ test("V12-03 retry rechecks host link without launching a conversation", async (
   await expect(page.getByRole("button", { name: "Retry" })).toBeVisible();
   await expect(page.getByText(/Host presence is not yet verified|No saved transcript is available/)).toBeVisible();
   expect(launches).toBe(0);
+  // The 404 link response is injected (and the real endpoint answers the same way
+  // for a seeded conversation with no writer); nothing else may error.
+  await assertNoUnexpectedAppErrors(page);
 });
 
 test("V13-04 late new chat response leaves current project selected", async ({ page }) => {
@@ -220,4 +232,5 @@ test("V13-04 late new chat response leaves current project selected", async ({ p
   // The route is still holding the delayed response; do not wait for it, the test's
   // claim is about the app's state, not about that response arriving.
   await page.unrouteAll({ behavior: "ignoreErrors" });
+  await assertNoUnexpectedAppErrors(page);
 });

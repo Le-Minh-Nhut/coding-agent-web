@@ -18,7 +18,7 @@ export function FolderBrowser({ onSelect, onCancel }: FolderBrowserProps) {
   const [newFolderError, setNewFolderError] = useState<string | null>(null);
   const [creatingFolder, setCreatingFolder] = useState(false);
   const [refreshVersion, setRefreshVersion] = useState(0);
-  const [loadingMore, setLoadingMore] = useState(false);
+  const [loadingMoreFor, setLoadingMoreFor] = useState<number | null>(null);
   const createdPathRef = useRef<{ directory: string; path: string } | null>(null);
   const navigationGenerationRef = useRef(0);
   useEffect(() => {
@@ -31,7 +31,7 @@ export function FolderBrowser({ onSelect, onCancel }: FolderBrowserProps) {
     setLoading(true);
     setErrorText(null);
     setListing(null);
-    setLoadingMore(false);
+    setLoadingMoreFor(null);
 
     const load = async () => {
       let result = await api.browse(currentPath, { limit: 100 });
@@ -69,19 +69,18 @@ export function FolderBrowser({ onSelect, onCancel }: FolderBrowserProps) {
     return () => { navigationGenerationRef.current++; };
   }, [currentPath, refreshVersion]);
   const loadMore = async () => {
-    if (!listing?.nextCursor || loadingMore) return;
-    // Capture the navigation generation at request start: every state write below
-    // (loading, error, list/cursor) is dropped if the user has navigated since,
-    // including a same-path reload which is also a new generation.
+    if (!listing?.nextCursor || loadingMoreFor !== null) return;
+    // Pending load-more belongs to the navigation generation that started it. The
+    // captured generation is stored on the button state, so only that generation's
+    // settlement releases it: an old navigation completing while a newer one owns
+    // the pending leaves it alone, and vice versa.
     const generation = navigationGenerationRef.current;
     const directory = listing.path;
-    setLoadingMore(true);
+    setLoadingMoreFor(generation);
     setErrorText(null);
     const result = await api.browse(directory, { limit: 100, cursor: listing.nextCursor });
-    setLoadingMore(false);
-    // The list/error writes below are dropped if the user has navigated since. The
-    // spinner is released first: a generation bump that does not change the effect
-    // deps (New-Folder Cancel) would otherwise leave load-more stuck disabled.
+    setLoadingMoreFor((owner) => (owner === generation ? null : owner));
+    // The list/error writes below are dropped if the user has navigated since.
     if (generation !== navigationGenerationRef.current) return;
     if (!result.ok) {
       setErrorText(result.error.message || "Failed to load more folders");
@@ -241,8 +240,8 @@ export function FolderBrowser({ onSelect, onCancel }: FolderBrowserProps) {
               </div>
             )}
             {listing?.hasMore && (
-              <button type="button" className="folder-browser-load-more" onClick={() => void loadMore()} disabled={loadingMore}>
-                {loadingMore ? "Loading…" : "Load more"}
+              <button type="button" className="folder-browser-load-more" onClick={() => void loadMore()} disabled={loadingMoreFor !== null}>
+                {loadingMoreFor !== null ? "Loading…" : "Load more"}
               </button>
             )}
           </div>
