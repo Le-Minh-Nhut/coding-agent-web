@@ -107,6 +107,15 @@ function makeWorld() {
       conversations.set(id, next);
       return next;
     },
+    async updateConversationIfCurrent(id, expectedEpoch, patch) {
+      const current = conversations.get(id);
+      if (!current) return null;
+      if ((current.lifecycleEpoch ?? 0) !== expectedEpoch) return { conversation: current, applied: false };
+      if (storeWriteThrows) throw new Error("simulated store write failure after tmux launch");
+      const next = { ...current, ...patch, updatedAt: new Date().toISOString() };
+      conversations.set(id, next);
+      return { conversation: next, applied: true };
+    },
     async recordEvent(conversationId, type, payload) {
       events.push({ conversationId, type, payload });
       return { conversationId, type, payload };

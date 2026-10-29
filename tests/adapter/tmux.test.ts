@@ -161,6 +161,14 @@ describe("tmux", () => {
           rows.set(id, next);
           return next;
         },
+        updateConversationIfCurrent: async (id, expectedEpoch, patch) => {
+          const current = rows.get(id);
+          if (!current) return null;
+          if ((current.lifecycleEpoch ?? 0) !== expectedEpoch) return { conversation: current, applied: false };
+          const next = { ...current, ...patch };
+          rows.set(id, next);
+          return { conversation: next, applied: true };
+        },
         recordEvent: async () => null,
         async reserveLaunch(id: string) {
           if (!rows.has(id)) return false;

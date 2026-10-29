@@ -86,7 +86,6 @@ export type RuntimeState = (typeof RUNTIME_STATES)[number];
 /** Where a conversation's process came from, which decides what "restart" may do. */
 export const OWNERSHIP = ["managed", "external"] as const;
 export type Ownership = (typeof OWNERSHIP)[number];
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Projects
 // ─────────────────────────────────────────────────────────────────────────────
@@ -182,12 +181,35 @@ export interface Conversation {
   hostInstanceId: string | null;
   /** Room generation observed when the last link was minted. */
   hostGeneration: number | null;
+  /**
+   * Counter of this conversation's lifecycles. It advances every time a launch
+   * records its process and every time a stop or restart transitions the row.
+   *
+   * An observation of the machine (a refresh, a delete gate) is evidence only
+   * about *the life it observed*, so it carries the epoch it read. The write it
+   * produces commits only while the row is still at that epoch; otherwise it is
+   * a stale result about a process that is already gone, and applying it would
+   * overwrite the identity, host or state of a newer life — or let a delete drop
+   * the only pointer to a process that is still running. Milliseconds cannot do
+   * this: two transitions can land inside one tick.
+   *
+   * Optional for rows persisted before this field existed; absent reads as `0`.
+   */
+  lifecycleEpoch?: number;
   createdAt: string;
   updatedAt: string;
   lastActivityAt: string | null;
   /** Why the state is what it is, in the user's words. */
   statusDetail: string | null;
 }
+
+/**
+ * The lifecycle counter of a row, defaulting to `0` for records persisted before
+ * the field existed. Every comparison of an observed epoch against a stored one
+ * goes through this: reading `lifecycleEpoch` directly would compare `undefined`
+ * with `undefined` on a legacy row and miss that a launch's `1` is a change.
+ */
+export const epochOf = (conversation: Pick<Conversation, "lifecycleEpoch">): number => conversation.lifecycleEpoch ?? 0;
 
 export interface NativeSessionSummary {
   sessionId: string;

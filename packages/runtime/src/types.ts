@@ -19,6 +19,31 @@ export interface ConversationRuntimeStore {
   getConversation(id: string): Promise<Conversation | null>;
   listAllConversations(): Promise<Conversation[]>;
   updateConversation(id: string, patch: Partial<Conversation>): Promise<Conversation | null>;
+  /**
+   * Write a lifecycle patch only while the row is still the lifecycle the caller
+   * observed (`expectedEpoch`).
+   *
+   * The supervisor observes the machine, awaits probes and then writes what it
+   * learned. Between those two moments a *newer* lifecycle can begin: a launch
+   * records its own identity, a stop transitions the row, another refresh
+   * commits. The patch the caller holds describes the old life, so applying it
+   * would overwrite the new row's identity, host, ownership or state — and a
+   * delete acting on the old observation would drop the only pointer to a
+   * process that is still running.
+   *
+   * `epoch` is the lifecycle counter (see `Conversation.lifecycleEpoch`), compared
+   * against the row *inside the store's authoritative section*, so the freshness
+   * check and the mutation cannot interleave with a launch that bumps it.
+   *
+   * Returns the row as it stands now plus whether the patch was applied: `false`
+   * means the caller's observation was stale and was deliberately dropped, and
+   * the caller must keep the returned (newer) row rather than its own result.
+   */
+  updateConversationIfCurrent(
+    id: string,
+    expectedEpoch: number,
+    patch: Partial<Conversation>,
+  ): Promise<{ conversation: Conversation; applied: boolean } | null>;
   recordEvent(conversationId: string, type: string, payload: unknown): Promise<unknown>;
   /**
    * Claim a launch for this conversation, and say whether the row was still there.
@@ -85,6 +110,15 @@ export type TmuxProbeRead =
 
 /** Everything observable about a conversation's runtime, gathered without changing anything. */
 export interface Observations {
+  /**
+   * The conversation's lifecycle epoch at the moment this observation was taken.
+   *
+   * An observation describes *a* life, not the row forever. A caller that later
+   * commits what it learned (or that lets a delete act on it) must present this
+   * value, so a life that began in between makes the result stale rather than
+   * authoritative. See `Conversation.lifecycleEpoch`.
+   */
+  observedEpoch: number;
   /** The tmux session we launched, if we still have one recorded. */
   tmux: RuntimeTmuxSession | null;
   /** The host row matching this conversation's native session, if any. */

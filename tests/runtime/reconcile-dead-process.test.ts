@@ -22,6 +22,14 @@ function storeWith(conversation: Conversation) {
       conversations.set(id, next);
       return next;
     },
+    updateConversationIfCurrent: async (id, expectedEpoch, patch) => {
+      const current = conversations.get(id);
+      if (!current) return null;
+      if ((current.lifecycleEpoch ?? 0) !== expectedEpoch) return { conversation: current, applied: false };
+      const next = { ...current, ...patch };
+      conversations.set(id, next);
+      return { conversation: next, applied: true };
+    },
     recordEvent: async () => null,
     async reserveLaunch(id: string) {
       if (!conversations.has(id)) return false;

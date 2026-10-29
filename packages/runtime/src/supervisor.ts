@@ -1,4 +1,4 @@
-import type { Conversation } from "@caw/contracts";
+import { epochOf, type Conversation } from "@caw/contracts";
 import { evaluateState, hostState, launchVerdict } from "./state";
 import type {
   ConversationRuntimeStore,
@@ -293,6 +293,7 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
       recoveredHost = Boolean(host);
     }
     return {
+      observedEpoch: epochOf(conversation),
       tmux,
       host,
       hostMatchReason,
@@ -329,13 +330,23 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
   async function refresh(conversationId: string): Promise<Conversation | null> {
     const conversation = await options.store.getConversation(conversationId);
     if (!conversation) return null;
+    // The epoch this refresh will speak for. It is read before the probes and
+    // presented at commit: an observation is evidence about one life, and a
+    // launch or stop that opened a new one while we probed makes this result
+    // stale rather than authoritative.
+    const observedEpoch = epochOf(conversation);
     const observations = await observationsFor(conversation);
     const verdict: StateVerdict = evaluateState(observations);
     // A launch that was refused never started a process, so there is nothing to
     // observe that would make it "starting" again: `evaluateState`'s fallback for a
     // never-launched row would resurrect the refusal as a ghost launch and discard
     // the reason. Keep the recorded failure as it stands.
-    if (verdict.state === "starting" && conversation.state === "error" && !observations.everLaunched) return conversation;
+    if (verdict.state === "starting" && conversation.state === "error" && !observations.everLaunched) {
+      // Refused launches leave the recorded failure standing; no probe may
+      // resurrect it as a ghost launch. The read still goes through the epoch
+      // gate so a newer life's row is what the caller sees.
+      return (await options.store.updateConversationIfCurrent(conversationId, observedEpoch, {}))?.conversation ?? null;
+    }
 
     // Compute the patch once and use those same values for the comparison and the
     // write. Comparing a normalized patch against the row and then writing a
@@ -379,7 +390,11 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
     const changed = (Object.keys(patch) as Array<keyof Conversation>).some((key) => conversation[key] !== patch[key]);
     if (!changed) return conversation;
 
-    return options.store.updateConversation(conversationId, patch);
+    // Conditional commit: if a newer life began while we probed, this patch
+    // describes a process that is already gone, so it is dropped and the newer
+    // row is returned instead. A refresh that writes nothing is fine; a stale
+    // refresh overwriting a new host/model/state is not.
+    return (await options.store.updateConversationIfCurrent(conversationId, observedEpoch, patch))?.conversation ?? null;
   }
 
   /** Record the runtime facts we can only learn from the machine. */
@@ -393,7 +408,10 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
 
 
     if (Object.keys(patch).length === 0) return conversation;
-    return (await options.store.updateConversation(conversation.id, patch)) ?? conversation;
+    // A journal probe ran during this call, so a launch could have claimed the row
+    // meanwhile. The header backfill is bound to the life it was read for; if that
+    // life is over, the row as it now stands is the answer.
+    return (await options.store.updateConversationIfCurrent(conversation.id, epochOf(conversation), patch))?.conversation ?? conversation;
   }
 
   /** Count visible sessions and recorded pane PIDs; state labels are not evidence. */
@@ -452,6 +470,9 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
       if (!initial) throw new RuntimeFailure("agent_not_running", `Unknown conversation ${conversationId}`);
 
       let launched!: RuntimeTmuxSession;
+      // The epoch the record write assigned; handed to `waitForPublish` so its
+      // late writes are conditional on the life they were computed for.
+      let publishEpoch = 0;
       await withLaunchLock(async () => {
         const conversation = await options.store.getConversation(conversationId);
         if (!conversation) throw new RuntimeFailure("agent_not_running", `Unknown conversation ${conversationId}`);
@@ -537,8 +558,14 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
         }
 
         launched = await options.adapters.launch({ ...spec, conversationId });
+        // The epoch the row holds right now is the life this launch is about to
+        // replace. The store advances it when the record below lands, and every
+        // later write of this call is conditional on the value the store returns,
+        // so a stop or another life landing meanwhile cannot be overwritten by a
+        // result computed for this launch.
+        const observedEpoch = epochOf(conversation);
         try {
-          const recorded = await options.store.updateConversation(conversationId, {
+          const recorded = await options.store.updateConversationIfCurrent(conversationId, observedEpoch, {
             tmuxSessionId: launched.id,
             tmuxSessionName: launched.name,
             tmuxServerIdentity: launched.serverIdentity,
@@ -548,7 +575,11 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
             ownership: "managed",
             statusDetail: "Starting…",
           });
-          if (!recorded) throw new RuntimeFailure("agent_not_running", "The conversation disappeared before its launched agent could be recorded.");
+          // `null` is a gone row; `applied: false` means a newer life took the row
+          // while we were launching, so our identity was never recorded and this
+          // process is exactly the unrecorded writer the undo below exists for.
+          if (!recorded?.applied) throw new RuntimeFailure("agent_not_running", "The conversation changed identity before its launched agent could be recorded.");
+          publishEpoch = epochOf(recorded.conversation);
         } catch (error) {
           // We created a process we cannot record. Leaving it running would be
           // an untracked OMP writer: invisible here, holding a slot nobody can
@@ -566,8 +597,12 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
           } catch {
             undone = false;
           }
+          // Conditional on the life we launched under: if the row already moved on,
+          // this failure describes a process that is no longer the row's, and
+          // writing it would mark a life we do not own. The reservation handling
+          // below still reflects the real process — only the row write is refused.
           await options.store
-            .updateConversation(conversationId, {
+            .updateConversationIfCurrent(conversationId, observedEpoch, {
               tmuxSessionId: launched.id,
               tmuxSessionName: launched.name,
               tmuxServerIdentity: launched.serverIdentity,
@@ -593,7 +628,7 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
         }
         await options.store.recordEvent(conversationId, "agent.launched", { tmuxSessionId: launched.id, tmuxSessionName: launched.name });
       });
-      return await waitForPublish(conversationId, launched, spec);
+      return await waitForPublish(conversationId, launched, spec, publishEpoch);
     } finally {
       // Released unless ownership was deliberately retained for a process that
       // really exists: then the claim is what stops a retry forking the session that
@@ -611,6 +646,7 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
     conversationId: string,
     launched: RuntimeTmuxSession,
     spec: RuntimeLaunchSpec,
+    launchEpoch: number,
   ): Promise<Conversation> {
     const deadline = clock.now() + publishTimeoutMs;
     let registryReadable = true;
@@ -642,11 +678,13 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
         // loop keeps waiting rather than claiming an exit we did not observe.
         if (processAlive(launched.panePid) !== false) continue;
         await options.store.recordEvent(conversationId, "agent.exited", { duringStartup: true, tmuxSessionId: launched.id });
+        // Bound to the launch this call owns: an old start's late "exited" must not
+        // mark the row of a newer life that took over while we were waiting.
         return (
-          (await options.store.updateConversation(conversationId, {
+          (await options.store.updateConversationIfCurrent(conversationId, launchEpoch, {
             state: "error",
             statusDetail: "The agent process exited during startup.",
-          })) ?? conversation
+          }))?.conversation ?? conversation
         );
       }
       const recordedPanePid = conversation.tmuxPanePid !== null && conversation.tmuxPanePid === still.panePid
@@ -667,7 +705,7 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
         });
         const state = hostState(host);
         return (
-          (await options.store.updateConversation(conversationId, {
+          (await options.store.updateConversationIfCurrent(conversationId, launchEpoch, {
             hostInstanceId: host.instanceId,
             hostGeneration: host.generation ?? conversation.hostGeneration,
             nativeSessionId: host.sessionId,
@@ -677,7 +715,7 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
               ? "The agent does not report turn state (older OMP); activity here is unconfirmed."
               : null,
             lastActivityAt: new Date(clock.now()).toISOString(),
-          })) ?? conversation
+          }))?.conversation ?? conversation
         );
       }
     }
@@ -686,14 +724,16 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
     const latest = await options.store.getConversation(conversationId);
     if (!latest) throw new RuntimeFailure("agent_not_running", `Conversation ${conversationId} disappeared`);
     return (
-      (await options.store.updateConversation(conversationId, {
+      // An old start's late publish-timeout lands only on the life it launched;
+      // a newer life keeps its own state.
+      (await options.store.updateConversationIfCurrent(conversationId, launchEpoch, {
         state: registryReadable && !identityUnverified ? "starting" : "unknown",
         statusDetail: !registryReadable
           ? "The OMP Collab registry could not be read during startup, so session publication is unknown."
           : identityUnverified
             ? identityReason ?? "The agent is running, but the published host process could not be positively matched to its tmux process."
             : "The agent is running, but no Collab host was positively matched to its tmux process before startup timed out.",
-      })) ?? latest
+      }))?.conversation ?? latest
     );
   }
 
@@ -704,8 +744,46 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
       throw new RuntimeFailure("agent_not_running", "This agent was started outside the app, so it is not ours to stop. Attach to it from a terminal instead.");
     }
     if (!conversation.tmuxSessionId) throw new RuntimeFailure("agent_not_running", "This conversation has no managed agent process.");
+    /**
+     * The life this stop acts on. The probes below take real time, and a launch
+     * (or another stop) can open a new life in the row while they run, so every
+     * write is conditional on the epoch this stop started from.
+     */
+    let stopEpoch = epochOf(conversation);
+    /**
+     * Commit a result about the process this stop settled: the guarded kill ran, or
+     * the recorded pane PID is confirmed gone (ESRCH). The row is only the record of
+     * that, so a display write that moved the epoch does not make the machine
+     * evidence wrong. `state` is a lifecycle field, and a routine refresh noticing
+     * `idle`->`running` bumps the epoch without putting any process behind the row;
+     * refusing there reports a stop that already took effect as a conflict.
+     *
+     * What must still win is a genuinely newer life. A launch always records its own
+     * `tmuxSessionId` - a stop keeps the old one - so a new process is exactly a
+     * row whose recorded session is no longer the one this stop settled: that row is
+     * refused, whatever its epoch. The same session id means only a display write
+     * moved the epoch, so the commit is retried against the row as it now stands;
+     * the retry is conditional again, so a launch landing in between still wins.
+     */
+    const commit = async (patch: Partial<Conversation>): Promise<Conversation> => {
+      let result = await options.store.updateConversationIfCurrent(conversationId, stopEpoch, patch);
+      if (!result) throw new RuntimeFailure("agent_not_running", `Conversation ${conversationId} disappeared while the stop was in progress.`);
+      if (!result.applied) {
+        const sameSession = result.conversation.tmuxSessionId === conversation.tmuxSessionId
+          && result.conversation.tmuxServerIdentity === conversation.tmuxServerIdentity;
+        if (sameSession) result = await options.store.updateConversationIfCurrent(conversationId, epochOf(result.conversation), patch);
+      }
+      if (!result?.applied) {
+        throw new RuntimeFailure("agent_not_running", "A newer lifecycle replaced this conversation while the stop was in progress, so the stale stop result was discarded.");
+      }
+      stopEpoch = epochOf(result.conversation);
+      return result.conversation;
+    };
     const refuse = async (reason: string): Promise<never> => {
-      await options.store.updateConversation(conversationId, { state: "unknown", statusDetail: reason });
+      // Conditional too: if the row has moved on, the newer life's row is not ours
+      // to mark unknown. The refusal itself still stands — it describes the process
+      // this stop observed.
+      await options.store.updateConversationIfCurrent(conversationId, stopEpoch, { state: "unknown", statusDetail: reason });
       throw new RuntimeFailure("agent_not_running", reason);
     };
     if (!conversation.tmuxServerIdentity || conversation.tmuxPanePid === null || !conversation.nativeSessionId) {
@@ -720,7 +798,7 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
         // under a *different* PID; a different PID behind this one is PID reuse, which
         // can only delay a stop, never fabricate one.
         await options.store.recordEvent(conversationId, "agent.stopped", { tmuxSessionId: conversation.tmuxSessionId, alreadyGone: true });
-        return (await options.store.updateConversation(conversationId, { state: "stopped", statusDetail: "Stopped." })) ?? conversation;
+        return await commit({ state: "stopped", statusDetail: "Stopped." });
       }
       return refuse("The recorded tmux pane is not verifiably gone; ownership cannot be confirmed.");
     }
@@ -735,7 +813,7 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
         return refuse("The recorded tmux pane is not verifiably gone; its process may still be running, so ownership cannot be confirmed.");
       }
       await options.store.recordEvent(conversationId, "agent.stopped", { tmuxSessionId: conversation.tmuxSessionId, alreadyGone: true });
-      return (await options.store.updateConversation(conversationId, { state: "stopped", statusDetail: "Stopped." })) ?? conversation;
+      return await commit({ state: "stopped", statusDetail: "Stopped." });
     }
     if (pane.session.serverIdentity !== conversation.tmuxServerIdentity || pane.session.panePid !== conversation.tmuxPanePid) {
       return refuse("The recorded tmux pane identity or PID changed, so this process cannot be safely stopped.");
@@ -752,7 +830,7 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
       return refuse("The recorded tmux pane is not positively verified as serving this native session.");
     }
     await options.adapters.killTmux(conversation.tmuxSessionId, conversation.tmuxServerIdentity);
-    await options.store.updateConversation(conversationId, { state: "stopping", statusDetail: "Stopping the agent…" });
+    await commit({ state: "stopping", statusDetail: "Stopping the agent…" });
     const deadline = clock.now() + timeoutMs;
     while (clock.now() < deadline) {
       await clock.sleep(250);
@@ -761,7 +839,7 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
       if (currentServerIdentity === null) {
         if (processAlive(conversation.tmuxPanePid) !== false) continue;
         await options.store.recordEvent(conversationId, "agent.stopped", { tmuxSessionId: conversation.tmuxSessionId });
-        return (await options.store.updateConversation(conversationId, { state: "stopped", statusDetail: "Stopped." })) ?? conversation;
+        return await commit({ state: "stopped", statusDetail: "Stopped." });
       }
       if (currentServerIdentity !== conversation.tmuxServerIdentity) continue;
       const probe = await options.adapters.getTmux(conversation.tmuxSessionId);
@@ -772,11 +850,11 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
       if (!probe.session && processAlive(conversation.tmuxPanePid) !== false) continue;
       if (!probe.session || !probe.session.alive) {
         await options.store.recordEvent(conversationId, "agent.stopped", { tmuxSessionId: conversation.tmuxSessionId });
-        return (await options.store.updateConversation(conversationId, { state: "stopped", statusDetail: "Stopped." })) ?? conversation;
+        return await commit({ state: "stopped", statusDetail: "Stopped." });
       }
     }
     await options.store.recordEvent(conversationId, "agent.stop_timeout", { timeoutMs });
-    return (await options.store.updateConversation(conversationId, { state: "stopping", statusDetail: "The process has not exited yet." })) ?? conversation;
+    return await commit({ state: "stopping", statusDetail: "The process has not exited yet." });
   }
 
   /**
@@ -798,12 +876,22 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
 
     const report: ReconcileReport = { adopted: 0, external: 0, stopped: 0, unknown: 0, registered: 0 };
 
+    /**
+     * Reconcile reads every row once, then probes the machine; a launch or a stop
+     * can commit while those probes run. Each row's write is therefore conditional
+     * on the epoch it was read at, so a reconciliation verdict about the previous
+     * life cannot be stamped onto a newer one. `applied: false` means the row moved
+     * on and this pass simply does not speak for it.
+     */
+    const writeIfCurrent = (conversation: Conversation, patch: Partial<Conversation>) =>
+      options.store.updateConversationIfCurrent(conversation.id, epochOf(conversation), patch);
+
     // A failed enumeration is not "nothing is running". Without the session list
     // no conversation's ownership can be confirmed, so every verdict here would
     // be a guess: report unknown and leave the stored states alone.
     if (!managedResult.ok) {
       for (const conversation of all) {
-        await options.store.updateConversation(conversation.id, {
+        await writeIfCurrent(conversation, {
           state: "unknown",
           statusDetail: `The tmux session list could not be read (${managedResult.reason}), so the live state is unknown.`,
         });
@@ -816,7 +904,7 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
       // `$N` identifies a process only on its recorded server; absent sessions need PID evidence too.
       const unseen = unobservableManagedProcesses([conversation], managed)[0];
       if (unseen && unseen.liveness !== false) {
-        await options.store.updateConversation(conversation.id, {
+        await writeIfCurrent(conversation, {
           state: "unknown",
           statusDetail: unseenProcessReason(unseen),
         });
@@ -829,7 +917,7 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
         : null;
       if (!tmux && host) {
         const state = hostState(host);
-        await options.store.updateConversation(conversation.id, {
+        await writeIfCurrent(conversation, {
           hostInstanceId: host.instanceId,
           // Same rule as the start path: an absent generation is not evidence of
           // a rotation, so the recorded value stands.
@@ -863,7 +951,7 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
       // No managed process. Only the registry plus the lease may speak for what is
       // running, and a lease held by a foreign process is not something to adopt.
       if (!hostsResult.ok) {
-        await options.store.updateConversation(conversation.id, {
+        await writeIfCurrent(conversation, {
           state: "unknown",
           statusDetail: "The OMP Collab registry could not be read, so the live state is unknown.",
         });
@@ -874,7 +962,7 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
       if (conversation.nativeSessionId) {
         const leaseLive = await options.adapters.isSessionLive(conversation.nativeSessionId).catch(() => "unknown" as const);
         if (leaseLive !== false) {
-          await options.store.updateConversation(conversation.id, {
+          await writeIfCurrent(conversation, {
             state: "unknown",
             ...(leaseLive === true ? { ownership: "external" as const } : {}),
             statusDetail: leaseLive === true

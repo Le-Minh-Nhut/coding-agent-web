@@ -28,6 +28,7 @@ const host = (over: Partial<RuntimeHost> = {}): RuntimeHost => ({
 });
 
 const obs = (over: Partial<Observations> = {}): Observations => ({
+  observedEpoch: 0,
   tmux: null,
   host: null,
   leaseLive: false,
