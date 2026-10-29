@@ -91,8 +91,6 @@ const DEFAULT_STOP_TIMEOUT_MS = 15_000;
 let launchChain = Promise.resolve();
 // A live managed session without a matching row blocks launches, including after restart; names cannot safely recover ownership.
 
-const launchReservationsByStore = new WeakMap<ConversationRuntimeStore, Set<string>>();
-
 /** `ESRCH` proves exit; PID reuse can mistake an unrelated process for a live pane and conservatively block launches. */
 function processAlive(pid: number | null): boolean | "unknown" {
   if (pid === null || !Number.isSafeInteger(pid) || pid <= 0) return "unknown";
@@ -145,15 +143,6 @@ function rowOwnsLiveSession(row: Conversation, sessions: RuntimeTmuxSession[]): 
 
 
 
-function reservationsFor(store: ConversationRuntimeStore): Set<string> {
-  let reservations = launchReservationsByStore.get(store);
-  if (!reservations) {
-    reservations = new Set();
-    launchReservationsByStore.set(store, reservations);
-  }
-  return reservations;
-}
-
 async function withLaunchLock<T>(operation: () => Promise<T>): Promise<T> {
   const previous = launchChain;
   let release!: () => void;
@@ -166,43 +155,27 @@ async function withLaunchLock<T>(operation: () => Promise<T>): Promise<T> {
   }
 }
 
-/**
- * The identities this launch will write, so a second request for the same
- * underlying session collides with it whatever IDs the two conversations happen
- * to store. Every key includes the conversation id: two rows can point at one
- * journal without agreeing on its id, and those two must not launch twice.
- */
-function reserveKeys(
-  conversationId: string,
-  nativeSessionId: string | null,
-  resumeSessionPath: string | null,
-): string[] {
-  return [
-    `conversation:${conversationId}`,
-    nativeSessionId ? `session:${nativeSessionId}` : null,
-    resumeSessionPath ? `journal:${resumeSessionPath}` : null,
-  ].filter((key): key is string => key !== null);
-}
-
 
 export function createSupervisor(options: SupervisorOptions): Supervisor {
   const clock = options.clock ?? systemClock;
   const publishTimeoutMs = options.publishTimeoutMs ?? DEFAULT_PUBLISH_TIMEOUT_MS;
   const publishPollMs = options.publishPollMs ?? DEFAULT_PUBLISH_POLL_MS;
   const stopTimeoutMs = options.stopTimeoutMs ?? DEFAULT_STOP_TIMEOUT_MS;
-  const launchReservations = reservationsFor(options.store);
+  /**
+   * Conversations whose launch is claimed but whose reservation is not yet visible
+   * in the rows: they occupy a slot none of the live-owner counts can see. Read from
+   * the store, which owns the claims.
+   */
   function untrackedReservationCount(
     conversations: Conversation[],
     managedIds: Set<string>,
     excludedConversationId?: string,
   ): number {
-    return [...launchReservations].filter((key) => {
-      if (!key.startsWith("conversation:")) return false;
-      const conversationId = key.slice("conversation:".length);
-      if (conversationId === excludedConversationId) return false;
-      const row = conversations.find((candidate) => candidate.id === conversationId);
-      return !row?.tmuxSessionId || !managedIds.has(row.tmuxSessionId);
-    }).length;
+    return conversations.filter((row) =>
+      row.id !== excludedConversationId
+      && options.store.isLaunchReserved(row.id)
+      && (!row.tmuxSessionId || !managedIds.has(row.tmuxSessionId)),
+    ).length;
   }
 
 
@@ -450,25 +423,30 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
     return { count, known: true, reason: null };
   }
   async function start(conversationId: string, spec: RuntimeLaunchSpec): Promise<Conversation> {
-    // Reserve eagerly and synchronously, before the first await. `isLaunching` is
-    // what a deleter asks, and the event loop turns between that check and its
-    // commit: a reservation registered later (inside the lock, after the store
-    // reads below) would be invisible to a check that had already run, and the
-    // delete would drop the only pointer to the process this call is about to
-    // create. The set is updated here instead, so every interleaving sees it
-    // before it decides. When the key is already held, this call owns nothing and
-    // must not release another launch's reservation on its way out.
-    const reservationKey = `conversation:${conversationId}`;
-    // `heldByAnother` separates the two cases the key can be in: added by this very
-    // call at the line below (no conflict — it is ours), or already present from
-    // another launch (a conflict). Conflating them made every launch refuse itself.
-    const heldByAnother = launchReservations.has(reservationKey);
-    if (!heldByAnother) launchReservations.add(reservationKey);
-    let heldKeys: string[] = heldByAnother ? [] : [reservationKey];
+    // The reservation is taken by the STORE, on the store's own queue, before any
+    // adapter is called. That single queue is what orders this against a project
+    // delete: `reserveLaunch` and `deleteProject` are sections of it, so exactly one
+    // of them commits first. Reserve first → the delete's queued section sees the
+    // claim and refuses with `has_conversations`, nothing is written. Delete first →
+    // the row is gone, this returns false, and we refuse with `agent_not_running`
+    // before creating any process. There is no window in which both sides miss each
+    // other, which is what the previous eager-but-separate-mutex shape left open.
+    //
+    // `false` has two causes, and the caller must not confuse them: the row is gone
+    // (a delete committed first), or another launch already holds the claim. The row
+    // read tells them apart, and only the first is `agent_not_running`; the second is
+    // a duplicate-writer refusal. Neither case took a claim, so nothing is released.
+    if (!(await options.store.reserveLaunch(conversationId))) {
+      if (!(await options.store.getConversation(conversationId))) {
+        throw new RuntimeFailure("agent_not_running", `Unknown conversation ${conversationId}`);
+      }
+      await options.store
+        .recordEvent(conversationId, "launch.refused", { code: "conflict_owner", key: `conversation:${conversationId}` })
+        .catch(() => null);
+      throw new RuntimeFailure("conflict_owner", "Another launch for this conversation is already in progress.");
+    }
+    // From here this call holds the claim, and only it may release it.
     let ownershipRetained = false;
-    // One try covers the whole body: every exit — the early not-found throw, a
-    // refusal, a failed launch, a fault in anything awaited — releases the keys
-    // it added, unless ownership was deliberately retained.
     try {
       const initial = await options.store.getConversation(conversationId);
       if (!initial) throw new RuntimeFailure("agent_not_running", `Unknown conversation ${conversationId}`);
@@ -477,166 +455,140 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
       await withLaunchLock(async () => {
         const conversation = await options.store.getConversation(conversationId);
         if (!conversation) throw new RuntimeFailure("agent_not_running", `Unknown conversation ${conversationId}`);
-        // Reserve by the identity of what will actually be written. A recorded
-        // native id is one name for a journal, but a conversation can hold the
-        // same journal without the id (resume by path, first launch of a fresh
-        // conversation, a row whose id has not been resolved yet). Keying those
-        // separately let two requests reserve one session twice and start two
-        // writers, so the conversation id is added alongside every key, and the
-        // resume path — the file OMP will open — is a key in its own right.
-        const keys = reserveKeys(conversation.id, conversation.nativeSessionId, spec.resumeSessionPath ?? null);
-        // The conversation key is already held by this very call; it only counts
-        // as a conflict when it was already held by *another* launch.
-        const held = heldByAnother ? reservationKey : keys.find((candidate) => candidate !== reservationKey && launchReservations.has(candidate));
-        if (held !== undefined) {
-          await options.store.recordEvent(conversationId, "launch.refused", { code: "conflict_owner", key: held });
-          throw new RuntimeFailure("conflict_owner", "Another launch for this native session is already in progress.");
+        const hosts = await options.adapters.listHosts().catch(() => {
+          throw new RuntimeFailure("registry_unreadable", "The OMP Collab registry could not be read.");
+        });
+        const managedResult = await readManagedTmux();
+        // Count running agents from what the machine shows *now*, not from what
+        // the store last recorded. A stored state goes stale the moment a process
+        // exits (crash, manual kill, machine reboot), and since nothing polls in
+        // the background, trusting it would leave slots permanently occupied and
+        // refuse every later launch with `conflict_limit`. The stored state is
+        // still used for conversations whose process is confirmed alive here.
+        //
+        // This probe belongs *inside* the critical section. Run before the lock
+        // it can be answered by the previous holder and reused by the next.
+        const leaseLive = conversation.nativeSessionId
+          ? await options.adapters.isSessionLive(conversation.nativeSessionId).catch(() => "unknown" as const)
+          : false;
+        const managed = managedResult.ok ? managedResult.sessions : [];
+        const conversations = await options.store.listAllConversations();
+        const untracked = untrackedLiveSessions(conversations, managed);
+        if (untracked.length) {
+          await options.store.recordEvent(conversationId, "launch.refused", {
+            code: "conflict_owner",
+            untrackedTmuxSessionIds: untracked.map((session) => session.id),
+          });
+          throw new RuntimeFailure(
+            "conflict_owner",
+            "A live managed tmux session has no recorded owner, so new agents are blocked until it is accounted for.",
+          );
         }
-        // The whole bookkeeping is synchronous and adjacent: both the adds and the
-        // `heldKeys` record happen with no await between them, so there is no turn
-        // in which a key is held but unrecorded. The `finally` above can therefore
-        // always release what this call added, whatever fails later — including a
-        // `recordEvent` that throws on a poisoned journal.
-        for (const candidate of keys) launchReservations.add(candidate);
-        heldKeys = keys;
-        try {
-          const hosts = await options.adapters.listHosts().catch(() => {
-            throw new RuntimeFailure("registry_unreadable", "The OMP Collab registry could not be read.");
+        const unseen = unobservableManagedProcesses(conversations, managed);
+        const unsafeUnseen = unseen.filter((check) => check.liveness !== false);
+        if (unsafeUnseen.length) {
+          const reason = unsafeUnseen.map(unseenProcessReason).join(" ");
+          await options.store.recordEvent(conversationId, "launch.refused", {
+            code: "conflict_owner",
+            unobservableTmuxSessionIds: unsafeUnseen.map((check) => check.row.tmuxSessionId),
+            reason,
           });
-          const managedResult = await readManagedTmux();
-          // Count running agents from what the machine shows *now*, not from what
-          // the store last recorded. A stored state goes stale the moment a process
-          // exits (crash, manual kill, machine reboot), and since nothing polls in
-          // the background, trusting it would leave slots permanently occupied and
-          // refuse every later launch with `conflict_limit`. The stored state is
-          // still used for conversations whose process is confirmed alive here.
-          //
-          // This probe belongs *inside* the critical section. Run before the lock
-          // it can be answered by the previous holder and reused by the next.
-          const leaseLive = conversation.nativeSessionId
-            ? await options.adapters.isSessionLive(conversation.nativeSessionId).catch(() => "unknown" as const)
-            : false;
-          const managed = managedResult.ok ? managedResult.sessions : [];
-          const conversations = await options.store.listAllConversations();
-          const untracked = untrackedLiveSessions(conversations, managed);
-          if (untracked.length) {
-            await options.store.recordEvent(conversationId, "launch.refused", {
-              code: "conflict_owner",
-              untrackedTmuxSessionIds: untracked.map((session) => session.id),
-            });
-            throw new RuntimeFailure(
-              "conflict_owner",
-              "A live managed tmux session has no recorded owner, so new agents are blocked until it is accounted for.",
-            );
-          }
-          const unseen = unobservableManagedProcesses(conversations, managed);
-          const unsafeUnseen = unseen.filter((check) => check.liveness !== false);
-          if (unsafeUnseen.length) {
-            const reason = unsafeUnseen.map(unseenProcessReason).join(" ");
-            await options.store.recordEvent(conversationId, "launch.refused", {
-              code: "conflict_owner",
-              unobservableTmuxSessionIds: unsafeUnseen.map((check) => check.row.tmuxSessionId),
-              reason,
-            });
-            throw new RuntimeFailure("conflict_owner", reason);
-          }
-          const hiddenLiveRows = new Set(unseen.filter((check) => check.liveness === true).map((check) => check.row.id));
-          const liveOwners = conversations.filter(
-            (row) => row.id !== conversationId && (rowOwnsLiveSession(row, managed) || hiddenLiveRows.has(row.id)),
-          );
-          // native id, another by the journal path it will resume. Both are the
-          // same writer, so either identity matching a live owner's is a refusal.
-          const aliasesLiveOwner = liveOwners.some(
-            (row) =>
-              (Boolean(conversation.nativeSessionId) && row.nativeSessionId === conversation.nativeSessionId) ||
-              (Boolean(conversation.nativeSessionPath) && row.nativeSessionPath === conversation.nativeSessionPath) ||
-              (Boolean(spec.resumeSessionPath) && row.nativeSessionPath === spec.resumeSessionPath),
-          );
-          if (aliasesLiveOwner) {
-            await options.store.recordEvent(conversationId, "launch.refused", { code: "conflict_owner" });
-            throw new RuntimeFailure("conflict_owner", "Another conversation already owns an active writer for this native session.");
-          }
-          const managedIds = new Set(managed.filter((session) => session.alive).map((session) => session.id));
-          const count = Math.max(
-            managed.filter((session) => session.alive).length,
-            liveOwners.length + untrackedReservationCount(conversations, managedIds, conversationId),
-          );
-          const liveTmux = findManagedTmux(conversation, managed);
-          const host = conversation.nativeSessionId
-            ? hosts.find((row) => row.sessionId === conversation.nativeSessionId) ?? null
-            : null;
-          const verdict = launchVerdict({
-            liveTmux: liveTmux?.alive ? liveTmux : null,
-            host,
-            leaseLive,
-            activeCount: count,
-            activeCountUnknown: !managedResult.ok,
-            activeCountReason: managedResult.ok
-              ? null
-              : `The running agents could not be enumerated (${managedResult.reason}), so the limit of ${options.maxActive} cannot be enforced.`,
-            maxActive: options.maxActive,
-          });
-          if (!verdict.allowed) {
-            await options.store.recordEvent(conversationId, "launch.refused", { code: verdict.code, message: verdict.message });
-            throw new RuntimeFailure(verdict.code, verdict.message);
-          }
+          throw new RuntimeFailure("conflict_owner", reason);
+        }
+        const hiddenLiveRows = new Set(unseen.filter((check) => check.liveness === true).map((check) => check.row.id));
+        const liveOwners = conversations.filter(
+          (row) => row.id !== conversationId && (rowOwnsLiveSession(row, managed) || hiddenLiveRows.has(row.id)),
+        );
+        // native id, another by the journal path it will resume. Both are the
+        // same writer, so either identity matching a live owner's is a refusal.
+        const aliasesLiveOwner = liveOwners.some(
+          (row) =>
+            (Boolean(conversation.nativeSessionId) && row.nativeSessionId === conversation.nativeSessionId) ||
+            (Boolean(conversation.nativeSessionPath) && row.nativeSessionPath === conversation.nativeSessionPath) ||
+            (Boolean(spec.resumeSessionPath) && row.nativeSessionPath === spec.resumeSessionPath),
+        );
+        if (aliasesLiveOwner) {
+          await options.store.recordEvent(conversationId, "launch.refused", { code: "conflict_owner" });
+          throw new RuntimeFailure("conflict_owner", "Another conversation already owns an active writer for this native session.");
+        }
+        const managedIds = new Set(managed.filter((session) => session.alive).map((session) => session.id));
+        const count = Math.max(
+          managed.filter((session) => session.alive).length,
+          liveOwners.length + untrackedReservationCount(conversations, managedIds, conversationId),
+        );
+        const liveTmux = findManagedTmux(conversation, managed);
+        const host = conversation.nativeSessionId
+          ? hosts.find((row) => row.sessionId === conversation.nativeSessionId) ?? null
+          : null;
+        const verdict = launchVerdict({
+          liveTmux: liveTmux?.alive ? liveTmux : null,
+          host,
+          leaseLive,
+          activeCount: count,
+          activeCountUnknown: !managedResult.ok,
+          activeCountReason: managedResult.ok
+            ? null
+            : `The running agents could not be enumerated (${managedResult.reason}), so the limit of ${options.maxActive} cannot be enforced.`,
+          maxActive: options.maxActive,
+        });
+        if (!verdict.allowed) {
+          await options.store.recordEvent(conversationId, "launch.refused", { code: verdict.code, message: verdict.message });
+          throw new RuntimeFailure(verdict.code, verdict.message);
+        }
 
-          launched = await options.adapters.launch({ ...spec, conversationId });
+        launched = await options.adapters.launch({ ...spec, conversationId });
+        try {
+          const recorded = await options.store.updateConversation(conversationId, {
+            tmuxSessionId: launched.id,
+            tmuxSessionName: launched.name,
+            tmuxServerIdentity: launched.serverIdentity,
+            tmuxPanePid: launched.panePid,
+            nativeSessionPath: spec.resumeSessionPath ?? conversation.nativeSessionPath,
+            state: "starting",
+            ownership: "managed",
+            statusDetail: "Starting…",
+          });
+          if (!recorded) throw new RuntimeFailure("agent_not_running", "The conversation disappeared before its launched agent could be recorded.");
+        } catch (error) {
+          // We created a process we cannot record. Leaving it running would be
+          // an untracked OMP writer: invisible here, holding a slot nobody can
+          // name, and able to fork the session if the user retries. So we undo
+          // the launch we just made — by the id and server identity we were
+          // given, under the adapter's identity-guarded kill — and only then
+          // release the reservation. If even that fails, the reservation stays
+          // held and the failure is recorded, because a retry would otherwise
+          // create a second writer for a session something is already writing.
+          let undone = false;
           try {
-            const recorded = await options.store.updateConversation(conversationId, {
+            await options.adapters.killTmux(launched.id, launched.serverIdentity);
+            if (processAlive(launched.panePid) !== false) throw new Error("The launched pane process is still alive or cannot be confirmed gone.");
+            undone = true;
+          } catch {
+            undone = false;
+          }
+          await options.store
+            .updateConversation(conversationId, {
               tmuxSessionId: launched.id,
               tmuxSessionName: launched.name,
               tmuxServerIdentity: launched.serverIdentity,
               tmuxPanePid: launched.panePid,
               nativeSessionPath: spec.resumeSessionPath ?? conversation.nativeSessionPath,
-              state: "starting",
+              state: undone ? "stopped" : "unknown",
               ownership: "managed",
-              statusDetail: "Starting…",
-            });
-            if (!recorded) throw new RuntimeFailure("agent_not_running", "The conversation disappeared before its launched agent could be recorded.");
-          } catch (error) {
-            // We created a process we cannot record. Leaving it running would be
-            // an untracked OMP writer: invisible here, holding a slot nobody can
-            // name, and able to fork the session if the user retries. So we undo
-            // the launch we just made — by the id and server identity we were
-            // given, under the adapter's identity-guarded kill — and only then
-            // release the reservation. If even that fails, the reservation stays
-            // held and the failure is recorded, because a retry would otherwise
-            // create a second writer for a session something is already writing.
-            let undone = false;
-            try {
-              await options.adapters.killTmux(launched.id, launched.serverIdentity);
-              if (processAlive(launched.panePid) !== false) throw new Error("The launched pane process is still alive or cannot be confirmed gone.");
-              undone = true;
-            } catch {
-              undone = false;
-            }
-            await options.store
-              .updateConversation(conversationId, {
-                tmuxSessionId: launched.id,
-                tmuxSessionName: launched.name,
-                tmuxServerIdentity: launched.serverIdentity,
-                tmuxPanePid: launched.panePid,
-                nativeSessionPath: spec.resumeSessionPath ?? conversation.nativeSessionPath,
-                state: undone ? "stopped" : "unknown",
-                ownership: "managed",
-                statusDetail: undone
-                  ? "The agent could not be recorded, so the process that was started has been stopped."
-                  : `The agent process was launched (tmux ${launched.id} on ${launched.serverIdentity}) but could not be recorded and could not be stopped. It may still be running, so this conversation will not be started again until it is dealt with.`,
-              })
-              .catch(() => null);
-            await options.store
-              .recordEvent(conversationId, undone ? "agent.launch_discarded" : "agent.launch_unrecorded", {
-                tmuxSessionId: launched.id,
-                tmuxSessionName: launched.name,
-                tmuxServerIdentity: launched.serverIdentity,
-                error: error instanceof Error ? error.message : String(error),
-              })
-              .catch(() => null);
-            if (!undone) ownershipRetained = true;
-            throw error;
-          }
-        } catch (error) {
+              statusDetail: undone
+                ? "The agent could not be recorded, so the process that was started has been stopped."
+                : `The agent process was launched (tmux ${launched.id} on ${launched.serverIdentity}) but could not be recorded and could not be stopped. It may still be running, so this conversation will not be started again until it is dealt with.`,
+            })
+            .catch(() => null);
+          await options.store
+            .recordEvent(conversationId, undone ? "agent.launch_discarded" : "agent.launch_unrecorded", {
+              tmuxSessionId: launched.id,
+              tmuxSessionName: launched.name,
+              tmuxServerIdentity: launched.serverIdentity,
+              error: error instanceof Error ? error.message : String(error),
+            })
+            .catch(() => null);
+          if (!undone) ownershipRetained = true;
           throw error;
         }
         await options.store.recordEvent(conversationId, "agent.launched", { tmuxSessionId: launched.id, tmuxSessionName: launched.name });
@@ -644,17 +596,14 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
       return await waitForPublish(conversationId, launched, spec);
     } finally {
       // Released unless ownership was deliberately retained for a process that
-      // really exists: then the reservation is what stops a retry forking the
-      // session that process is already writing. That retention has no in-process
-      // release — `stop` does not clear it, and a retry is refused by the same
-      // key — so a conversation left in that state stays undeletable and
-      // unstartable until the process is accounted for and the backend restarts
-      // (the set is in-memory), at which point `reconcile` re-reads the machine.
-      // Nothing kills the process automatically; see docs/architecture/
-      // session-lifecycle.md.
-      if (!ownershipRetained) {
-        for (const candidate of heldKeys) launchReservations.delete(candidate);
-      }
+      // really exists: then the claim is what stops a retry forking the session that
+      // process is already writing. That retention has no in-process release —
+      // `stop` does not clear it, and a retry is refused by the same claim — so a
+      // conversation left in that state stays unstartable and undeletable until the
+      // process is accounted for and the backend restarts (the set is in-memory),
+      // at which point `reconcile` re-reads the machine. Nothing kills the process
+      // automatically; see docs/architecture/session-lifecycle.md.
+      if (!ownershipRetained) options.store.releaseLaunch(conversationId);
     }
   }
   /** Wait for a newly published host and record it only after positive lineage confirmation. */
@@ -952,7 +901,12 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
    * the process exists but `tmuxSessionId` is still null.
    */
   function isLaunching(conversationId: string): boolean {
-    return launchReservations.has(`conversation:${conversationId}`);
+    // The store owns the claim, and its answer is the right one for this observer:
+    // a reservation is only ever taken inside the store queue, so a stale `false`
+    // here cannot let anything unsafe happen — a deleter that acts on it still has
+    // `deleteProject` re-check inside that same queue, where the claim either is
+    // visible (refusal) or the row it would drop is gone.
+    return options.store.isLaunchReserved(conversationId);
   }
 
   return { refresh, start, stop, reconcile, activeCount, isLaunching, observe };

@@ -98,6 +98,7 @@ function makeWorld() {
   };
 
   const conversations = new Map<string, Conversation>();
+  const reserved = new Set<string>();
   const store: ConversationRuntimeStore = {
     async getConversation(id) {
       return conversations.get(id) ?? null;
@@ -116,6 +117,17 @@ function makeWorld() {
     async recordEvent(conversationId, type, payload) {
       events.push({ conversationId, type, payload });
       return { conversationId, type, payload };
+    },
+    async reserveLaunch(id: string) {
+      if (!conversations.has(id)) return false;
+      reserved.add(id);
+      return true;
+    },
+    releaseLaunch(id: string) {
+      reserved.delete(id);
+    },
+    isLaunchReserved(id: string) {
+      return reserved.has(id);
     },
   };
 

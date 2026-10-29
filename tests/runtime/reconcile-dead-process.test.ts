@@ -11,6 +11,7 @@ import type { ConversationRuntimeStore, RuntimeAdapters, RuntimeTmuxSession } fr
  */
 function storeWith(conversation: Conversation) {
   const conversations = new Map([[conversation.id, conversation]]);
+  const reserved = new Set<string>();
   const store: ConversationRuntimeStore = {
     getConversation: async (id) => conversations.get(id) ?? null,
     listAllConversations: async () => [...conversations.values()],
@@ -22,6 +23,17 @@ function storeWith(conversation: Conversation) {
       return next;
     },
     recordEvent: async () => null,
+    async reserveLaunch(id: string) {
+      if (!conversations.has(id)) return false;
+      reserved.add(id);
+      return true;
+    },
+    releaseLaunch(id: string) {
+      reserved.delete(id);
+    },
+    isLaunchReserved(id: string) {
+      return reserved.has(id);
+    },
   };
   return { store, conversations };
 }

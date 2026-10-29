@@ -117,6 +117,7 @@ function makeWorld() {
   };
 
   const conversations = new Map<string, Conversation>();
+  const reserved = new Set<string>();
   const store: ConversationRuntimeStore = {
     async getConversation(id) {
       return conversations.get(id) ?? null;
@@ -137,6 +138,17 @@ function makeWorld() {
       const event = { conversationId, type, payload, seq: events.filter((item) => item.conversationId === conversationId).length + 1 };
       events.push(event);
       return event;
+    },
+    async reserveLaunch(id: string) {
+      if (!conversations.has(id)) return false;
+      reserved.add(id);
+      return true;
+    },
+    releaseLaunch(id: string) {
+      reserved.delete(id);
+    },
+    isLaunchReserved(id: string) {
+      return reserved.has(id);
     },
   };
 
@@ -199,6 +211,10 @@ function makeWorld() {
     },
     setServerIdentity: (value: string | null) => {
       tmuxServerIdentity = value;
+    },
+    /** Drop a row the way a committed project delete does. */
+    removeRow: (conversationId: string) => {
+      conversations.delete(conversationId);
     },
   };
 }
@@ -1932,29 +1948,37 @@ describe("supervisor.refresh", () => {
     expect(supervisor.isLaunching("c1")).toBe(false);
   });
 
-  it("registers the reservation synchronously, before the start's first await", async () => {
-    // The deleter's window: it reads `isLaunching`, then commits after several
-    // awaits. If the reservation only appears inside the lock — after the store
-    // reads that start performs first — the delete's check has already run and
-    // cannot see it. So the set must be updated by the time `start` returns its
-    // promise, before any of its own awaits turn the loop.
+  it("acquires the launch claim through the store before any adapter call", async () => {
+    // The invariant that replaced "reserved synchronously before the first await":
+    // the claim is taken by the STORE, so it is ordered on the store's own queue
+    // against the queued delete. Two consequences are observable here — the claim
+    // exists before the first adapter call, and a store that refuses the claim
+    // (its row was deleted first) fails the launch without creating a process.
     const world = makeWorld();
     world.seed({ id: "c1" });
-    let supervisor!: ReturnType<typeof createSupervisor>;
-    let gate!: () => void;
-    const slowRead = new Promise<void>((resolve) => { gate = resolve; });
-    // The first awaited call `start` makes. When a caller can observe `isLaunching`
-    // while this is still outstanding, the reservation was synchronous.
-    const getConversation = world.store.getConversation;
-    world.store.getConversation = async (id) => { await slowRead; return getConversation(id); };
-    supervisor = createSupervisor({ store: world.store, adapters: world.adapters, clock: instantClock, maxActive: 3, publishTimeoutMs: 0 });
+    let claimedWhenSpawning = false;
+    world.adapters.launch = async (spec) => {
+      world.launches.push(spec);
+      // The first adapter call is the first thing that can create a process, so the
+      // claim must already be visible to the store by now.
+      claimedWhenSpawning = world.store.isLaunchReserved("c1");
+      throw new Error("stop before publishing");
+    };
+    const supervisor = createSupervisor({ store: world.store, adapters: world.adapters, clock: instantClock, maxActive: 3, publishTimeoutMs: 0 });
 
-    const starting = supervisor.start("c1", { conversationId: "c1", name: "caw-c1", cwd: "/tmp/project" });
-    // No await has completed here: this is exactly what a concurrent deleter sees.
-    expect(supervisor.isLaunching("c1")).toBe(true);
-    gate();
-    await starting;
+    await expect(supervisor.start("c1", { conversationId: "c1", name: "caw-c1", cwd: "/tmp/project" })).rejects.toThrow(/stop before publishing/);
+    expect(claimedWhenSpawning).toBe(true);
+    // Released on the failure path, so the row is deletable again.
     expect(supervisor.isLaunching("c1")).toBe(false);
+
+    // The store refusing the claim means its row was already gone (a delete that
+    // queued first): no adapter may be called, so no process is created at all.
+    world.seed({ id: "c2" });
+    world.removeRow("c2");
+    await expect(supervisor.start("c2", { conversationId: "c2", name: "caw-c2", cwd: "/tmp/project" }))
+      .rejects.toMatchObject({ code: "agent_not_running" });
+    expect(world.launches).toHaveLength(1);
+    expect(supervisor.isLaunching("c2")).toBe(false);
   });
 
   it("refuses a second launch for the same conversation while the first is in flight", async () => {

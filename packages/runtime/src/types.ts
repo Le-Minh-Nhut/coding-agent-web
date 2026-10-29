@@ -20,6 +20,22 @@ export interface ConversationRuntimeStore {
   listAllConversations(): Promise<Conversation[]>;
   updateConversation(id: string, patch: Partial<Conversation>): Promise<Conversation | null>;
   recordEvent(conversationId: string, type: string, payload: unknown): Promise<unknown>;
+  /**
+   * Claim a launch for this conversation, and say whether the row was still there.
+   * Must be ordered against whatever drops the row (the metadata store runs both on
+   * one queue), so the two possible orders are total: the delete refuses while the
+   * claim is held, or the claim fails because the row is already gone. `false` means
+   * "do not launch" — the caller must not create a process.
+   */
+  reserveLaunch(conversationId: string): Promise<boolean>;
+  /** Release a claim taken by `reserveLaunch`. */
+  releaseLaunch(conversationId: string): void;
+  /**
+   * Is a launch claimed for this conversation right now? A cheap, non-queued read
+   * for observers (the delete route's pre-check, `isLaunching`). A stale answer only
+   * means the caller asks a question the authoritative queued check answers.
+   */
+  isLaunchReserved(conversationId: string): boolean;
 }
 
 export type Tri = boolean | "unknown";

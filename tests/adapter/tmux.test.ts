@@ -150,6 +150,7 @@ describe("tmux", () => {
         lastActivityAt: null, statusDetail: null,
       };
       const rows = new Map([[row.id, row]]);
+      const reserved = new Set<string>();
       const store: ConversationRuntimeStore = {
         getConversation: async (id) => rows.get(id) ?? null,
         listAllConversations: async () => [...rows.values()],
@@ -161,6 +162,17 @@ describe("tmux", () => {
           return next;
         },
         recordEvent: async () => null,
+        async reserveLaunch(id: string) {
+          if (!rows.has(id)) return false;
+          reserved.add(id);
+          return true;
+        },
+        releaseLaunch(id: string) {
+          reserved.delete(id);
+        },
+        isLaunchReserved(id: string) {
+          return reserved.has(id);
+        },
       };
       const adapters: RuntimeAdapters = {
         listHosts: async () => [{

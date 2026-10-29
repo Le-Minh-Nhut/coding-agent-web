@@ -47,6 +47,7 @@ afterAll(async () => {
 
 /** A minimal store over a Map, shaped as the supervisor's port. */
 function createStore(conversations: Map<string, Conversation>) {
+  const reserved = new Set<string>();
   return {
     getConversation: async (id: string) => conversations.get(id) ?? null,
     listAllConversations: async () => [...conversations.values()],
@@ -58,6 +59,17 @@ function createStore(conversations: Map<string, Conversation>) {
       return next;
     },
     recordEvent: async () => null,
+    async reserveLaunch(id: string) {
+      if (!conversations.has(id)) return false;
+      reserved.add(id);
+      return true;
+    },
+    releaseLaunch(id: string) {
+      reserved.delete(id);
+    },
+    isLaunchReserved(id: string) {
+      return reserved.has(id);
+    },
   } satisfies ConversationRuntimeStore;
 }
 
