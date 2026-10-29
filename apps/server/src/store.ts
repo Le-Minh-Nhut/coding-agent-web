@@ -33,14 +33,39 @@ export interface MetadataStore {
    *
    * A row whose launch is reserved but has not recorded its process yet reads
    * exactly like a never-launched row (`starting`, no identity), so the re-read
-   * alone cannot tell them apart. `isProcessPending` is the caller's view of that
-   * reservation, and it is consulted *inside this queued operation*, after every
-   * await of the caller's request: `start()` registers the reservation eagerly and
-   * synchronously (before its own first await), so any launch that has begun by the
-   * time this predicate runs is visible and blocks the delete, instead of the
-   * delete dropping the only pointer to a starting process.
+   * alone cannot tell them apart. The store owns that reservation
+   * (`reserveLaunch`/`releaseLaunch` below) and consults its own set here, inside
+   * this queued operation. Both this check and the launch's `reserveLaunch` run on
+   * the store queue, so they cannot interleave: a reserve that commits first is
+   * visible here and blocks, and a delete that commits first removes the row the
+   * reserve reads, so the launch refuses before touching a process.
    */
-  deleteProject(id: string, verifiedStoppedConversationIds?: readonly string[], isProcessPending?: (conversationId: string) => boolean): Promise<"deleted" | "not_found" | "has_conversations">;
+  deleteProject(id: string, verifiedStoppedConversationIds?: readonly string[]): Promise<"deleted" | "not_found" | "has_conversations">;
+  /**
+   * Claim a launch for a conversation on the store queue. `true` means this call
+   * took the claim; `false` means it did not — either the row is gone (a delete
+   * queued first), or another launch already holds it. Runs inside `serialize()` so
+   * it is ordered against every other queued op, in particular the delete above:
+   * reserve-then-delete makes the delete refuse, delete-then-reserve fails here
+   * because the row is gone. Either way the caller must not start a process, and on
+   * `false` it holds nothing to release.
+   */
+  reserveLaunch(conversationId: string): Promise<boolean>;
+  /**
+   * Drop a launch reservation taken by `reserveLaunch`. Deliberately not queued:
+   * it is a release, and the only thing ordering matters against is the reserve,
+   * which already refuses a second claim for the same id.
+   */
+  releaseLaunch(conversationId: string): void;
+  /**
+   * Is a launch claimed for this conversation right now? A non-queued read of the
+   * reservation set, for the UI and the delete route's own pre-checks. It does not
+   * need the queue: the reservation is only ever added inside the queue, and the
+   * authoritative decision — whether a delete may proceed — is made by
+   * `deleteProject` inside that same queue, so a stale "false" here can only ever
+   * make the caller ask a question the queued check then answers correctly.
+   */
+  isLaunchReserved(conversationId: string): boolean;
   /** Drop a conversation the app created but never managed to launch. */
   removeConversation(id: string): Promise<boolean>;
   listConversations(projectId: string): Promise<Conversation[]>;
@@ -71,14 +96,6 @@ type Row =
   | { op: "event"; value: StoreEvent }
   | { op: "command"; value: StoredCommand };
 
-/**
- * Raised by a guarded `append` that declined to write: the condition it was given
- * (a launch reservation) became true after the caller's own check, and nothing has
- * been written yet. So there is nothing to roll back — the caller decides the
- * outcome — and the journal must not be touched.
- */
-class AppendDeclined extends Error {}
-
 export function createMetadataStore(stateDir: string, now: () => Date = () => new Date()): MetadataStore {
   const file = join(stateDir, "metadata.jsonl");
   /**
@@ -94,6 +111,12 @@ export function createMetadataStore(stateDir: string, now: () => Date = () => ne
   let commands = new Map<string, StoredCommand>();
   let loaded: Promise<void> | undefined;
   let queue: Promise<unknown> = Promise.resolve();
+  /**
+   * Conversations with a launch in flight. The store owns this because only the
+   * store can order it against the delete: both `reserveLaunch` and `deleteProject`
+   * run on `queue`, so one of the two always commits first and sees the other.
+   */
+  const launchReservations = new Set<string>();
   /** Set when a failed write could not be rolled back; every later write refuses. */
   let journalFailure: string | null = null;
   const stamp = () => now().toISOString();
@@ -251,7 +274,7 @@ export function createMetadataStore(stateDir: string, now: () => Date = () => ne
    * store is poisoned: every later write refuses loudly rather than appending onto
    * a journal we cannot trust.
    */
-  async function append(rows: Row[], mayWrite?: () => boolean): Promise<void> {
+  async function append(rows: Row[]): Promise<void> {
     await load();
     if (journalFailure) throw new Error(journalFailure);
     const handle = await open(file, constants.O_RDWR | constants.O_APPEND | constants.O_CREAT | constants.O_NOFOLLOW, 0o600);
@@ -263,19 +286,12 @@ export function createMetadataStore(stateDir: string, now: () => Date = () => ne
       if (!stat.isFile()) throw new Error("metadata journal is not a regular file");
       offset = stat.size;
       await handle.chmod(0o600);
-      // Last possible instant: `open`, `stat` and `chmod` all yielded, and a launch
-      // may have claimed the conversation since the caller's own check. Asking again
-      // here — before a byte is written — is what makes the guard cover those turns
-      // rather than only the ones before them. Nothing is written, so nothing is
-      // rolled back; the caller maps the refusal to its own outcome.
-      // ponytail: in-process fifo, not a lock — a reservation taken *inside* the
-      // write() call itself is still unobservable, which needs a real cross-process
-      // lease. That window is one syscall wide and has no observable seam.
-      if (mayWrite && !mayWrite()) throw new AppendDeclined();
+      // What a caller's condition needs to hold stays a concern of the queue, not
+      // of this write: the reservation and the delete are ordered by `serialize`, so
+      // no re-check inside these awaits is needed (or possible) here.
       await handle.writeFile(rows.map((row) => `${JSON.stringify(row)}\n`).join(""));
       await handle.sync();
     } catch (error) {
-      if (error instanceof AppendDeclined) throw error;
       if (offset === null) throw error;
       try { await handle.truncate(offset); }
       catch {
@@ -318,7 +334,7 @@ export function createMetadataStore(stateDir: string, now: () => Date = () => ne
         await append([{ op: "project", value }]); projects.set(id, value); return value;
       });
     },
-    deleteProject(id, verifiedStoppedConversationIds = [], isProcessPending) {
+    deleteProject(id, verifiedStoppedConversationIds = []) {
       return serialize(async () => {
         await load();
         if (!projects.has(id)) return "not_found" as const;
@@ -338,36 +354,47 @@ export function createMetadataStore(stateDir: string, now: () => Date = () => ne
           || (conversation.state === "starting" && conversation.tmuxSessionId === null && conversation.tmuxPanePid === null);
         const below = [...conversations.values()].filter((conversation) => conversation.projectId === id);
         // The re-read decides on stored state; the reservation is the one thing a
-        // row cannot show, so it is asked here — and again inside the append, after
-        // that append's own awaits. A start that registers its reservation after the
-        // first check but before the write claims this project's conversation, and
-        // only the second check is late enough to see it.
-        const pending = isProcessPending ?? (() => false);
-        // A row the caller never saw, one that no longer reads process-free, or one
-        // whose launch is reserved but not yet recorded, blocks. The result is
-        // compared strictly: an accidental Promise from a sloppy callback is truthy
-        // and would block every delete forever, which is the failure mode this
-        // guard must never introduce.
-        const blocked = (): boolean =>
-          below.some((conversation) => !verified.has(conversation.id) || !processFree(conversation) || pending(conversation.id) === true);
-        if (blocked()) return "has_conversations" as const;
+        // row cannot show, so the store's own set — the same one `reserveLaunch`
+        // writes, on this same queue — is the authority. One check is enough: a
+        // reserve either ran before this op (and is visible here, blocking the
+        // whole delete with nothing written) or runs after it (and finds the row
+        // gone, refusing the launch before a process exists). There is no window in
+        // between, because both ops are sections of this one queue.
+        if (below.some((conversation) =>
+          !verified.has(conversation.id) || !processFree(conversation) || launchReservations.has(conversation.id))) {
+          return "has_conversations" as const;
+        }
         // Every row is verified stopped and still process-free: drop them with the
         // project in ONE journal record. Several rows in one `write` are not atomic
         // across a crash — a torn write could leave a conversation gone while the
         // project survived, and no retry can put the row back.
         const gone = below.map((conversation) => conversation.id);
-        try {
-          await append([{ op: "project-cascade-delete", id, conversationIds: gone }], () => !blocked());
-        } catch (error) {
-          // A reservation appeared between the check above and the write itself, so
-          // the append declined and wrote nothing. Report the same refusal the first
-          // check would have: the caller sees one outcome for one condition.
-          if (error instanceof AppendDeclined) return "has_conversations" as const;
-          throw error;
-        }
+        await append([{ op: "project-cascade-delete", id, conversationIds: gone }]);
         for (const conversationId of gone) dropConversation(conversationId);
         projects.delete(id); return "deleted" as const;
       });
+    },
+    async reserveLaunch(conversationId) {
+      return serialize(async () => {
+        await load();
+        // Decided with the row read in the same queued section as the insert, so a
+        // delete that got here first is already visible: its row is gone and no
+        // reservation is taken for a conversation that no longer exists. `start()`
+        // then refuses before any adapter call, so no process is created at all.
+        if (!conversations.has(conversationId)) return false;
+        // Already claimed by another in-flight launch: `false`, so that call's
+        // `finally` never releases a claim it did not take. The supervisor tells
+        // the two `false` cases apart by whether the row still reads.
+        if (launchReservations.has(conversationId)) return false;
+        launchReservations.add(conversationId);
+        return true;
+      });
+    },
+    releaseLaunch(conversationId) {
+      launchReservations.delete(conversationId);
+    },
+    isLaunchReserved(conversationId) {
+      return launchReservations.has(conversationId);
     },
     removeConversation(id) {
       return serialize(async () => {

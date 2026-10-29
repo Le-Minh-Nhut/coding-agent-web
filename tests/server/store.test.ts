@@ -211,61 +211,53 @@ describe("JSONL MetadataStore fallback", () => {
     expect((await readFile(journal, "utf8")).endsWith("}\n")).toBe(true);
   });
 
-  it("refuses the delete when a launch reservation is registered before the queued delete runs", async () => {
+  it("orders the reservation and the delete on one queue, in both orders", async () => {
     // The V16-01 window: a row whose launch is reserved but has not recorded its
-    // process reads exactly like a never-launched row. The stored state cannot tell
-    // them apart, so the reservation is consulted inside the queued delete, and
-    // again inside the append after that append's own awaits. A reservation held
-    // when either check runs must block even though nothing about the row changed.
+    // process reads exactly like a never-launched row. The store owns the
+    // reservation, so this delete and `reserveLaunch` are sections of one queue and
+    // one of them always commits first — there is no interleaving in which both
+    // sides miss the other.
     const { store } = await create();
     const project = await store.createProject({ path: "/tmp/pending-launch" });
     const conversation = await store.createConversation({ projectId: project.id });
-    const reserved = new Set<string>();
-    const pending = (id: string): boolean => reserved.has(id);
-    // No reservation yet: the ordinary never-launched delete goes through.
-    expect(await store.deleteProject(project.id, [conversation.id], pending)).toBe("deleted");
-    // And with one held, the same call refuses and keeps every row.
-    const second = await store.createConversation({ projectId: (await store.createProject({ path: "/tmp/pending-launch-2" })).id });
-    reserved.add(second.id);
-    expect(await store.deleteProject(second.projectId, [second.id], pending)).toBe("has_conversations");
-    expect((await store.listConversations(second.projectId)).map((row) => row.id)).toEqual([second.id]);
-    expect((await store.listProjects()).some((item) => item.id === second.projectId)).toBe(true);
+    // Reserve first: the delete sees the reservation and refuses, keeping both rows.
+    expect(await store.isLaunchReserved(conversation.id)).toBe(false);
+    expect(await store.reserveLaunch(conversation.id)).toBe(true);
+    expect(store.isLaunchReserved(conversation.id)).toBe(true);
+    expect(await store.deleteProject(project.id, [conversation.id])).toBe("has_conversations");
+    expect(await store.getConversation(conversation.id)).not.toBeNull();
+    expect((await store.listProjects()).map((item) => item.id)).toEqual([project.id]);
     // Released: the retry succeeds.
-    reserved.delete(second.id);
-    expect(await store.deleteProject(second.projectId, [second.id], pending)).toBe("deleted");
-    expect((await store.listProjects()).some((item) => item.id === second.projectId)).toBe(false);
+    store.releaseLaunch(conversation.id);
+    expect(await store.isLaunchReserved(conversation.id)).toBe(false);
+    expect(await store.deleteProject(project.id, [conversation.id])).toBe("deleted");
+    expect(await store.getConversation(conversation.id)).toBeNull();
   });
 
-  it("refuses the delete when the reservation appears during the delete's own I/O", async () => {
-    // The gap the first check alone leaves: the delete reads the journal, opens it,
-    // stats it and chmods it, and a launch can claim the conversation in any of
-    // those turns. Here the predicate answers "no reservation" to the pre-append
-    // check and "reserved" to the one inside the append — a reservation registered
-    // in exactly that window. Nothing may be written, and both rows must survive.
-    const { dir, store } = await create();
-    const project = await store.createProject({ path: "/tmp/mid-delete-launch" });
-    const conversation = await store.createConversation({ projectId: project.id });
-    const before = await readFile(join(dir, "metadata.jsonl"), "utf8");
-    let asked = 0;
-    const pending = (): boolean => (asked += 1) > 1;
-    expect(await store.deleteProject(project.id, [conversation.id], pending)).toBe("has_conversations");
-    expect(asked).toBe(2);
-    // The declined append wrote nothing: the journal is byte-identical, so no
-    // cascade row exists for a replay to act on.
-    expect(await readFile(join(dir, "metadata.jsonl"), "utf8")).toBe(before);
-    expect(await store.listProjects()).toEqual([project]);
-    expect((await store.listConversations(project.id)).map((row) => row.id)).toEqual([conversation.id]);
-  });
-
-  it("treats a non-boolean reservation answer as no reservation", async () => {
-    // A predicate that returns a Promise (or any truthy non-`true`) would block
-    // every delete forever under loose coercion. Only a strict `true` blocks.
+  it("refuses a reservation for a conversation the delete already removed", async () => {
+    // The other ordering: the delete commits first, so the row is gone by the time
+    // the reserve's queued section runs. It must answer `false` — the launch then
+    // fails before it calls any adapter, so no process is created at all.
     const { store } = await create();
-    const project = await store.createProject({ path: "/tmp/loose-pending" });
+    const project = await store.createProject({ path: "/tmp/deleted-first" });
     const conversation = await store.createConversation({ projectId: project.id });
-    const loose = (() => Promise.resolve(false)) as unknown as (id: string) => boolean;
-    expect(await store.deleteProject(project.id, [conversation.id], loose)).toBe("deleted");
-    expect(await store.listProjects()).toEqual([]);
+    expect(await store.deleteProject(project.id, [conversation.id])).toBe("deleted");
+    expect(await store.reserveLaunch(conversation.id)).toBe(false);
+    expect(store.isLaunchReserved(conversation.id)).toBe(false);
+  });
+
+  it("keeps a reservation out of the way of a delete of another conversation", async () => {
+    // Reservations are per conversation; one held elsewhere must not block an
+    // unrelated project's delete, or a stuck launch would freeze every project.
+    const { store } = await create();
+    const other = await store.createProject({ path: "/tmp/other-project" });
+    const held = await store.createConversation({ projectId: other.id });
+    expect(await store.reserveLaunch(held.id)).toBe(true);
+    const project = await store.createProject({ path: "/tmp/free-project" });
+    const free = await store.createConversation({ projectId: project.id });
+    expect(await store.deleteProject(project.id, [free.id])).toBe("deleted");
+    expect(await store.getConversation(free.id)).toBeNull();
+    expect(await store.isLaunchReserved(held.id)).toBe(true);
   });
 
   it("drops a conversation's events with it, so a delete leaves no orphans", async () => {

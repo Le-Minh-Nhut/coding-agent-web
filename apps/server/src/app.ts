@@ -269,17 +269,17 @@ export function buildApp(deps: AppDependencies): FastifyInstance<HttpServer> {
     // exists, and a re-added folder would then hide their native sessions as
     // "already tracked" with nothing that can open them.
     //
-    // The reservation check travels into that queued write rather than staying in
-    // the observation loop above. `start()` registers its reservation eagerly and
-    // synchronously, before its first `await`, so a launch that begins at any point
-    // during this route's awaits is already visible here — but only a check made
-    // *inside the queued delete* is made after every earlier await of this request,
-    // and looks at a set that no interleaving can mutate between the check and the
-    // commit.
-    const pending = (conversationId: string): boolean => deps.supervisor?.isLaunching?.(conversationId) === true;
-    const deleted = await deps.store.deleteProject(project.id, verified, pending);
+    // The reservation check travels into the store's queued delete rather than
+    // staying in the loop above. The store owns the reservation, and `reserveLaunch`
+    // and `deleteProject` are sections of its one queue: exactly one of them commits
+    // first. A launch that reserved before the delete's section is visible and the
+    // delete refuses; a launch that reserves after it finds the row gone and fails
+    // `agent_not_running` before creating a process. There is no window in which the
+    // delete drops the only pointer to a starting process.
+    const deleted = await deps.store.deleteProject(project.id, verified);
     if (deleted !== "deleted") {
-      return reply.code(409).send(fail("conflict_owner", conversations.some((conversation) => pending(conversation.id))
+      const pending = conversations.some((conversation) => deps.store.isLaunchReserved(conversation.id));
+      return reply.code(409).send(fail("conflict_owner", pending
         ? "An agent launch is still in flight for this project. Wait for it to settle (or stop the agent) before deleting."
         : "This project still has conversations. Stop them before deleting the project."));
     }

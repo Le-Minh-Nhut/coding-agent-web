@@ -767,28 +767,31 @@ describe("project deletion guard", () => {
     await app.close();
   });
 
-  it("refuses when a launch reservation appears after the observation but before the delete commits", async () => {
-    // The V16-01 window the loop alone cannot close: the row was observed and
-    // verified stopped, then a start reserved the session while the observation was
+  it("refuses when the store holds a launch reservation and the observer read is stale", async () => {
+    // The V16-01 window the observation loop alone cannot close: the row was
+    // verified stopped, and a start claimed the conversation while the request was
     // still in flight. The row still reads process-free, so only the reservation —
-    // asked inside the queued delete, and again inside its append — can stop the
-    // delete from dropping the only pointer to a starting process.
-    let observed = false;
+    // which the store owns, and asks for inside its own queued delete — can stop
+    // the delete dropping the only pointer to a starting process. `isLaunching` is
+    // deliberately answered "false" here: it is the non-queued observer read, and
+    // it standing stale must not be what decides.
     const supervisor = {
-      // False during the observation loop (nothing was launching yet), true the
-      // moment the loop's `observe` has run — exactly the race being pinned.
-      isLaunching: () => observed,
-      observe: async () => { observed = true; return null; },
+      isLaunching: () => false,
+      observe: async () => null,
     } as unknown as Supervisor;
     const { app, headers, dir, store } = await fixture({ supervisor });
     const project = await store.createProject({ path: dir });
     const conversation = await store.createConversation({ projectId: project.id });
     await store.updateConversation(conversation.id, { state: "stopped" });
+    expect(await store.reserveLaunch(conversation.id)).toBe(true);
     const refused = await app.inject({ method: "DELETE", url: `/api/projects/${project.id}`, headers });
     expect(refused.statusCode).toBe(409);
     expect(refused.json().error.code).toBe("conflict_owner");
     expect((await store.listProjects()).map((item) => item.id)).toEqual([project.id]);
     expect((await store.listConversations(project.id)).map((item) => item.id)).toEqual([conversation.id]);
+    // Released: the delete goes through, so the refusal was the claim, not a stuck row.
+    store.releaseLaunch(conversation.id);
+    expect((await app.inject({ method: "DELETE", url: `/api/projects/${project.id}`, headers })).statusCode).toBe(200);
     await app.close();
   });
 

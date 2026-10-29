@@ -50,5 +50,25 @@ it("V16 deletion: launch beginning during observation must still block project d
   const projectRemains=(await store.listProjects()).some(row=>row.id===p.id);
   console.log("AUDIT16 delete/start race",JSON.stringify({status:response.statusCode,isLaunching:supervisor.isLaunching(c.id),projectRemains,conversationRemains:!!await store.getConversation(c.id)}));
   expect(response.statusCode).toBe(409);
- }finally{releaseObserve?.();releaseLaunch?.({id:"$1",name:"pane",alive:true,panePid:1000000000,serverIdentity:"private:1"});await start;await app.close();}
+  expect(supervisor.isLaunching(c.id)).toBe(true);
+ }finally{releaseObserve?.();releaseLaunch?.({id:"$1",name:"pane",alive:true,panePid:1000000000,serverIdentity:"private:1"});await start;}
+});
+// The other end state the ticket requires: once the launch is over and the agent is
+// stopped, the very same delete goes through — the refusal above was the in-flight
+// claim, not a row the guard has wedged forever.
+it("V16 deletion: succeeds once the launch settled and the agent is stopped",async()=>{
+ const {app,headers,store,dir}=await fixture();
+ const p=await store.createProject({path:dir});const c=await store.createConversation({projectId:p.id});
+ const adapters:any={listManagedTmux:async()=>[],listHosts:async()=>[],isSessionLive:async()=>false,tmuxServerIdentity:async()=>"private:1",getTmux:async()=>({ok:true,session:null}),sessionPathExists:async()=>false,findBySessionId:async()=>null,isProcessDescendant:async()=>false,newestSessionFor:async()=>null,launch:async()=>({id:"$1",name:"pane",alive:true,panePid:1000000000,serverIdentity:"private:1"}),killTmux:async()=>{}};
+ const supervisor=createSupervisor({store,adapters,maxActive:3,publishTimeoutMs:1});
+ await supervisor.start(c.id,{conversationId:c.id,name:"pane",cwd:dir});
+ expect(supervisor.isLaunching(c.id)).toBe(false);
+ // The agent has been stopped: no recorded process identity is left behind.
+ await store.updateConversation(c.id,{state:"stopped",tmuxSessionId:null,tmuxSessionName:null,tmuxServerIdentity:null,tmuxPanePid:null});
+ const response=await app.inject({method:"DELETE",url:`/api/projects/${p.id}`,headers});
+ console.log("AUDIT16 delete after stop",JSON.stringify({status:response.statusCode,projectRemains:!!(await store.listProjects()).find(row=>row.id===p.id),conversationRemains:!!await store.getConversation(c.id)}));
+ expect(response.statusCode).toBe(200);
+ expect(await store.listProjects()).toEqual([]);
+ expect(await store.getConversation(c.id)).toBeNull();
+ await app.close();
 });
