@@ -1,6 +1,6 @@
 import type { Server as HttpServer } from "node:http";
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest, type RouteGenericInterface } from "fastify";
-import { browseQuerySchema, conversationActionSchema, conversationModelSchema, createConversationSchema, createDirectorySchema, createProjectSchema, ERROR_CODES, fail, listEventsQuerySchema, loginSchema, ok, updateProjectSchema } from "@caw/contracts";
+import { browseQuerySchema, conversationActionSchema, conversationModelSchema, createConversationSchema, createDirectorySchema, createProjectSchema, epochOf, ERROR_CODES, fail, listEventsQuerySchema, loginSchema, ok, updateProjectSchema } from "@caw/contracts";
 import { z } from "zod";
 import type { Capabilities, CollabLinkResponse, Conversation, ErrorCode, NativeSessionSummary, ProjectWithStats } from "@caw/contracts";
 import type { CapabilityService, CollabHost, ModelCatalogService, NativeSessionHistory } from "@caw/omp-adapter";
@@ -240,7 +240,11 @@ export function buildApp(deps: AppDependencies): FastifyInstance<HttpServer> {
     // is not blocking — deleting it only removes a list entry. Nothing is killed
     // here, ever: the user stops the agent first, then deletes.
     const blocking: Conversation[] = [];
-    const verified: string[] = [];
+    // Each verified conversation carries the lifecycle epoch its verdict was
+    // observed at. The store re-checks it inside its queued delete: a launch that
+    // took the row since then advances the epoch, so the delete refuses rather
+    // than dropping the only pointer to a process that is now running.
+    const verified = new Map<string, number>();
     for (const conversation of conversations) {
       // A launch in flight has not recorded its process yet, so every stored field
       // still says "nothing running". Deleting the row now would drop the only
@@ -248,9 +252,15 @@ export function buildApp(deps: AppDependencies): FastifyInstance<HttpServer> {
       if (deps.supervisor?.isLaunching?.(conversation.id)) { blocking.push(conversation); continue; }
       const observations = deps.supervisor ? await deps.supervisor.observe(conversation.id) : null;
       const state = observations ? evaluateState(observations).state : conversation.state;
+      // The epoch the verdict speaks for. Without a supervisor there is no
+      // observation, so the stored row is its own (unstamped) evidence: epoch 0,
+      // which the store compares against the row it re-reads.
+      const observedEpoch = observations ? observations.observedEpoch : epochOf(conversation);
       // `stopped`/`error` both mean observed as not running (error: the process is
-      // gone and its journal is missing).
-      if (state === "stopped" || state === "error") { verified.push(conversation.id); continue; }
+      // gone and its journal is missing). This is the case the stored label blocks
+      // today: a fresh observation that the process is dead is evidence, and the
+      // epoch binds it to the row the store will re-read.
+      if (state === "stopped" || state === "error") { verified.set(conversation.id, observedEpoch); continue; }
       // Anything else is only deletable when the observations positively show no
       // writer: no process we launched, no unverifiable pane, no held lease and no
       // registry host. An external session with a live writer reads as `unknown`
@@ -259,7 +269,7 @@ export function buildApp(deps: AppDependencies): FastifyInstance<HttpServer> {
         ? observations.everLaunched || observations.tmuxOwnershipUnknown || observations.leaseLive !== false || observations.host !== null
         : true;
       if (mayHaveProcess) blocking.push(conversation);
-      else verified.push(conversation.id);
+      else verified.set(conversation.id, observedEpoch);
     }
     if (blocking.length > 0) {
       return reply.code(409).send(fail("conflict_owner", `This project still has agents that are running or cannot be verified as stopped (${blocking.map((conversation) => conversation.title).join(", ")}). Stop them before deleting the project.`));
@@ -409,7 +419,13 @@ export function buildApp(deps: AppDependencies): FastifyInstance<HttpServer> {
       // only pointer to something live.
       const started = await deps.store.getConversation(conversation.id);
       if (started && started.state === "starting" && started.tmuxSessionId === null && !deps.supervisor?.isLaunching?.(conversation.id)) {
-        await deps.store.updateConversation(conversation.id, {
+        // Bound to the life `started` describes. A restart (or another launch) that
+        // opens a newer life in the row between this read and the write advances the
+        // epoch, so the conditional write refuses and the newer row keeps its own
+        // identity and state instead of being stamped `error` by a refusal that was
+        // about the previous life. A row that vanished (`null`) and a refused write
+        // are both no-ops: there is nothing of ours left to mark.
+        await deps.store.updateConversationIfCurrent(conversation.id, epochOf(started), {
           state: "error",
           statusDetail: `Agent launch was refused: ${message}`,
         }).catch(() => null);

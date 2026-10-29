@@ -50,7 +50,7 @@ it.each(["EACCES","EIO"]) ("V13 wiring: %s journal probe failure stays unknown, 
  const adapter=Function("stat",codeJs+"return adapter;")(async()=>{throw Object.assign(new Error("probe failed"),{code});}) as { sessionPathExists(path: string): Promise<boolean> };
  let observation: boolean|"unknown";
  try{observation=await adapter.sessionPathExists("/work/session.jsonl");}catch{observation="unknown";}
- const observations: Observations = { tmux:null,host:null,leaseLive:false,sessionPathExists:observation,sessionPathReason:null,hasNativeSession:true,everLaunched:true,stopRequested:false,registryUnreadable:false,tmuxOwnershipUnknown:false,tmuxEnumerationFailed:false,tmuxEnumerationReason:null };
+ const observations: Observations = { observedEpoch:0,tmux:null,host:null,leaseLive:false,sessionPathExists:observation,sessionPathReason:null,hasNativeSession:true,everLaunched:true,stopRequested:false,registryUnreadable:false,tmuxOwnershipUnknown:false,tmuxEnumerationFailed:false,tmuxEnumerationReason:null };
  const verdict=evaluateState(observations);
  console.log("AUDIT13 production journal probe",JSON.stringify({code,observation,verdict}));
  expect(verdict.state).toBe("unknown");

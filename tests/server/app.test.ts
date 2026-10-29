@@ -820,15 +820,15 @@ describe("project deletion guard", () => {
 
     // The launch records a process it cannot persist (store write fails) and the
     // undo kill fails, so ownership is retained.
-    const originalUpdate = store.updateConversation.bind(store);
+    const originalUpdate = store.updateConversationIfCurrent.bind(store);
     let failNext = true;
-    store.updateConversation = async (id, patch) => {
+    store.updateConversationIfCurrent = async (id, expectedEpoch, patch) => {
       if (failNext && patch.tmuxSessionId) { failNext = false; throw new Error("simulated store write failure"); }
-      return originalUpdate(id, patch);
+      return originalUpdate(id, expectedEpoch, patch);
     };
     await expect(supervisor.start(conversation.id, { conversationId: conversation.id, name: "caw", cwd: dir }))
       .rejects.toThrow(/simulated store write failure/);
-    store.updateConversation = originalUpdate;
+    store.updateConversationIfCurrent = originalUpdate;
 
     expect(supervisor.isLaunching(conversation.id)).toBe(true);
     expect(killed).toEqual(["$7"]);
@@ -881,6 +881,34 @@ describe("refused conversation creation", () => {
     expect(rows[0]?.statusDetail).toBe("Agent launch was refused: No active slots");
     expect(rows[0]).toMatchObject({ tmuxSessionId: null, tmuxPanePid: null });
     expect(rows[0]?.state).not.toBe("starting");
+    await app.close();
+  });
+
+  it("does not stamp the refusal over a newer life that took the row mid-catch", async () => {
+    // The catch reads the row, decides the refusal is about that life, and writes.
+    // A restart that lands between that read and that write opens a new life in the
+    // row: it has recorded its own process, so stamping `error` would mark a live
+    // agent's row as a failed launch. The conditional write is bound to the epoch of
+    // the row the catch read, so it refuses and the newer life keeps its identity.
+    const supervisor = { isLaunching: () => false, start: async () => { throw new RuntimeError("conflict_limit", "No active slots"); } } as unknown as Supervisor;
+    const { app, headers, dir, store } = await fixture({ supervisor, runtimeSpec: () => ({} as RuntimeLaunchSpec) });
+    const project = await store.createProject({ path: dir });
+    const originalUpdateIfCurrent = store.updateConversationIfCurrent.bind(store);
+    let injected = false;
+    store.updateConversationIfCurrent = async (id, expectedEpoch, patch) => {
+      if (!injected) {
+        injected = true;
+        // The newer life: a launch recorded its process in the row the catch read.
+        await store.updateConversation(id, { state: "running", tmuxSessionId: "$9", tmuxServerIdentity: "private:1", tmuxPanePid: 4321, hostInstanceId: "host-new" });
+      }
+      return originalUpdateIfCurrent(id, expectedEpoch, patch);
+    };
+    const response = await app.inject({ method: "POST", url: `/api/projects/${project.id}/conversations`, headers, payload: {} });
+    store.updateConversationIfCurrent = originalUpdateIfCurrent;
+    expect(response.statusCode).toBe(409);
+    const rows = await store.listConversations(project.id);
+    expect(rows[0]).toMatchObject({ state: "running", tmuxSessionId: "$9", tmuxServerIdentity: "private:1", tmuxPanePid: 4321, hostInstanceId: "host-new" });
+    expect(rows[0]?.statusDetail ?? null).toBeNull();
     await app.close();
   });
 

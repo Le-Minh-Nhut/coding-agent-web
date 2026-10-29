@@ -122,11 +122,11 @@ it("leaves every row in place when a project delete cannot be written", async ()
   const project = await store.createProject({ path: "/tmp/project" });
   const conversation = await store.createConversation({ projectId: project.id });
   fault.armed = true;
-  await expect(store.deleteProject(project.id, [conversation.id])).rejects.toMatchObject({ code: "ENOSPC" });
+  await expect(store.deleteProject(project.id, new Map([[conversation.id, 0]]))).rejects.toMatchObject({ code: "ENOSPC" });
   expect((await store.listProjects()).map((item) => item.id)).toEqual([project.id]);
   expect((await store.listConversations(project.id)).map((item) => item.id)).toEqual([conversation.id]);
   // And the retry still works once the fault clears.
-  expect(await store.deleteProject(project.id, [conversation.id])).toBe("deleted");
+  expect(await store.deleteProject(project.id, new Map([[conversation.id, 0]]))).toBe("deleted");
   expect(await store.listProjects()).toEqual([]);
   expect(await store.listConversations(project.id)).toEqual([]);
 });

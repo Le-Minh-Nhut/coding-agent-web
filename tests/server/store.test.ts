@@ -8,6 +8,14 @@ import { createMetadataStore } from "../../apps/server/src/store.js";
 
 const execFileAsync = promisify(execFile);
 
+/**
+ * The evidence map `deleteProject` takes: each conversation id with the lifecycle
+ * epoch its caller observed it at. A row whose stored state reads process-free is
+ * deletable whatever the map says; the epoch matters only for a row still labelled
+ * live, where it proves the observation is about the row standing there now.
+ */
+const observedAt = (...ids: string[]) => new Map(ids.map((id) => [id, 0] as [string, number]));
+
 const dirs: string[] = [];
 afterEach(async () => { await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true }))); });
 async function create() { const dir = await mkdtemp(join(tmpdir(), "caw-store-")); dirs.push(dir); let time = 0; return { dir, store: createMetadataStore(dir, () => new Date(1_700_000_000_000 + time++)) }; }
@@ -224,13 +232,13 @@ describe("JSONL MetadataStore fallback", () => {
     expect(await store.isLaunchReserved(conversation.id)).toBe(false);
     expect(await store.reserveLaunch(conversation.id)).toBe(true);
     expect(store.isLaunchReserved(conversation.id)).toBe(true);
-    expect(await store.deleteProject(project.id, [conversation.id])).toBe("has_conversations");
+    expect(await store.deleteProject(project.id, observedAt(conversation.id))).toBe("has_conversations");
     expect(await store.getConversation(conversation.id)).not.toBeNull();
     expect((await store.listProjects()).map((item) => item.id)).toEqual([project.id]);
     // Released: the retry succeeds.
     store.releaseLaunch(conversation.id);
     expect(await store.isLaunchReserved(conversation.id)).toBe(false);
-    expect(await store.deleteProject(project.id, [conversation.id])).toBe("deleted");
+    expect(await store.deleteProject(project.id, observedAt(conversation.id))).toBe("deleted");
     expect(await store.getConversation(conversation.id)).toBeNull();
   });
 
@@ -241,7 +249,7 @@ describe("JSONL MetadataStore fallback", () => {
     const { store } = await create();
     const project = await store.createProject({ path: "/tmp/deleted-first" });
     const conversation = await store.createConversation({ projectId: project.id });
-    expect(await store.deleteProject(project.id, [conversation.id])).toBe("deleted");
+    expect(await store.deleteProject(project.id, observedAt(conversation.id))).toBe("deleted");
     expect(await store.reserveLaunch(conversation.id)).toBe(false);
     expect(store.isLaunchReserved(conversation.id)).toBe(false);
   });
@@ -255,7 +263,7 @@ describe("JSONL MetadataStore fallback", () => {
     expect(await store.reserveLaunch(held.id)).toBe(true);
     const project = await store.createProject({ path: "/tmp/free-project" });
     const free = await store.createConversation({ projectId: project.id });
-    expect(await store.deleteProject(project.id, [free.id])).toBe("deleted");
+    expect(await store.deleteProject(project.id, observedAt(free.id))).toBe("deleted");
     expect(await store.getConversation(free.id)).toBeNull();
     expect(await store.isLaunchReserved(held.id)).toBe(true);
   });
@@ -266,7 +274,7 @@ describe("JSONL MetadataStore fallback", () => {
     const conversation = await store.createConversation({ projectId: project.id });
     await store.recordEvent(conversation.id, "audit.event", { i: 1 });
     expect(await store.listEvents(conversation.id)).toHaveLength(1);
-    expect(await store.deleteProject(project.id, [conversation.id])).toBe("deleted");
+    expect(await store.deleteProject(project.id, observedAt(conversation.id))).toBe("deleted");
     // Replay the journal: the conversation-delete row takes its events with it
     // rather than leaving rows in the log with no parent.
     expect(await createMetadataStore(dir).listEvents(conversation.id)).toEqual([]);
@@ -282,12 +290,12 @@ describe("JSONL MetadataStore fallback", () => {
     const conversation = await store.createConversation({ projectId: project.id });
     await store.updateConversation(conversation.id, { state: "stopped" });
     await store.updateConversation(conversation.id, { state: "starting", tmuxSessionId: "$9", tmuxSessionName: "caw-raced", tmuxServerIdentity: "private:1", tmuxPanePid: 4242, nativeSessionId: "raced-native" });
-    expect(await store.deleteProject(project.id, [conversation.id])).toBe("has_conversations");
+    expect(await store.deleteProject(project.id, observedAt(conversation.id))).toBe("has_conversations");
     expect((await store.listProjects()).map((item) => item.id)).toEqual([project.id]);
     expect((await store.listConversations(project.id)).map((item) => item.id)).toEqual([conversation.id]);
     // And once it is stopped again, the same call goes through.
     await store.updateConversation(conversation.id, { state: "stopped" });
-    expect(await store.deleteProject(project.id, [conversation.id])).toBe("deleted");
+    expect(await store.deleteProject(project.id, observedAt(conversation.id))).toBe("deleted");
   });
 
   it("refuses the delete when a verified-stopped row published a live host before it ran", async () => {
@@ -298,7 +306,7 @@ describe("JSONL MetadataStore fallback", () => {
     const conversation = await store.createConversation({ projectId: project.id });
     await store.updateConversation(conversation.id, { state: "stopped" });
     await store.updateConversation(conversation.id, { state: "running", tmuxSessionId: "$3", tmuxServerIdentity: "private:1", tmuxPanePid: 4321 });
-    expect(await store.deleteProject(project.id, [conversation.id])).toBe("has_conversations");
+    expect(await store.deleteProject(project.id, observedAt(conversation.id))).toBe("has_conversations");
     expect((await store.listConversations(project.id)).map((item) => item.id)).toEqual([conversation.id]);
   });
 
@@ -311,7 +319,7 @@ describe("JSONL MetadataStore fallback", () => {
     await store.updateConversation(conversation.id, { state: "running", tmuxSessionId: "$4", tmuxServerIdentity: "private:1", tmuxPanePid: 4444 });
     await store.updateConversation(conversation.id, { state: "stopped" });
     expect((await store.getConversation(conversation.id))?.tmuxSessionId).toBe("$4");
-    expect(await store.deleteProject(project.id, [conversation.id])).toBe("deleted");
+    expect(await store.deleteProject(project.id, observedAt(conversation.id))).toBe("deleted");
     expect(await store.listProjects()).toEqual([]);
   });
 

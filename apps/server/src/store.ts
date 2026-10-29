@@ -3,6 +3,7 @@ import { chmod, lstat, mkdir, open } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import type { Conversation, Project } from "@caw/contracts";
+import { epochOf } from "@caw/contracts";
 
 /*
  * Storage fallback: Node 20.19 smoke probe returned `Error: No such built-in
@@ -19,17 +20,27 @@ export interface MetadataStore {
   updateProject(id: string, patch: Partial<Pick<Project, "label" | "favorite">>): Promise<Project | null>;
   /**
    * Delete a project the app records. Refuses, without writing anything, when
-   * the project still has a conversation that is not in
-   * `verifiedStoppedConversationIds` (the ones the caller observed as stopped,
-   * or that never had a process launched): a conversation whose only reachable
-   * project is gone becomes an orphan — running or not, it can be neither
-   * navigated nor restarted.
+   * the project still has a conversation that is not in `verified` (the
+   * conversations the caller observed as deletable, mapped to the lifecycle
+   * epoch it observed them at): a conversation whose only reachable project is
+   * gone becomes an orphan — running or not, it can be neither navigated nor
+   * restarted.
    *
-   * Every row is re-read here and dropped only while it still reads process-free,
-   * so a launch that recorded a process after the caller's observation is refused
-   * rather than dropped. The re-read, the row removal and the delete share one
-   * queued write, so a racing launch writes through the same queue and is visible
-   * to the re-read.
+   * Two things make a row deletable, and both are checked here, inside this
+   * queued operation:
+   *
+   *  - the stored row reads process-free (`stopped`/`error`, or a never-launched
+   *    `starting` with no identity), or
+   *  - the caller's observation is **current**: the row's lifecycle epoch still
+   *    equals the epoch the caller observed, so the row is the same life the
+   *    caller verified. This is what a `stopped` verdict from a *fresh*
+   *    observation of a row whose cached label is stale `idle`/`running` rests
+   *    on — the label is history, the observation is evidence, and the epoch
+   *    binds the two.
+   *
+   * A launch that recorded its process after the caller's observation advances
+   * the epoch, so neither branch holds and the delete refuses rather than
+   * dropping the only pointer to a live process.
    *
    * A row whose launch is reserved but has not recorded its process yet reads
    * exactly like a never-launched row (`starting`, no identity), so the re-read
@@ -40,7 +51,7 @@ export interface MetadataStore {
    * visible here and blocks, and a delete that commits first removes the row the
    * reserve reads, so the launch refuses before touching a process.
    */
-  deleteProject(id: string, verifiedStoppedConversationIds?: readonly string[]): Promise<"deleted" | "not_found" | "has_conversations">;
+  deleteProject(id: string, verified?: ReadonlyMap<string, number>): Promise<"deleted" | "not_found" | "has_conversations">;
   /**
    * Claim a launch for a conversation on the store queue. `true` means this call
    * took the claim; `false` means it did not — either the row is gone (a delete
@@ -74,6 +85,19 @@ export interface MetadataStore {
   createConversation(input: ConversationInput): Promise<Conversation>;
   registerExternalConversation(input: ExternalConversationInput): Promise<Conversation>;
   updateConversation(id: string, patch: Partial<Conversation>): Promise<Conversation | null>;
+  /**
+   * Write a lifecycle patch only while the row is still the life the caller
+   * observed. See `ConversationRuntimeStore.updateConversationIfCurrent`: the
+   * supervisor observes the machine, awaits probes, and then writes what it
+   * learned, and a launch or stop can open a new life during that window. The
+   * freshness check and the mutation are one section of this store's queue, so no
+   * interleaving can slip between them.
+   */
+  updateConversationIfCurrent(
+    id: string,
+    expectedEpoch: number,
+    patch: Partial<Conversation>,
+  ): Promise<{ conversation: Conversation; applied: boolean } | null>;
   recordEvent<T>(conversationId: string, type: string, payload: T, ts?: string): Promise<StoreEvent<T>>;
   listEvents<T = unknown>(conversationId: string, afterSeq?: number, limit?: number): Promise<Array<StoreEvent<T>>>;
   recordCommandOnce(idempotencyKey: string, conversationId: string, kind: string, payload: Record<string, unknown>): Promise<{ first: boolean; command: StoredCommand }>;
@@ -310,6 +334,25 @@ export function createMetadataStore(stateDir: string, now: () => Date = () => ne
   }
   const changedKeys = <T extends object>(current: T, patch: Partial<T>): Array<keyof T> =>
     (Object.keys(patch) as Array<keyof T>).filter((key) => current[key] !== patch[key]);
+  /**
+   * Fields whose change means a different life owns the row: the process identity,
+   * the room identity, and the `state`/`ownership` labels that describe them.
+   *
+   * The store, not the caller, advances `lifecycleEpoch` when one of these moves,
+   * so the guarantee does not depend on every caller remembering to stamp it — and
+   * the re-read inside a queued conditional write is decisive for a caller that
+   * forgot. Bookkeeping fields (title, model preference, activity stamp) are
+   * deliberately absent: changing a display label does not make an observation
+   * about the running process wrong.
+   */
+  const LIFECYCLE_FIELDS: Array<keyof Conversation> = [
+    "state", "ownership", "nativeSessionId", "nativeSessionPath", "tmuxSessionId",
+    "tmuxServerIdentity", "tmuxPanePid", "hostInstanceId", "hostGeneration",
+  ];
+  const nextEpoch = (current: Conversation, patch: Partial<Conversation>): number | undefined =>
+    changedKeys(current, patch).some((key) => LIFECYCLE_FIELDS.includes(key))
+      ? epochOf(current) + 1
+      : current.lifecycleEpoch;
 
   return {
     async listProjects() { await load(); return [...projects.values()]; },
@@ -334,37 +377,46 @@ export function createMetadataStore(stateDir: string, now: () => Date = () => ne
         await append([{ op: "project", value }]); projects.set(id, value); return value;
       });
     },
-    deleteProject(id, verifiedStoppedConversationIds = []) {
+    deleteProject(id, verified = new Map<string, number>()) {
       return serialize(async () => {
         await load();
         if (!projects.has(id)) return "not_found" as const;
-        // The caller observes each conversation and lists the ones it verified as
-        // stopped, but that observation happened before this queued op. So every row
-        // is re-read here and deleted only while it still reads process-free — a row
-        // whose launch recorded a process since (or finished and published) blocks.
-        // `stop` keeps `tmuxSessionId`, so a non-null id alone says nothing: what
-        // makes the re-read decisive is that a restart writes `starting` (or a live
-        // host state) plus its own identity through the same queue, so the row is
-        // already changed by the time this runs. A row no longer under the project
-        // is simply not a row to drop.
-        const verified = new Set(verifiedStoppedConversationIds);
+        // The caller observes each conversation and marks the ones it verified as
+        // deletable, but that observation happened before this queued op. So the
+        // stored row is re-read here and accepted only while it is the *same life*
+        // the caller verified:
+        //
+        //  - it reads process-free right now (`stopped`/`error`, or a never-launched
+        //    `starting` with no identity), or
+        //  - its lifecycle epoch still equals the one the caller observed, so the
+        //    verdict the caller reached applies to the row standing here — this is
+        //    how a cached `idle`/`running` label stops blocking a delete when the
+        //    machine was freshly and positively observed dead.
+        //
+        // A launch that recorded its process since the observation advanced the
+        // epoch, so neither branch holds and the delete refuses. `stop` keeps
+        // `tmuxSessionId`, so a non-null id alone says nothing: what makes the
+        // re-read decisive is the epoch and the state, both written through this
+        // same queue.
         const processFree = (conversation: Conversation): boolean =>
           conversation.state === "stopped"
           || conversation.state === "error"
           || (conversation.state === "starting" && conversation.tmuxSessionId === null && conversation.tmuxPanePid === null);
         const below = [...conversations.values()].filter((conversation) => conversation.projectId === id);
-        // The re-read decides on stored state; the reservation is the one thing a
-        // row cannot show, so the store's own set — the same one `reserveLaunch`
-        // writes, on this same queue — is the authority. One check is enough: a
-        // reserve either ran before this op (and is visible here, blocking the
-        // whole delete with nothing written) or runs after it (and finds the row
-        // gone, refusing the launch before a process exists). There is no window in
-        // between, because both ops are sections of this one queue.
+        // The re-read decides on stored state and the observed epoch; the
+        // reservation is the one thing a row cannot show, so the store's own set —
+        // the same one `reserveLaunch` writes, on this same queue — is the
+        // authority. One check is enough: a reserve either ran before this op (and
+        // is visible here, blocking the whole delete with nothing written) or runs
+        // after it (and finds the row gone, refusing the launch before a process
+        // exists). There is no window in between, because both ops are sections of
+        // this one queue.
         if (below.some((conversation) =>
-          !verified.has(conversation.id) || !processFree(conversation) || launchReservations.has(conversation.id))) {
+          (!processFree(conversation) && verified.get(conversation.id) !== epochOf(conversation))
+          || launchReservations.has(conversation.id))) {
           return "has_conversations" as const;
         }
-        // Every row is verified stopped and still process-free: drop them with the
+        // Every row is verified deletable and still process-free: drop them with the
         // project in ONE journal record. Several rows in one `write` are not atomic
         // across a crash — a torn write could leave a conversation gone while the
         // project survived, and no retry can put the row back.
@@ -448,8 +500,42 @@ export function createMetadataStore(stateDir: string, now: () => Date = () => ne
         // A patch that changes nothing must not add a row: refresh polls this path,
         // and the journal is append-only. Callers that want a touch pass a real change.
         if (changedKeys(current, patch).length === 0) return current;
-        const value: Conversation = { ...current, ...patch, id: current.id, projectId: current.projectId, updatedAt: stamp() };
+        // The store owns the lifecycle counter: a patch that changes any lifecycle
+        // field opens a new life, so an observation taken before it can no longer be
+        // committed over the row. A caller-supplied `lifecycleEpoch` is ignored — the
+        // authority is the comparison of the stored row against this patch.
+        const value: Conversation = {
+          ...current,
+          ...patch,
+          id: current.id,
+          projectId: current.projectId,
+          lifecycleEpoch: nextEpoch(current, patch),
+          updatedAt: stamp(),
+        };
         await append([{ op: "conversation", value }]); conversations.set(id, value); return value;
+      });
+    },
+    updateConversationIfCurrent(id, expectedEpoch, patch) {
+      return serialize(async () => {
+        await load();
+        const current = conversations.get(id);
+        if (!current) return null;
+        // The freshness decision and the mutation are one queued section: a launch
+        // that advanced the epoch is either already visible here (so this refuses)
+        // or runs after this section (so its own identity is what the row ends up
+        // holding). There is no interleaving in which a stale observation lands on
+        // a newer life.
+        if (epochOf(current) !== expectedEpoch) return { conversation: current, applied: false };
+        if (changedKeys(current, patch).length === 0) return { conversation: current, applied: true };
+        const value: Conversation = {
+          ...current,
+          ...patch,
+          id: current.id,
+          projectId: current.projectId,
+          lifecycleEpoch: nextEpoch(current, patch),
+          updatedAt: stamp(),
+        };
+        await append([{ op: "conversation", value }]); conversations.set(id, value); return { conversation: value, applied: true };
       });
     },
     recordEvent(conversationId, type, payload, ts = stamp()) {

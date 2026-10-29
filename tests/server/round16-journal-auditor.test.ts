@@ -44,7 +44,7 @@ it("V16 delete transaction: a whole cascade delete record removes the project an
  const store=createMetadataStore(dir);const p=await store.createProject({path:"/work/whole"});const a=await store.createConversation({projectId:p.id});const b=await store.createConversation({projectId:p.id});
  await createMetadataStore(dir).updateConversation(a.id,{state:"stopped"});
  await createMetadataStore(dir).updateConversation(b.id,{state:"stopped"});
- expect(await store.deleteProject(p.id,[a.id,b.id])).toBe("deleted");
+ expect(await store.deleteProject(p.id,new Map([[a.id,0],[b.id,0]]))).toBe("deleted");
  const rows=(await readFile(file,"utf8")).trim().split("\n").map(line=>JSON.parse(line));
  expect(rows.at(-1)).toEqual({op:"project-cascade-delete",id:p.id,conversationIds:[a.id,b.id]});
  const reopened=createMetadataStore(dir);
