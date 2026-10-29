@@ -341,7 +341,12 @@ const catalog = new DefaultNativeSessionCatalog({ leaseProbe: lease });
  */
 const tmuxSocketPath = join(config.stateDir, "tmux.sock");
 const tmux = new DefaultTmuxService({ socketPath: tmuxSocketPath });
-const registry = new DefaultCollabRegistryService();
+// Only the registry is pinned to `config.ompBinaryPath`: it is the one `omp`
+// call the server makes on a plain page load (`omp collab list`), so a host with
+// no OMP installed still answers that route instead of 500ing. The launch path
+// keeps resolving `omp` on PATH, where a missing binary is a refused launch and
+// not a broken read.
+const registry = new DefaultCollabRegistryService({ ompBinary: config.ompBinaryPath });
 const modelCatalog = new DefaultModelCatalogService();
 const paths = new WorkspacePathPolicy(config.allowedRoots, async (canonicalPath) => (await store.listProjects()).some((project) => project.path === canonicalPath));
 

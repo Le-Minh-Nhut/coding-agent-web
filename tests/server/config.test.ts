@@ -16,6 +16,10 @@ describe("server configuration", () => {
     const overridden = await loadConfig({ env: { CAW_PORT: "9000", CAW_ALLOWED_ROOTS: "/tmp,/var/tmp", CAW_INSECURE_COOKIES: "true" } });
     expect(overridden.port).toBe(9000); expect(overridden.allowedRoots).toEqual(["/tmp", "/var/tmp"]);
     await expect(loadConfig({ env: { CAW_INSECURE_COOKIES: "true", CAW_HOST: "0.0.0.0" } })).rejects.toThrow("localhost");
+    // The registry binary is a separate knob from the launch path's PATH lookup;
+    // the E2E harness points it at a stub so `omp collab list` needs no OMP.
+    expect(config.ompBinaryPath).toBeUndefined();
+    expect((await loadConfig({ env: { CAW_OMP_BINARY_PATH: "/tmp/stub-omp" } })).ompBinaryPath).toBe("/tmp/stub-omp");
   });
 
   it("merges JSON file and env, reports invalid settings, redacts secrets", async () => {

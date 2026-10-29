@@ -136,17 +136,50 @@ writeFileSync(passwordFile, JSON.stringify({ salt: salt.toString("hex"), hash: h
 chmodSync(passwordFile, 0o600);
 
 // ── 4. Runtime configuration ───────────────────────────────────────────────
+// The Collab registry is read by shelling out to `omp collab list --json`, and
+// the CI runner has no OMP: the real binary is ENOENT, the server answers 500 on
+// /api/projects/:id/sessions, and every spec that opens a conversation sees a
+// console error it never asked for. So the harness hands the server its own
+// `omp`, which answers that one call with an empty host list and refuses
+// everything else. The app code stays real and the registry stays hermetic (it
+// reads no host state, spawns no agent), so the route answers 200 with zero
+// hosts anywhere. Only the *registry* is pinned this way — see the README
+// (`## The launcher`) for why `CAW_OMP_PATH` below is not the no-launch guard it
+// looks like.
+const stubBinDir = join(tempRoot, "stub-bin");
+mkdirSync(stubBinDir, { recursive: true });
+const stubOmp = join(stubBinDir, "omp");
+writeFileSync(
+  stubOmp,
+  [
+    "#!/bin/sh",
+    "# Test double: the only call the server makes here is `collab list --json`.",
+    'case "$1 $2" in',
+    '  "collab list") printf \'%s\\n\' \'{"version":1,"hosts":[]}\'; exit 0 ;;',
+    "esac",
+    'echo "e2e stub omp: unsupported call: $*" >&2',
+    "exit 1",
+    "",
+  ].join("\n"),
+  { mode: 0o755 },
+);
+
 const env = {
   ...process.env,
   CAW_HOST: "127.0.0.1",
   CAW_PORT: process.env.CAW_E2E_PORT ?? "4399",
   CAW_STATE_DIR: stateDir,
   CAW_ALLOWED_ROOTS: `${rootsDir},${secondaryRootsDir}`,
-  // `maxActiveAgents` refuses to go below 1, so the free-load guarantee comes
-  // from CAW_OMP_PATH: the adapter probes this path, sees no binary, reports the
-  // capability missing, and every launch is refused before any agent exists.
-  // The owner's credits are never at risk from this harness.
+  // `maxActiveAgents` refuses to go below 1, and nothing else here stops a launch
+  // (there is no CAW_OMP_PATH consumer in the server, and the tmux adapter runs
+  // the bare resolved `omp`), so the free-load guarantee comes from omp being
+  // absent from PATH on the machine running the specs. That is a real gap in the
+  // harness, not something this env block closes; the registry stub above is
+  // deliberately NOT on PATH so it cannot become a launchable agent.
+  // The owner's credits are never at risk from this harness in CI, where omp is
+  // not installed at all.
   CAW_OMP_PATH: join(tempRoot, "no-agent-binary"),
+  CAW_OMP_BINARY_PATH: stubOmp,
   CAW_MAX_ACTIVE_AGENTS: "1",
   CAW_LOG_LEVEL: process.env.CAW_LOG_LEVEL ?? "warn",
 };

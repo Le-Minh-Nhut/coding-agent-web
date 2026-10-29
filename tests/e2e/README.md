@@ -45,10 +45,24 @@ afterwards:
   (hex salt + 64-byte `scrypt(password, salt)`) before the server starts, so
   nothing has to scrape the first-run setup-token message. The file format is the
   one `apps/server/src/auth.ts` validates.
-- **No agent can be launched.** The state dir is pre-seeded with one project and
-  one `stopped` conversation, so specs *open* a conversation instead of creating
-  one through the supervisor. That matters: the tmux service resolves `omp` from
-  `PATH`, so any launch would start the owner's real agent and spend credits.
+- **Specs must not rely on a launch being refused.** The state dir is pre-seeded
+  with one project and one `stopped` conversation, so most specs *open* a
+  conversation instead of creating one. That distinction matters: the tmux
+  service resolves `omp` from `PATH` and runs it (`omp --config=…`) inside a new
+  tmux session, so on a machine that has OMP installed a spec that creates a chat
+  *does* start that binary. `CAW_OMP_PATH` in the launcher env is **not** a guard
+  — nothing in the server reads it. In CI, where OMP is absent, the tmux session
+  is created and its pane's shell exits immediately on `command not found`: no
+  agent runs and no credits are spent, which is the case these specs are written
+  against. Running the suite locally against an installed OMP is at your own
+  cost.
+- **The Collab registry needs no OMP.** The server reads it by running
+  `omp collab list --json`, which is ENOENT on a runner with no OMP — so the
+  launcher writes a stub `omp` into the harness temp dir and points the server at
+  it with `CAW_OMP_BINARY_PATH`. The stub answers that one call with an empty
+  host list and refuses everything else, so `/api/projects/:id/sessions` answers
+  `200` with zero hosts on any machine. It is deliberately *not* on `PATH`; only
+  the registry binary is pinned, and the launch path is untouched.
 - The server is started as `tsx apps/server/src/server.ts` (via the workspace's
   own `node_modules/.bin/tsx`, overridable with `CAW_E2E_TSX`) rather than a
   TypeScript build, so the suite exercises current source.

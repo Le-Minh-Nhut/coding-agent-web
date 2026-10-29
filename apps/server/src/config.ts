@@ -25,6 +25,14 @@ const schema = z.object({
   logLevel: z.enum(["fatal", "error", "warn", "info", "debug", "trace", "silent"]).default("info"),
   insecureCookies: z.boolean().default(false),
   publicOrigin: z.string().optional(),
+  /**
+   * The `omp` binary the Collab *registry* is read through (`omp collab list`).
+   * It is separate from the launch path, which resolves `omp` on PATH: a host
+   * with no OMP installed can still serve its own conversations, and the browser
+   * E2E harness points this at a stub so the registry answers "no hosts" without
+   * a real OMP present. Defaults to `omp` on PATH.
+   */
+  ompBinaryPath: z.string().min(1).optional(),
 });
 
 export type ServerConfig = z.infer<typeof schema> & { webDistDir?: string; guestDistDir?: string };
@@ -63,7 +71,7 @@ function parseBoolean(value: string, name: string): boolean {
 
 function envConfig(env: NodeJS.ProcessEnv): RawConfig {
   const result: RawConfig = {};
-  for (const key of ["host", "stateDir", "logLevel", "webDistDir", "guestDistDir", "publicOrigin"] as const) {
+  for (const key of ["host", "stateDir", "logLevel", "webDistDir", "guestDistDir", "publicOrigin", "ompBinaryPath"] as const) {
     const value = env[`CAW_${key.replace(/[A-Z]/g, (m) => `_${m}`).toUpperCase()}`];
     if (value !== undefined) result[key] = value;
   }
