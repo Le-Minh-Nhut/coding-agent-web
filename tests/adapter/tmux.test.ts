@@ -142,7 +142,7 @@ describe("tmux", () => {
       await execFileAsync("tmux", ["-S", socketPath, "kill-session", "-t", session.id]);
 
       const row: Conversation = {
-        id: "c1", projectId: "p1", nativeSessionId: null, nativeSessionPath: null,
+        id: "c1", projectId: "p1", nativeSessionId: "native-stop-missing", nativeSessionPath: null,
         title: "stopped session", model: null, ownership: "managed", state: "running",
         tmuxSessionId: session.id, tmuxSessionName: session.name,
         tmuxServerIdentity: session.serverIdentity, tmuxPanePid: session.panePid,
@@ -163,7 +163,11 @@ describe("tmux", () => {
         recordEvent: async () => null,
       };
       const adapters: RuntimeAdapters = {
-        listHosts: async () => [],
+        listHosts: async () => [{
+          instanceId: "host-stop-missing", generation: 1, pid: session.panePid,
+          sessionId: "native-stop-missing", cwd: directory, model: "m",
+          participants: 1, relayConnected: true, inputRequired: false, busy: false, access: "control",
+        }],
         listManagedTmux: async () => (await privateService.listManaged()).map((item) => ({
           id: item.id, name: item.name, alive: item.alive, panePid: item.panePid, serverIdentity: item.serverIdentity,
         })),
@@ -171,7 +175,7 @@ describe("tmux", () => {
           const item = await privateService.getById(id);
           return { ok: true as const, session: item ? { id: item.id, name: item.name, alive: item.alive, panePid: item.panePid, serverIdentity: item.serverIdentity } : null };
         },
-        isProcessDescendant: async () => false,
+        isProcessDescendant: async (hostPid, panePid) => hostPid === panePid,
         tmuxServerIdentity: () => privateService.serverIdentity(),
         launch: async () => { throw new Error("not used"); },
         killTmux: (id, expectedIdentity) => privateService.kill(id, { expectedIdentity }),

@@ -28,6 +28,26 @@ function runtimeSession(session: TmuxSession): RuntimeTmuxSession {
   };
 }
 
+/**
+ * A published host row. `pid` and `sessionId` are the identity the stop gate
+ * verifies: a pane is only ours when exactly one published host descends from
+ * it and serves the native session we recorded.
+ */
+function hostRow(over: Partial<RuntimeHost> & { pid: number | null; sessionId: string }): RuntimeHost {
+  return {
+    instanceId: `host-${over.sessionId}`,
+    generation: 1,
+    cwd: "/tmp/project",
+    model: null,
+    participants: 1,
+    relayConnected: true,
+    inputRequired: false,
+    busy: false,
+    access: "control",
+    ...over,
+  };
+}
+
 /** A controllable world: tmux sessions, rooms, leases, and a journal of events. */
 function makeWorld() {
   const tmuxSessions: RuntimeTmuxSession[] = [];
@@ -35,7 +55,6 @@ function makeWorld() {
   let lease: boolean | "unknown" = false;
   let registryThrows = false;
   let tmuxListThrows = false;
-  let probeFails = false;
   let storeWriteThrows = false;
   let killThrows = false;
   let nextId = 1;
@@ -55,7 +74,6 @@ function makeWorld() {
       return tmuxSessions;
     },
     async getTmux(id) {
-      if (probeFails) return { ok: false as const, reason: "tmux probe could not run" };
       return { ok: true as const, session: tmuxSessions.find((session) => session.id === id) ?? null };
     },
     async isProcessDescendant(candidatePid, panePid) {
@@ -121,10 +139,13 @@ function makeWorld() {
   };
 
   function seed(over: Partial<Conversation> = {}): Conversation {
+    const managedPane = over.ownership !== "external" && Boolean(over.tmuxSessionId);
+    const managedSession = over.tmuxSessionId ? tmuxSessions.find((session) => session.id === over.tmuxSessionId) : undefined;
+    const panePid = over.tmuxPanePid !== undefined ? over.tmuxPanePid : managedSession?.panePid ?? null;
+    const nativeSessionId = over.nativeSessionId ?? (managedPane ? `native-${over.id ?? "c1"}` : null);
     const conversation: Conversation = {
       id: over.id ?? "c1",
       projectId: "p1",
-      nativeSessionId: null,
       nativeSessionPath: null,
       title: "conversation",
       model: null,
@@ -132,7 +153,7 @@ function makeWorld() {
       state: "starting",
       tmuxSessionId: null,
       tmuxSessionName: null,
-      tmuxServerIdentity: null, tmuxPanePid: null,
+      tmuxServerIdentity: null,
       hostInstanceId: null,
       hostGeneration: null,
       createdAt: "2026-01-01T00:00:00.000Z",
@@ -140,6 +161,8 @@ function makeWorld() {
       lastActivityAt: null,
       statusDetail: null,
       ...over,
+      tmuxPanePid: panePid,
+      nativeSessionId,
     };
     conversations.set(conversation.id, conversation);
     return conversation;
@@ -162,9 +185,6 @@ function makeWorld() {
     },
     breakTmuxList: (value: boolean) => {
       tmuxListThrows = value;
-    },
-    breakTmuxProbe: (value: boolean) => {
-      probeFails = value;
     },
     breakStoreWrites: (value: boolean) => {
       storeWriteThrows = value;
@@ -417,13 +437,29 @@ describe("supervisor.start", () => {
     const socketPath = path.join(directory, "tmux.sock");
     const tmux = new DefaultTmuxService({ socketPath, ompBinary: "sleep" });
     const world = makeWorld();
-    world.seed({ id: "c1" });
+    world.seed({ id: "c1", nativeSessionId: "native-c1" });
     world.adapters.listManagedTmux = async () => (await tmux.listManaged()).map(runtimeSession);
+    world.adapters.getTmux = async (id) => {
+      try {
+        const session = await tmux.getById(id);
+        return { ok: true as const, session: session ? runtimeSession(session) : null };
+      } catch (error) {
+        return { ok: false as const, reason: error instanceof Error ? error.message : String(error) };
+      }
+    };
     world.adapters.tmuxServerIdentity = () => tmux.serverIdentity();
-    world.adapters.killTmux = async (id, identity) => tmux.kill(id, { expectedIdentity: identity });
+    world.adapters.killTmux = async (id, identity) => {
+      await tmux.kill(id, { expectedIdentity: identity });
+      // A killed pane publishes no room, so its host row goes with it. Leaving it
+      // behind would make the restart look like a live stranger's process.
+      world.hosts.splice(0, world.hosts.length);
+    };
     world.adapters.launch = async (spec) => {
       world.launches.push(spec);
-      return runtimeSession(await tmux.launch({ name: spec.name, cwd: spec.cwd, args: ["30"] }));
+      const session = runtimeSession(await tmux.launch({ name: spec.name, cwd: spec.cwd, args: ["30"] }));
+      // Ownership is verifiable only when the published host descends from the pane.
+      world.hosts.splice(0, world.hosts.length, hostRow({ pid: session.panePid, sessionId: "native-c1" }));
+      return session;
     };
     const supervisor = createSupervisor({ store: world.store, adapters: world.adapters, clock: instantClock, maxActive: 1, publishTimeoutMs: 0 });
 
@@ -1013,8 +1049,10 @@ describe("supervisor.start", () => {
 describe("supervisor.stop", () => {
   it("kills by recorded tmux id and settles to stopped", async () => {
     const world = makeWorld();
-    world.seed({ id: "c1", state: "running", tmuxSessionId: "$4", tmuxSessionName: "caw-c1", tmuxPanePid: 2_000_000_000, tmuxServerIdentity: "private-socket:1" });
+    world.seed({ id: "c1", state: "running", nativeSessionId: "native-c1", tmuxSessionId: "$4", tmuxSessionName: "caw-c1", tmuxPanePid: 321, tmuxServerIdentity: "private-socket:1" });
     world.tmuxSessions.push({ id: "$4", name: "caw-c1", alive: true, panePid: 321, serverIdentity: "private-socket:1" });
+    // The pane must be positively verified as serving the recorded native session.
+    world.hosts.push(hostRow({ pid: 321, sessionId: "native-c1" }));
     const supervisor = createSupervisor({ store: world.store, adapters: world.adapters, clock: instantClock, maxActive: 3 });
 
     const result = await supervisor.stop("c1");
@@ -1045,17 +1083,37 @@ describe("supervisor.stop", () => {
     try {
       const ours = await tmux.launch({ name: "stop-ours", cwd: directory, args: ["30"] });
       const world = makeWorld();
-      world.seed({ id: "c1", state: "running", tmuxSessionId: ours.id, tmuxSessionName: ours.name, tmuxServerIdentity: ours.serverIdentity });
+      world.seed({ id: "c1", state: "running", nativeSessionId: "native-c1", tmuxSessionId: ours.id, tmuxSessionName: ours.name, tmuxServerIdentity: ours.serverIdentity, tmuxPanePid: ours.panePid });
+      world.hosts.push(hostRow({ pid: ours.panePid, sessionId: "native-c1" }));
       world.adapters.killTmux = async () => {};
-      world.adapters.tmuxServerIdentity = () => tmux.serverIdentity();
+      let newIdentity: string | null = null;
+      world.adapters.tmuxServerIdentity = async () => (restarted ? newIdentity : ours.serverIdentity);
+      let probeReads = 0;
       world.adapters.getTmux = async (id) => {
-        if (!restarted) {
+        probeReads += 1;
+        // The precheck probe sees our pane. The polling probe is the one that races
+        // the restart: the identity read that preceded it already said "old server".
+        if (probeReads >= 2 && !restarted) {
           restarted = true;
+          // Kill our server and immediately reissue `$0` on a fresh one. The pane the
+          // gate recorded no longer exists; only the reused id remains, under a
+          // different server identity. A live replacement is enough — the gate must
+          // refuse on the identity change alone, never on the pane's liveness.
           await execFileAsync("tmux", ["-S", socketPath, "kill-server"]);
-          const { stdout } = await execFileAsync("tmux", ["-S", socketPath, "new-session", "-d", "-P", "-F", "#{session_id}", "-s", "caw-stop-stranger", "-c", directory, "sleep", "30"]);
-          const strangerId = stdout.trim();
-          await execFileAsync("tmux", ["-S", socketPath, "set-window-option", "-t", strangerId, "remain-on-exit", "on"]);
-          await execFileAsync("tmux", ["-S", socketPath, "send-keys", "-t", strangerId, "C-c"]);
+          // tmux briefly refuses to start a new server on a just-killed socket
+          // ("server exited unexpectedly"); bounded retries settle it without sleeping.
+          let spawned = false;
+          for (let attempt = 0; attempt < 10 && !spawned; attempt += 1) {
+            try {
+              await execFileAsync("tmux", ["-S", socketPath, "new-session", "-d", "-P", "-F", "#{session_id}", "-s", "caw-stop-stranger", "-c", directory, "sleep", "30"]);
+              spawned = true;
+            } catch {
+              // Retry: the previous server is still releasing the socket.
+            }
+          }
+          if (!spawned) throw new Error("could not restart the tmux server on the test socket");
+          newIdentity = await tmux.serverIdentity();
+          return { ok: true, session: null };
         }
         try {
           const session = await tmux.getById(id);
@@ -1069,7 +1127,9 @@ describe("supervisor.stop", () => {
       const result = await supervisor.stop("c1", 1_000);
       const stranger = (await tmux.listManaged()).find((session) => session.id === ours.id);
       expect(restarted).toBe(true);
-      expect(stranger).toMatchObject({ alive: false, serverIdentity: expect.not.stringMatching(ours.serverIdentity) });
+      // `$0` was reissued on the replacement server: same id, different identity.
+      expect(stranger).toMatchObject({ alive: true, serverIdentity: expect.not.stringMatching(ours.serverIdentity) });
+      expect(world.kills).toHaveLength(0);
       expect(result.state).toBe("stopping");
       expect(world.events.map((event) => event.type)).not.toContain("agent.stopped");
     } finally {
@@ -1081,13 +1141,13 @@ describe("supervisor.stop", () => {
   it("does not report stopped when tmux restarts between identity and session reads", async () => {
     // Before the identity bracket and returned-row check, dead replacement-server `$0` passed the !alive test and was reported stopped.
     const world = makeWorld();
-    world.seed({ id: "c1", state: "running", tmuxSessionId: "$0", tmuxSessionName: "caw-ours", tmuxPanePid: null, tmuxServerIdentity: "old-socket:1:10" });
+    world.seed({ id: "c1", state: "running", nativeSessionId: "native-c1", tmuxSessionId: "$0", tmuxSessionName: "caw-ours", tmuxPanePid: 900, tmuxServerIdentity: "old-socket:1:10" });
     world.adapters.killTmux = async () => {};
-    const stranger: RuntimeTmuxSession = { id: "$0", name: "caw-stranger", alive: false, panePid: 901, serverIdentity: "new-socket:2:20" };
+    const stranger: RuntimeTmuxSession = { id: "$0", name: "caw-stranger", alive: true, panePid: 901, serverIdentity: "new-socket:2:20" };
     let restartedBetweenReads = false;
     world.adapters.tmuxServerIdentity = async () => restartedBetweenReads ? "new-socket:2:20" : "old-socket:1:10";
     world.adapters.getTmux = async () => {
-      // First poll identity was old. Restart immediately before getTmux and reissue `$0`.
+      // First identity read was old. Restart immediately before getTmux and reissue `$0`.
       restartedBetweenReads = true;
       world.tmuxSessions.splice(0, world.tmuxSessions.length, stranger);
       return { ok: true, session: stranger };
@@ -1099,11 +1159,12 @@ describe("supervisor.stop", () => {
       clock: { now: () => t, sleep: async () => { t += 250; } },
       maxActive: 3,
     });
-    const result = await supervisor.stop("c1", 1_000);
+    await expect(supervisor.stop("c1", 1_000)).rejects.toMatchObject({ code: "agent_not_running" });
     expect(restartedBetweenReads).toBe(true);
-    expect(result.state).toBe("stopping");
+    expect(world.kills).toHaveLength(0);
     expect(world.events.map((event) => event.type)).not.toContain("agent.stopped");
-    expect(world.tmuxSessions[0]).toMatchObject({ id: "$0", alive: false, serverIdentity: "new-socket:2:20" });
+    expect((await world.store.getConversation("c1"))?.state).not.toBe("stopped");
+    expect(world.tmuxSessions[0]).toMatchObject({ id: "$0", alive: true, serverIdentity: "new-socket:2:20" });
   });
 
   it("refuses stop when the recorded server is live but its socket pathname was unlinked", async (ctx) => {
@@ -1123,13 +1184,15 @@ describe("supervisor.stop", () => {
       serverPid = Number(ours.serverIdentity.split(":").at(-1));
       panePid = ours.panePid;
       const world = makeWorld();
-      world.seed({ id: "c1", state: "running", tmuxSessionId: ours.id, tmuxSessionName: ours.name, tmuxServerIdentity: ours.serverIdentity, tmuxPanePid: ours.panePid });
+      world.seed({ id: "c1", state: "running", nativeSessionId: "native-c1", tmuxSessionId: ours.id, tmuxSessionName: ours.name, tmuxServerIdentity: ours.serverIdentity, tmuxPanePid: ours.panePid });
       world.adapters.tmuxServerIdentity = () => tmux.serverIdentity();
       const supervisor = createSupervisor({ store: world.store, adapters: world.adapters, clock: instantClock, maxActive: 3 });
       await unlink(socketPath);
 
-      const result = await supervisor.stop("c1");
-      expect(result.state).toBe("stopping");
+      // The socket is gone but the recorded pane is still alive: absence cannot be
+      // verified, so ownership cannot be confirmed and the stop is refused.
+      await expect(supervisor.stop("c1")).rejects.toMatchObject({ code: "agent_not_running" });
+      expect(world.kills).toHaveLength(0);
       expect(world.events.map((event) => event.type)).not.toContain("agent.stopped");
       expect(() => process.kill(serverPid!, 0)).not.toThrow();
       expect(panePid).not.toBeNull();
@@ -1164,7 +1227,16 @@ describe("supervisor.stop", () => {
       serverPid = Number(ours.serverIdentity.split(":").at(-1));
       panePid = ours.panePid;
       const world = makeWorld();
-      world.seed({ id: "c1", state: "running", tmuxSessionId: ours.id, tmuxSessionName: ours.name, tmuxServerIdentity: ours.serverIdentity, tmuxPanePid: ours.panePid });
+      world.seed({ id: "c1", state: "running", nativeSessionId: "native-c1", tmuxSessionId: ours.id, tmuxSessionName: ours.name, tmuxServerIdentity: ours.serverIdentity, tmuxPanePid: ours.panePid });
+      world.hosts.push(hostRow({ pid: ours.panePid, sessionId: "native-c1" }));
+      world.adapters.getTmux = async (id) => {
+        try {
+          const session = await tmux.getById(id);
+          return { ok: true as const, session: session ? runtimeSession(session) : null };
+        } catch (error) {
+          return { ok: false as const, reason: error instanceof Error ? error.message : String(error) };
+        }
+      };
       world.adapters.tmuxServerIdentity = () => tmux.serverIdentity();
       world.adapters.killTmux = async () => { await unlink(socketPath); };
       let t = 0;
@@ -1206,7 +1278,16 @@ describe("supervisor.stop", () => {
       const ours = await tmux.launch({ name: "stop-gone", cwd: directory, args: ["30"] });
       const serverPid = Number(ours.serverIdentity.split(":").at(-1));
       const world = makeWorld();
-      world.seed({ id: "c1", state: "running", tmuxSessionId: ours.id, tmuxSessionName: ours.name, tmuxServerIdentity: ours.serverIdentity, tmuxPanePid: ours.panePid });
+      world.seed({ id: "c1", state: "running", nativeSessionId: "native-c1", tmuxSessionId: ours.id, tmuxSessionName: ours.name, tmuxServerIdentity: ours.serverIdentity, tmuxPanePid: ours.panePid });
+      world.hosts.push(hostRow({ pid: ours.panePid, sessionId: "native-c1" }));
+      world.adapters.getTmux = async (id) => {
+        try {
+          const session = await tmux.getById(id);
+          return { ok: true as const, session: session ? runtimeSession(session) : null };
+        } catch (error) {
+          return { ok: false as const, reason: error instanceof Error ? error.message : String(error) };
+        }
+      };
       world.adapters.tmuxServerIdentity = () => tmux.serverIdentity();
       world.adapters.killTmux = async (id, identity) => tmux.kill(id, { expectedIdentity: identity });
       const supervisor = createSupervisor({ store: world.store, adapters: world.adapters, clock: {
@@ -1259,23 +1340,32 @@ describe("supervisor.stop", () => {
     }
   });
 
-  it("keeps stop pending when the socket is unreachable but pane process lives", async () => {
+  it("refuses stop when the socket is unreachable but the pane process lives", async () => {
+    // The recorded server cannot be reached, and the recorded pane PID is still
+    // alive, so ownership cannot be confirmed: refuse rather than report a stop.
     const world = makeWorld();
-    world.seed({ id: "c1", state: "running", tmuxSessionId: "$0", tmuxSessionName: "caw-ours", tmuxPanePid: process.pid, tmuxServerIdentity: `private-socket:1:${process.pid}` });
+    world.seed({ id: "c1", state: "running", nativeSessionId: "native-c1", tmuxSessionId: "$0", tmuxSessionName: "caw-ours", tmuxPanePid: process.pid, tmuxServerIdentity: `private-socket:1:${process.pid}` });
+    world.hosts.push(hostRow({ pid: process.pid, sessionId: "native-c1" }));
     world.adapters.tmuxServerIdentity = async () => null;
-    let t = 0;
-    const result = await createSupervisor({ store: world.store, adapters: world.adapters, clock: { now: () => t, sleep: async () => { t += 250; } }, maxActive: 3 }).stop("c1", 500);
-    expect(result.state).toBe("stopping");
+    world.adapters.killTmux = async () => {};
+    await expect(
+      createSupervisor({ store: world.store, adapters: world.adapters, clock: instantClock, maxActive: 3 }).stop("c1", 500),
+    ).rejects.toMatchObject({ code: "agent_not_running" });
+    expect(world.kills).toHaveLength(0);
     expect(world.events.map((event) => event.type)).not.toContain("agent.stopped");
   });
 
-  it("keeps legacy rows without a pane PID pending when the socket is unreachable", async () => {
+  it("refuses a legacy row without a pane PID when the socket is unreachable", async () => {
+    // Legacy row: no recorded pane PID and no reachable socket. Neither the pane's
+    // absence nor its ownership can be proven, so the stop is refused (RuntimeFailure)
+    // rather than reported as a completed stop.
     const world = makeWorld();
-    world.seed({ id: "c1", state: "running", tmuxSessionId: "$0", tmuxSessionName: "caw-ours", tmuxServerIdentity: "private-socket:1", tmuxPanePid: null });
+    world.seed({ id: "c1", state: "running", nativeSessionId: "native-c1", tmuxSessionId: "$0", tmuxSessionName: "caw-ours", tmuxServerIdentity: "private-socket:1", tmuxPanePid: null });
     world.adapters.tmuxServerIdentity = async () => null;
-    let t = 0;
-    const result = await createSupervisor({ store: world.store, adapters: world.adapters, clock: { now: () => t, sleep: async () => { t += 250; } }, maxActive: 3 }).stop("c1", 500);
-    expect(result.state).toBe("stopping");
+    await expect(
+      createSupervisor({ store: world.store, adapters: world.adapters, clock: instantClock, maxActive: 3 }).stop("c1", 500),
+    ).rejects.toMatchObject({ code: "agent_not_running" });
+    expect(world.kills).toHaveLength(0);
     expect(world.events.map((event) => event.type)).not.toContain("agent.stopped");
   });
 
@@ -1299,13 +1389,15 @@ describe("supervisor.stop", () => {
     expect(result.state).toBe("stopped");
   });
 
-
   it("keeps waiting when server identity probe fails", async () => {
     const world = makeWorld();
-    world.seed({ id: "c1", state: "running", tmuxSessionId: "$4", tmuxSessionName: "caw-c1", tmuxPanePid: null, tmuxServerIdentity: "private-socket:1" });
+    world.seed({ id: "c1", state: "running", nativeSessionId: "native-c1", tmuxSessionId: "$4", tmuxSessionName: "caw-c1", tmuxPanePid: 321, tmuxServerIdentity: "private-socket:1" });
     world.tmuxSessions.push({ id: "$4", name: "caw-c1", alive: true, panePid: 321, serverIdentity: "private-socket:1" });
+    world.hosts.push(hostRow({ pid: 321, sessionId: "native-c1" }));
     world.adapters.killTmux = async () => {};
     let identityReads = 0;
+    // The precheck read sees the recorded server; every later read fails, so the
+    // polling loop must keep waiting rather than settle a verdict it cannot prove.
     world.adapters.tmuxServerIdentity = async () => ++identityReads === 1 ? "private-socket:1" : (() => { throw new Error("EACCES"); })();
     let t = 0;
     const supervisor = createSupervisor({
@@ -1321,9 +1413,18 @@ describe("supervisor.stop", () => {
   });
   it("does not confirm stop when the session probe could not run", async () => {
     const world = makeWorld();
-    world.seed({ id: "c1", state: "running", tmuxSessionId: "$4", tmuxSessionName: "caw-c1", tmuxPanePid: null, tmuxServerIdentity: "private-socket:1" });
+    world.seed({ id: "c1", state: "running", nativeSessionId: "native-c1", tmuxSessionId: "$4", tmuxSessionName: "caw-c1", tmuxPanePid: 321, tmuxServerIdentity: "private-socket:1" });
+    world.tmuxSessions.push({ id: "$4", name: "caw-c1", alive: true, panePid: 321, serverIdentity: "private-socket:1" });
+    world.hosts.push(hostRow({ pid: 321, sessionId: "native-c1" }));
     world.adapters.killTmux = async () => {};
-    world.breakTmuxProbe(true);
+    // The precheck probe verifies our pane; every probe during polling fails, so the
+    // loop must keep waiting rather than settle a stop it cannot prove.
+    let probes = 0;
+    world.adapters.getTmux = async (id) => {
+      probes += 1;
+      if (probes === 1) return { ok: true as const, session: world.tmuxSessions.find((session) => session.id === id) ?? null };
+      return { ok: false as const, reason: "tmux probe could not run" };
+    };
     let t = 0;
     const supervisor = createSupervisor({
       store: world.store,
@@ -1356,8 +1457,9 @@ describe("supervisor.stop", () => {
 
   it("reports a stop that does not complete as still stopping, and says so", async () => {
     const world = makeWorld();
-    world.seed({ id: "c1", state: "running", tmuxSessionId: "$5", tmuxServerIdentity: "private-socket:1" });
+    world.seed({ id: "c1", state: "running", nativeSessionId: "native-c1", tmuxSessionId: "$5", tmuxSessionName: "caw-c1", tmuxPanePid: 900, tmuxServerIdentity: "private-socket:1" });
     world.tmuxSessions.push({ id: "$5", name: "caw-c1", alive: true, panePid: 900, serverIdentity: "private-socket:1" });
+    world.hosts.push(hostRow({ pid: 900, sessionId: "native-c1" }));
     // A kill that does not actually remove the session, plus an instant deadline.
     world.adapters.killTmux = async () => {};
     let t = 0;

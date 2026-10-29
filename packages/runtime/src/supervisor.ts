@@ -668,61 +668,58 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
   async function stop(conversationId: string, timeoutMs = stopTimeoutMs): Promise<Conversation> {
     const conversation = await options.store.getConversation(conversationId);
     if (!conversation) throw new RuntimeFailure("agent_not_running", `Unknown conversation ${conversationId}`);
-
     if (conversation.ownership === "external") {
-      throw new RuntimeFailure(
-        "agent_not_running",
-        "This agent was started outside the app, so it is not ours to stop. Attach to it from a terminal instead.",
-      );
+      throw new RuntimeFailure("agent_not_running", "This agent was started outside the app, so it is not ours to stop. Attach to it from a terminal instead.");
     }
-    if (!conversation.tmuxSessionId) {
-      throw new RuntimeFailure("agent_not_running", "This conversation has no managed agent process.");
-    }
-    if (!conversation.tmuxServerIdentity) {
-      throw new RuntimeFailure("agent_not_running", "The tmux server identity was not recorded, so ownership cannot be verified.");
+    if (!conversation.tmuxSessionId) throw new RuntimeFailure("agent_not_running", "This conversation has no managed agent process.");
+    const refuse = async (reason: string): Promise<never> => {
+      await options.store.updateConversation(conversationId, { state: "unknown", statusDetail: reason });
+      throw new RuntimeFailure("agent_not_running", reason);
+    };
+    if (!conversation.tmuxServerIdentity || conversation.tmuxPanePid === null || !conversation.nativeSessionId) {
+      return refuse("The recorded pane identity is incomplete, so ownership cannot be verified.");
     }
     const serverIdentity = await options.adapters.tmuxServerIdentity().catch(() => "unknown" as const);
-    if (serverIdentity === null && processAlive(conversation.tmuxPanePid) === false) {
-      await options.store.recordEvent(conversationId, "agent.stopped", {
-        tmuxSessionId: conversation.tmuxSessionId,
-        alreadyGone: true,
-      });
-      return (
-        (await options.store.updateConversation(conversationId, { state: "stopped", statusDetail: "Stopped." })) ?? conversation
-      );
+    if (serverIdentity === "unknown") return refuse("The tmux server identity could not be verified, so this process cannot be safely stopped.");
+    if (serverIdentity === null) {
+      if (processAlive(conversation.tmuxPanePid) === false) {
+        await options.store.recordEvent(conversationId, "agent.stopped", { tmuxSessionId: conversation.tmuxSessionId, alreadyGone: true });
+        return (await options.store.updateConversation(conversationId, { state: "stopped", statusDetail: "Stopped." })) ?? conversation;
+      }
+      return refuse("The recorded tmux pane is not verifiably gone; ownership cannot be confirmed.");
     }
-    if (serverIdentity === "unknown") {
-      throw new RuntimeFailure("agent_not_running", "The tmux server identity could not be verified, so this process cannot be safely stopped.");
+    if (serverIdentity !== conversation.tmuxServerIdentity) return refuse("The tmux server identity changed, so this process cannot be safely stopped.");
+    const pane = await options.adapters.getTmux(conversation.tmuxSessionId);
+    if (!pane.ok) return refuse("The recorded tmux pane could not be verified, so this process cannot be safely stopped.");
+    if (!pane.session || !pane.session.alive) {
+      await options.store.recordEvent(conversationId, "agent.stopped", { tmuxSessionId: conversation.tmuxSessionId, alreadyGone: true });
+      return (await options.store.updateConversation(conversationId, { state: "stopped", statusDetail: "Stopped." })) ?? conversation;
     }
-
-    if (serverIdentity !== null && serverIdentity !== conversation.tmuxServerIdentity) {
-      throw new RuntimeFailure("agent_not_running", "The tmux server identity could not be verified, so this process cannot be safely stopped.");
+    if (pane.session.serverIdentity !== conversation.tmuxServerIdentity || pane.session.panePid !== conversation.tmuxPanePid) {
+      return refuse("The recorded tmux pane identity or PID changed, so this process cannot be safely stopped.");
     }
-
-    // The adapter rechecks recorded identity immediately before killing by `$N`.
-    // If the socket is unreachable, wait for pane-PID evidence rather than guess.
-    if (serverIdentity !== null) {
-      await options.adapters.killTmux(conversation.tmuxSessionId, conversation.tmuxServerIdentity);
+    const hosts = await options.adapters.listHosts().catch(() => null);
+    if (hosts === null) return refuse("The host registry could not be read, so the pane's native session cannot be verified.");
+    const lineage = await Promise.all(hosts.filter((host) => host.pid !== null).map(async (host) => ({
+      host,
+      result: await options.adapters.isProcessDescendant(host.pid!, conversation.tmuxPanePid!),
+    })));
+    if (lineage.some(({ result }) => result === "unknown")) return refuse("Host process lineage could not be verified, so the pane's native session cannot be verified.");
+    const paneHosts = lineage.filter(({ result }) => result === true).map(({ host }) => host);
+    if (paneHosts.length !== 1 || paneHosts[0]!.sessionId !== conversation.nativeSessionId) {
+      return refuse("The recorded tmux pane is not positively verified as serving this native session.");
     }
+    await options.adapters.killTmux(conversation.tmuxSessionId, conversation.tmuxServerIdentity);
     await options.store.updateConversation(conversationId, { state: "stopping", statusDetail: "Stopping the agent…" });
-
-    // A stop verdict needs a session lookup bracketed by matching server identity
-    // reads. Separate tmux commands cannot provide an atomic snapshot: this detects
-    // restarts between reads, but a restart after the final identity read and
-    // before the store write remains unavoidable. Never treat a changed or missing
-    // server, a dead stranger, or a failed probe as proof that our process stopped.
     const deadline = clock.now() + timeoutMs;
     while (clock.now() < deadline) {
       await clock.sleep(250);
       const currentServerIdentity = await options.adapters.tmuxServerIdentity().catch(() => "unknown" as const);
       if (currentServerIdentity === "unknown") continue;
-
       if (currentServerIdentity === null) {
         if (processAlive(conversation.tmuxPanePid) !== false) continue;
         await options.store.recordEvent(conversationId, "agent.stopped", { tmuxSessionId: conversation.tmuxSessionId });
-        return (
-          (await options.store.updateConversation(conversationId, { state: "stopped", statusDetail: "Stopped." })) ?? conversation
-        );
+        return (await options.store.updateConversation(conversationId, { state: "stopped", statusDetail: "Stopped." })) ?? conversation;
       }
       if (currentServerIdentity !== conversation.tmuxServerIdentity) continue;
       const probe = await options.adapters.getTmux(conversation.tmuxSessionId);
@@ -733,19 +730,11 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
       if (!probe.session && processAlive(conversation.tmuxPanePid) !== false) continue;
       if (!probe.session || !probe.session.alive) {
         await options.store.recordEvent(conversationId, "agent.stopped", { tmuxSessionId: conversation.tmuxSessionId });
-        return (
-          (await options.store.updateConversation(conversationId, { state: "stopped", statusDetail: "Stopped." })) ?? conversation
-        );
+        return (await options.store.updateConversation(conversationId, { state: "stopped", statusDetail: "Stopped." })) ?? conversation;
       }
     }
-
     await options.store.recordEvent(conversationId, "agent.stop_timeout", { timeoutMs });
-    return (
-      (await options.store.updateConversation(conversationId, {
-        state: "stopping",
-        statusDetail: "The process has not exited yet.",
-      })) ?? conversation
-    );
+    return (await options.store.updateConversation(conversationId, { state: "stopping", statusDetail: "The process has not exited yet." })) ?? conversation;
   }
 
   /**
