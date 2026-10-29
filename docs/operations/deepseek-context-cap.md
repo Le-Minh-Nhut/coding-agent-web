@@ -98,7 +98,14 @@ Backups (đã tạo 2026-10-29, trước khi có chỉnh sửa nào):
 
 Lưu ý: các backup cũ khác (`config.yml.bak-20261029`, `config.yml.bak-20261027T012609`) là của các lần config khác — không dùng chúng cho revert này.
 
-## Trạng thái hiện tại (2026-10-29)
+## Trạng thái hiện tại (2026-10-29, round r14)
+
+- ÁP DỤNG: `models.yml` có provider `cx-cap` (contextWindow 200000, maxTokens 16384) — alias trùng endpoint/id với `cx`, chỉ khác metadata. `config.yml`: `modelRoles.task` + `modelRoles.smol` và CẢ 12 `task.agentModelOverrides` (sonic, task, reviewer, scout, gemini, gemini-scout, gemini-audit, glm-audit, qwen-audit, v41audit, v41review, security-reviewer) → `cx-cap/wdb/deepseek-ai/DeepSeek-V4.1-Flash:high`; `retry.fallbackChains` mọi entry GPT → `cx-cap/...`. `vision` vẫn `cx/gpt-6-luna:high` (không dùng round này), `advisor` GLM giữ nguyên, `default` GLM-Flash giữ nguyên.
+- Compaction: runtime log `omp.2026-10-29.*.log` "Auto-compaction threshold decision" cho cx-cap ra `contextWindow:200000, thresholdTokens:170000` (85% mặc định) — KHÔNG cần knob config; `compaction.thresholdPercent=-1`, `thresholdTokens=-1` (defaults), `compaction.modelThresholds={}`.
+- Backup round này: `~/.omp/agent/{config,models}.yml.bak-20261029-r14`. Revert = `cp -p` 2 file đó về.
+- Smoke: worker `sonic` chạy qua `cx-cap` (journal + log `provider:"cx-cap"`, `model:"wdb/deepseek-ai/DeepSeek-V4.1-Flash"`), turn OK, không đụng GPT/Gemini.
+
+## Trạng thái cũ (2026-10-29, round-13 lúc pause — đã lỗi thời)
 
 - File này CHƯA commit — nằm untracked trong repo, sẽ được commit cùng batch round-13 khi resume (ghi nhớ khi `git add`).
 - Chưa áp dụng. `models.yml` đã từng bị sửa thử rồi REVERT về nguyên trạng (verify pass: chỉ còn `cx`, `ag`, `or`). `config.yml` chưa từng bị đụng.
