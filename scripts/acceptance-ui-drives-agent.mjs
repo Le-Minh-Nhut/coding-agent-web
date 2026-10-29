@@ -633,16 +633,17 @@ async function openProjectThroughUi(label) {
  * list addresses its card. Titles are not usable: every chat this app creates
  * through the UI is titled "New chat".
  */
-async function conversationIndex(conversationId, projectId = state.projectId) {
-  const list = (await api(page, `/api/projects/${projectId}/conversations`)).body?.data ?? [];
+async function conversationIndex(conversationId, projectId = state.projectId, targetPage = page) {
+  const list = (await api(targetPage, `/api/projects/${projectId}/conversations`)).body?.data ?? [];
   return list.findIndex((item) => item.id === conversationId);
 }
 
-async function openConversationThroughUi(conversationId, projectId = state.projectId) {
-  const index = await conversationIndex(conversationId, projectId);
+/** `targetPage` lets a second browser session (check8's independent context) address a card too. */
+async function openConversationThroughUi(conversationId, projectId = state.projectId, targetPage = page) {
+  const index = await conversationIndex(conversationId, projectId, targetPage);
   if (index < 0) throw new Error(`conversation ${conversationId} is not in the project list`);
-  await page.locator(".card").nth(index).click();
-  await page.locator("textarea.composer-input").waitFor({ state: "visible", timeout: 45_000 });
+  await targetPage.locator(".card").nth(index).click();
+  await targetPage.locator("textarea.composer-input").waitFor({ state: "visible", timeout: 45_000 });
 }
 
 /**
@@ -707,11 +708,11 @@ async function projectConversationIds(projectId = state.projectId) {
 }
 
 /** Composer send; the UI's Send button, never a synthetic socket frame. */
-async function sendPrompt(text) {
-  const composer = page.locator("textarea.composer-input");
+async function sendPrompt(text, targetPage = page) {
+  const composer = targetPage.locator("textarea.composer-input");
   await composer.waitFor({ state: "visible", timeout: 20_000 });
   await composer.fill(text);
-  await page.locator("form.composer-container button[type=submit]").first().click();
+  await targetPage.locator("form.composer-container button[type=submit]").first().click();
 }
 async function pollHostReadiness(text, marker, _intervalMs = 15_000, observeMs = 90_000) {
   const welcomeAt = await page.evaluate(() => window.__cawWelcomeAt ?? null);
@@ -1332,13 +1333,18 @@ const checks = {
         return current.filter((id) => !idsBefore.includes(id)).length > 0 ? current : null;
       }, { timeout: 30_000 }).catch(() => idsBefore);
       newIds = ids.filter((id) => !idsBefore.includes(id));
-    } finally {
+    } catch (error) {
       await secondContext.close().catch(() => {});
+      throw error;
     }
     if (createRequests.length < 2 || !overlappingRequests || newIds.length < 2) {
+      await secondContext.close().catch(() => {});
       notRun("check8-race", "two concurrent chats have distinct writers", `NOT POSSIBLE VIA UI: ${createRequests.length} create request(s) from two independent browser contexts (sources=${createRequests.map((item) => item.source).join(",") || "none"}), overlapping=${overlappingRequests}, newConversations=${newIds.length}, conversationIds=${newIds.join(",") || "none"}; two real UIs did not overlap the create request`);
       return;
     }
+    // Kept open on purpose: `secondPage` still holds its own session and its own
+    // view of the project's conversation list, so it can drive the FIRST
+    // concurrent chat's marker. Closed at the end of the check.
     const [firstCreated, secondCreated] = await Promise.all(newIds.slice(0, 2).map((id) => waitFreshConversation(id, "concurrent conversation launch", 90_000)));
     state.secondConversationId = secondCreated.id;
     state.secondNativeSessionId = secondCreated.nativeSessionId;
@@ -1373,33 +1379,81 @@ const checks = {
     }
 
     const second = await conversationOf(state.secondConversationId);
-    if (!second) {
-      fail("check8", "second conversation identity exists", `conversation=${state.secondConversationId ?? "missing"}`);
+    const createdFirst = await conversationOf(firstCreated.id);
+    if (!second || !createdFirst) {
+      fail("check8", "concurrent conversation identities exist", `second=${state.secondConversationId ?? "missing"} firstCreated=${firstCreated.id} found=${Boolean(createdFirst)}`);
+      await secondContext.close().catch(() => {});
       return;
     }
-    await openConversationThroughUi(second.id);
+
+    // Both concurrent chats need a prompt of their own: `firstBefore` already
+    // holds `${MARKER}-4` from check4, `secondCreated` gets `${MARKER}-8b` through
+    // the page under test, and `firstCreated` gets `${MARKER}-8a` through the
+    // SECOND context's page — its own session, cookie jar and conversation list.
+    // Driving it there exercises the independent viewer; the journal is what the
+    // assertion reads, so which browser sent it cannot flatter the result.
+    const markerFirst = `${MARKER}-8a`;
     const markerSecond = `${MARKER}-8b`;
+    // secondPage also navigated into the chat its own click created, so it left
+    // the conversation card list; reload into the project and re-enter it before
+    // addressing a card by index (the same flow `openProjectInContext` used).
+    await secondPage.goto(BASE, { waitUntil: "domcontentloaded" });
+    const secondProjectCard = secondPage.locator(".card", { hasText: `Acceptance ${MARKER}` }).first();
+    await secondProjectCard.waitFor({ state: "visible", timeout: 20_000 });
+    await secondProjectCard.click();
+    await secondPage.locator("h3", { hasText: "Conversations" }).first().waitFor({ timeout: 15_000 });
+    await openConversationThroughUi(firstCreated.id, state.projectId, secondPage);
+    await sendPrompt(`Reply with exactly: ${markerFirst} ACK`, secondPage);
+    await waitFor("first concurrent chat journal holds its marker", async () => {
+      const journal = await journalText(await conversationOf(firstCreated.id));
+      return journal && journal.includes(markerFirst);
+    }, { timeout: 180_000 });
+
+    // The page under test drove its own chat inside this same race (both clicks)
+    // so it sits in a conversation view, not the project list card grid that
+    // `openConversationThroughUi` addresses by index; the block above reset it.
+    await openConversationThroughUi(second.id);
     await sendPrompt(`Reply with exactly: ${markerSecond} ACK`);
-    await waitFor("second chat journal holds its marker", async () => {
+    await waitFor("second concurrent chat journal holds its marker", async () => {
       const journal = await journalText(await conversationOf(second.id));
       return journal && journal.includes(markerSecond);
     }, { timeout: 180_000 });
 
     const first = firstBefore;
+    const refreshedFirst = await conversationOf(firstCreated.id);
     const refreshedSecond = await conversationOf(second.id);
-    const secondJournal = await journalText(refreshedSecond);
-    const firstJournal = await journalText(first);
     const firstMarker = `${MARKER}-4`;
-    if (first.nativeSessionId !== refreshedSecond.nativeSessionId && first.tmuxSessionId !== refreshedSecond.tmuxSessionId) {
-      pass("check8a", "each conversation kept its own nativeSessionId and tmux $N", `first=${first.id} native=${first.nativeSessionId} tmux=${first.tmuxSessionId}; second=${second.id} native=${refreshedSecond.nativeSessionId} tmux=${refreshedSecond.tmuxSessionId}`);
+    const identities = [
+      { name: "pre-existing", conversation: first },
+      { name: "firstCreated", conversation: refreshedFirst },
+      { name: "secondCreated", conversation: refreshedSecond },
+    ];
+    const distinctSessions = new Set(identities.map((item) => item.conversation.nativeSessionId)).size === identities.length
+      && new Set(identities.map((item) => item.conversation.tmuxSessionId)).size === identities.length;
+    if (distinctSessions) {
+      pass("check8a", "each conversation kept its own nativeSessionId and tmux $N", `pre-existing=${first.id} native=${first.nativeSessionId} tmux=${first.tmuxSessionId}; firstCreated=${refreshedFirst.id} native=${refreshedFirst.nativeSessionId} tmux=${refreshedFirst.tmuxSessionId}; secondCreated=${refreshedSecond.id} native=${refreshedSecond.nativeSessionId} tmux=${refreshedSecond.tmuxSessionId}`);
     } else {
-      fail("check8a", "each conversation kept its own nativeSessionId and tmux $N", `first=${first.id} native=${first.nativeSessionId} tmux=${first.tmuxSessionId}; second=${second.id} native=${refreshedSecond.nativeSessionId} tmux=${refreshedSecond.tmuxSessionId}`);
+      fail("check8a", "each conversation kept its own nativeSessionId and tmux $N", `pre-existing=${first.id} native=${first.nativeSessionId} tmux=${first.tmuxSessionId}; firstCreated=${refreshedFirst.id} native=${refreshedFirst.nativeSessionId} tmux=${refreshedFirst.tmuxSessionId}; secondCreated=${refreshedSecond.id} native=${refreshedSecond.nativeSessionId} tmux=${refreshedSecond.tmuxSessionId}`);
     }
-    if (firstJournal?.includes(firstMarker) && !secondJournal?.includes(firstMarker) && secondJournal?.includes(markerSecond) && !firstJournal?.includes(markerSecond)) {
-      pass("check8b", "each marker landed only in its own journal", `firstPath=${conversationJournalPath(first)} native=${first.nativeSessionId}; secondPath=${conversationJournalPath(refreshedSecond)} native=${refreshedSecond.nativeSessionId}`);
+
+    // THREE-WAY disjointness: one marker per journal, and each marker absent from
+    // the other two — both directions of all three pairs (six cross-combinations).
+    const journals = new Map();
+    for (const item of identities) journals.set(item.name, await journalText(item.conversation));
+    const markerOf = { "pre-existing": firstMarker, firstCreated: markerFirst, secondCreated: markerSecond };
+    const readers = identities.map((item) => [item.name, journals.get(item.name), markerOf[item.name]]);
+    const own = readers.every(([, journal, marker]) => Boolean(journal?.includes(marker)));
+    const crossLeaks = readers.flatMap(([name, journal, marker]) =>
+      readers.filter(([otherName, otherJournal]) => otherName !== name && otherJournal?.includes(marker))
+        .map(([otherName]) => `${marker} in ${otherName}`),
+    );
+    const journalEvidence = identities.map((item) => `${item.name}Path=${conversationJournalPath(item.conversation) ?? "unavailable"} native=${item.conversation.nativeSessionId}`).join("; ");
+    if (own && crossLeaks.length === 0) {
+      pass("check8b", "each of the three markers landed only in its own journal", `${journalEvidence}`);
     } else {
-      fail("check8b", "each marker landed only in its own journal", `firstPath=${conversationJournalPath(first)} own=${Boolean(firstJournal?.includes(firstMarker))}; secondPath=${conversationJournalPath(refreshedSecond)} own=${Boolean(secondJournal?.includes(markerSecond))}; crossLeak=${Boolean(firstJournal?.includes(markerSecond) || secondJournal?.includes(firstMarker))}`);
+      fail("check8b", "each of the three markers landed only in its own journal", `ownMarkerPresent=${readers.map(([name, journal, marker]) => `${name}=${Boolean(journal?.includes(marker))}`).join(",")} crossLeaks=${crossLeaks.join(",") || "none"}; ${journalEvidence}`);
     }
+    await secondContext.close().catch(() => {});
     await page.locator('button[title="Back"]').first().click();
     await page.locator("h3", { hasText: "Conversations" }).first().waitFor({ timeout: 15_000 });
     await openConversationThroughUi(state.conversationId);
