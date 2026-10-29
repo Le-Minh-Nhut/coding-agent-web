@@ -218,6 +218,38 @@ describe("tmux", () => {
       await rm(directory, { recursive: true, force: true });
     }
   });
+
+  it("parses tab-delimited output with LANG/LC_ALL absent (C locale)", async (ctx) => {
+    if (!tmuxAvailable) {
+      ctx.skip();
+      return;
+    }
+    const directory = path.join(homedir(), ".cache", `caw-tmux-locale-${Date.now()}`);
+    const socketPath = path.join(directory, "tmux.sock");
+    await mkdir(directory, { recursive: true });
+    const saved = { LC_ALL: process.env.LC_ALL, LANG: process.env.LANG };
+    delete process.env.LC_ALL;
+    delete process.env.LANG;
+    const localeService = new DefaultTmuxService({ socketPath, ompBinary: "sleep" });
+    try {
+      const session = await localeService.launch({ name: "locale-probe", cwd: directory, args: ["30"] });
+      expect(session.id).toMatch(/^\$\d+$/);
+      expect(session.serverIdentity).toMatch(/^.+:\d+:\d+$/);
+      const managed = await localeService.listManaged();
+      const listed = managed.find((s) => s.id === session.id);
+      expect(listed).toBeDefined();
+      expect(listed?.name).toBe("caw-locale-probe");
+      expect(listed?.serverIdentity).toBe(session.serverIdentity);
+      await localeService.kill(session.id, { expectedIdentity: session.serverIdentity });
+    } finally {
+      if (saved.LC_ALL === undefined) delete process.env.LC_ALL;
+      else process.env.LC_ALL = saved.LC_ALL;
+      if (saved.LANG === undefined) delete process.env.LANG;
+      else process.env.LANG = saved.LANG;
+      await execFileAsync("tmux", ["-S", socketPath, "kill-server"]).catch(() => {});
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
 });
 
 it("proves ancestry from a real child process and fails closed for missing PIDs", async () => {

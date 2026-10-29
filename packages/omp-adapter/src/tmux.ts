@@ -119,6 +119,11 @@ export class DefaultTmuxService implements TmuxService {
   async #execTmux(args: string[]): Promise<{ stdout: string; stderr: string }> {
     return execFileAsync(this.#tmuxBinary, [...this.#socketArgs, ...args], {
       shell: false,
+      // tmux expands the \t separator in -F output through the active locale:
+      // under C/POSIX (unset LANG on CI, systemd, docker) the tab comes back as
+      // "_", making tab-delimited output unparseable. Pin a UTF-8 locale so the
+      // separator survives; glibc>=2.35 ships C.UTF-8 everywhere we target.
+      env: { ...process.env, LC_ALL: "C.UTF-8", LANG: "C.UTF-8" },
     });
   }
   /**
