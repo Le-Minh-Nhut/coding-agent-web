@@ -77,7 +77,7 @@ test("slash suggestions do not push composer below a narrow viewport", async ({ 
 test("a conversation with no live host offers attach instructions, not an endless spinner", async ({ page }) => {
   await openWithLink(page, { ok: false, error: { code: "link_unavailable", message: "No live host for this conversation" } }, 409);
 
-  const attach = page.getByRole("heading", { name: /no live agent to attach to/i });
+  const attach = page.getByRole("heading", { name: /Live host unavailable/i });
   await expect(attach).toBeVisible();
 
   // The card must hand the user something actionable: either the real tmux
@@ -106,7 +106,7 @@ test("unknown is its own state: never idle, never disconnected", async ({ page }
   expect(text).not.toMatch(/idle|ready for prompt|stopped/i);
 
   // The no-live-agent card and the unknown banner are two different statements.
-  await expect(page.getByRole("heading", { name: /no live agent to attach to/i })).toBeVisible();
+  await expect(page.getByRole("heading", { name: /Live host unavailable/i })).toBeVisible();
 });
 
 test("a refused room is reported as disconnected, with a way back", async ({ page }) => {
