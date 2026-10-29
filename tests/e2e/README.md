@@ -61,12 +61,17 @@ afterwards:
 collectors the first time a spec navigates (`gotoApp`/`login`), and exposes
 `unexpectedAppErrors(page)` / `assertNoUnexpectedAppErrors(page)`. The specs that
 inject faults or carry the most state (all of `round13.spec.ts` and
-`regression.spec.ts`) assert the list is empty before they end. The filter is by
-rule, never by weakening the assertion: a *response with an error status*
-("Failed to load resource: the server responded with a status of 5xx/4xx") is the
-injected case, as are `net::ERR_ABORTED` (navigation and un-routed mocks) and
-favicon/icon requests. An uncaught exception or a `console.error` from the app is
-always reported, and `tests/e2e/error-capture.spec.ts` proves both directions.
+`regression.spec.ts`) assert the list is empty before they end. The filter is an
+**allowlist, never a blanket rule**: a console error reporting a response status
+is forgiven only when the spec *declares* that exact URL+status with
+`declareInjectedFault(page, { urlPattern, status })`, registered where the fault
+is installed (`page.route(...).fulfill(...)`). An *undeclared* 5xx/4xx is reported
+— that is the defect the collector exists to catch. `net::ERR_ABORTED`
+(navigation and un-routed mocks; the app has no `AbortController`) and
+favicon/icon requests stay filtered by URL rule. An uncaught exception or a
+`console.error` from the app is always reported, and
+`tests/e2e/error-capture.spec.ts` proves all four directions: a declared fault is
+forgiven, an undeclared error status is not, and pageerror/console.error surface.
 
 ## What still requires a physical iPhone
 

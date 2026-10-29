@@ -3,6 +3,7 @@ import {
   assertNoUnexpectedAppErrors,
   createAssistantMessageEntry,
   createUserMessageEntry,
+  declareInjectedFault,
   harnessFixture,
   installMockCollabHost,
   login,
@@ -54,6 +55,10 @@ test("invalid folder names show errors or cannot be submitted and create nothing
   await expect(page.getByRole("heading", { name: "Browse Folders" })).toBeVisible();
   const namesBefore = (await readBrowse(page, fixture.rootsDir)).entries.map((entry) => entry.name).sort();
 
+  // This test deliberately submits names the backend must reject, so the 400 it
+  // answers with is the asserted behavior (the alert below), not an app failure.
+  declareInjectedFault(page, { urlPattern: /\/api\/directories$/, status: 400 });
+
   for (const name of [".", "..", "a/b", "", "   "]) {
     await page.getByRole("button", { name: "+ New Folder" }).click();
     const input = page.getByLabel(/New folder in/);
@@ -69,6 +74,7 @@ test("invalid folder names show errors or cannot be submitted and create nothing
     expect((await readBrowse(page, fixture.rootsDir)).entries.map((entry) => entry.name).sort()).toEqual(namesBefore);
     await page.getByRole("button", { name: "Cancel", exact: true }).first().click();
   }
+  await assertNoUnexpectedAppErrors(page);
 });
 
 test("free untracked native session resumes without retry after conflict_owner", async ({ page }) => {
@@ -84,6 +90,8 @@ test("free untracked native session resumes without retry after conflict_owner",
   }]);
   let launchRequests = 0;
   let launchBody: Record<string, unknown> | null = null;
+  // Injected 409; declared here so the error filter forgives only this URL+status.
+  declareInjectedFault(page, { urlPattern: /\/api\/projects\/[^/]+\/conversations$/, status: 409 });
   await page.route(`**/api/projects/${fixture.seededProjectId}/conversations`, async (route) => {
     if (route.request().method() !== "POST") return route.continue();
     launchRequests += 1;
@@ -206,6 +214,7 @@ test("unsupported slash command is intercepted, explicit plain text sends once, 
   await page.getByRole("button", { name: "Send", exact: true }).click();
   await expect.poll(() => host.prompts.length).toBe(2);
   expect(host.prompts).toEqual(["/compact", "/not-a-command"]);
+  await assertNoUnexpectedAppErrors(page);
 });
 
 test("reconnect restores snapshot transcript without duplicate rows", async ({ page }) => {

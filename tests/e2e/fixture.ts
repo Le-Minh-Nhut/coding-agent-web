@@ -104,8 +104,9 @@ export async function requireAppServer(request: APIRequestContext): Promise<void
 // console error proves nothing. The collectors are attached on the first
 // navigation, so every spec that logs in gets them without touching its body;
 // the high-value specs then assert the collected set is empty (see
-// `assertNoUnexpectedAppErrors`). Deliberate fault injection is excluded by rule,
-// not by weakening the assertion — see `unexpectedAppErrors`.
+// `assertNoUnexpectedAppErrors`). A deliberate fault is excluded only when the
+// spec *declares* it with `declareInjectedFault` at the route that installs it —
+// see `unexpectedAppErrors`. An undeclared 5xx is a defect, not noise.
 // ─────────────────────────────────────────────────────────────────────────────
 
 interface AppErrors {
@@ -115,6 +116,15 @@ interface AppErrors {
   consoleErrors: string[];
   /** Requests that never produced a response. */
   requestFailures: string[];
+  /** Faults this spec injected on purpose; the only responses the filter forgives. */
+  injectedFaults: InjectedFault[];
+}
+
+/** A response the spec itself mocked: only this URL answering this status is forgiven. */
+export interface InjectedFault {
+  /** Matched against the failing resource URL, not the document URL. */
+  urlPattern: RegExp;
+  status: number;
 }
 
 const collectedErrors = new WeakMap<Page, AppErrors>();
@@ -123,7 +133,7 @@ const collectedErrors = new WeakMap<Page, AppErrors>();
 export function recordAppErrors(page: Page): AppErrors {
   const existing = collectedErrors.get(page);
   if (existing) return existing;
-  const collected: AppErrors = { pageErrors: [], consoleErrors: [], requestFailures: [] };
+  const collected: AppErrors = { pageErrors: [], consoleErrors: [], requestFailures: [], injectedFaults: [] };
   collectedErrors.set(page, collected);
   page.on("pageerror", (error) => collected.pageErrors.push(error.message));
   page.on("console", (message) => {
@@ -137,32 +147,54 @@ export function recordAppErrors(page: Page): AppErrors {
 
 /** Icon requests the browser makes on its own; their failure says nothing about the app. */
 const BROWSER_ASSET = /\/(?:favicon\.ico|icons\/|apple-touch-icon)/u;
-/** A request the page itself cancelled: navigation, or an unrouted mock. */
+/**
+ * A request the page itself cancelled: navigation, or an unrouted mock. Kept
+ * blanket because the app contains no `AbortController` — an ERR_ABORTED can only
+ * originate from a navigation or from Playwright's own `unroute`, both harness
+ * artifacts, never an app-initiated cancel that a product defect could hide in.
+ */
 const CANCELLED = /net::ERR_ABORTED/u;
 /**
- * The browser's generic report that a response carried an error status. Several
- * specs inject 5xx mocks on purpose (V13-07 is entirely about the rendered error
- * state), and a *server answering with an error status* is the injected case.
+ * The browser's generic report that a response carried an error status. It alone
+ * does not say the status was wanted: a 500 no spec declared is exactly the
+ * failure this collector exists to catch, so it is reported unless an
+ * `InjectedFault` registered for that URL and status forgives it.
  * A connection that never answered reports `net::ERR_FAILED`/`CONNECTION_REFUSED`
- * instead and stays in the list below.
+ * instead and is a request failure, not a console error.
  */
-const HTTP_ERROR_STATUS = /^Failed to load resource: the server responded with a status of \d+/u;
+const HTTP_ERROR_STATUS = /^Failed to load resource: the server responded with a status of (\d+)\b/u;
+
+/**
+ * Declare a fault this spec injected on purpose at the URL and status it mocked.
+ * Register it where the route is installed (`page.route(...).fulfill(...)`), so a
+ * spec can never quietly inherit a filter it did not ask for. Only the exact
+ * URL+status pair is forgiven; every other status or URL still reports.
+ */
+export function declareInjectedFault(page: Page, fault: InjectedFault): void {
+  recordAppErrors(page).injectedFaults.push(fault);
+}
 
 /** The collected errors no spec asked for, as `<source>: <line>` strings. */
 export function unexpectedAppErrors(page: Page): string[] {
   const collected = collectedErrors.get(page);
   if (!collected) return [];
-  const injected = (line: string) => BROWSER_ASSET.test(line) || CANCELLED.test(line);
+  const forgiving = (line: string) => BROWSER_ASSET.test(line) || CANCELLED.test(line);
+  const declared = (line: string) => {
+    const status = HTTP_ERROR_STATUS.exec(line)?.[1];
+    // The console line is `<text> @ <location url>`; the pattern is tested against
+    // the whole line so it matches the resource URL wherever the browser reports it.
+    return status !== undefined && collected.injectedFaults.some((fault) => fault.status === Number(status) && fault.urlPattern.test(line));
+  };
   return [
     ...collected.pageErrors.map((line) => `pageerror: ${line}`),
-    ...collected.consoleErrors.filter((line) => !injected(line) && !HTTP_ERROR_STATUS.test(line)).map((line) => `console: ${line}`),
-    ...collected.requestFailures.filter((line) => !injected(line)).map((line) => `requestfailed: ${line}`),
+    ...collected.consoleErrors.filter((line) => !forgiving(line) && !declared(line)).map((line) => `console: ${line}`),
+    ...collected.requestFailures.filter((line) => !forgiving(line)).map((line) => `requestfailed: ${line}`),
   ];
 }
 
 /** Every error collected so far, injected ones included. For capture self-checks. */
 export function collectedAppErrors(page: Page): Readonly<AppErrors> {
-  return collectedErrors.get(page) ?? { pageErrors: [], consoleErrors: [], requestFailures: [] };
+  return collectedErrors.get(page) ?? { pageErrors: [], consoleErrors: [], requestFailures: [], injectedFaults: [] };
 }
 
 /**
@@ -176,6 +208,9 @@ export async function assertNoUnexpectedAppErrors(page: Page): Promise<void> {
 
 export async function gotoApp(page: Page): Promise<void> {
   recordAppErrors(page);
+  // The app probes its session on first paint; before login that probe is a
+  // deliberate 401 the app renders as the login screen, so it is declared here.
+  declareInjectedFault(page, { urlPattern: /\/api\/auth\/me$/, status: 401 });
   const response = await page.goto("/");
   const status = response?.status();
   if (status !== 200) {
@@ -215,6 +250,12 @@ export async function createProjectFromBrowser(page: Page, folderName: string, l
 export async function openSeededConversation(page: Page): Promise<string> {
   const fixture = harnessFixture();
   await login(page);
+  // This fixture's contract: the seeded conversation has no nativeSessionId and no
+  // live writer, so the real backend answers 404 on /history and 409 on /link. Both
+  // are the states the screen is built to render, declared here at the point the
+  // conversation is opened rather than forgiven by a blanket rule.
+  declareInjectedFault(page, { urlPattern: /\/api\/conversations\/[^/]+\/history/, status: 404 });
+  declareInjectedFault(page, { urlPattern: /\/api\/conversations\/[^/]+\/link/, status: 409 });
   await page.getByRole("heading", { name: "Seeded Fixture", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Seeded conversation", exact: true })).toBeVisible();
   await page.getByRole("heading", { name: "Seeded conversation", exact: true }).click();
@@ -223,6 +264,7 @@ export async function openSeededConversation(page: Page): Promise<string> {
 
 /** The link endpoint is the conversation screen's only source of host state. */
 export async function mockConversationLink(page: Page, body: unknown, status = 200): Promise<void> {
+  if (status >= 400) declareInjectedFault(page, { urlPattern: /\/api\/conversations\/[^/]+\/link/, status });
   await page.route("**/api/conversations/*/link*", async (route) => {
     await route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
   });

@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 import {
   assertNoUnexpectedAppErrors,
+  declareInjectedFault,
   harnessFixture,
   login,
   openFolderRow,
@@ -75,6 +76,7 @@ test("V13-07 conversation and activity failures render errors, not empty states"
   await login(page);
 
   // Mocked failure: project conversations endpoint returns HTTP 500.
+  declareInjectedFault(page, { urlPattern: /\/api\/projects\/[^/]+\/conversations$/, status: 500 });
   await page.route(`**/api/projects/${fixture.seededProjectId}/conversations`, (route) =>
     route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ ok: false, error: { code: "internal_error", message: "Injected conversations failure" } }) }));
   await page.getByRole("heading", { name: "Seeded Fixture", exact: true }).click();
@@ -83,10 +85,15 @@ test("V13-07 conversation and activity failures render errors, not empty states"
   await page.unroute(`**/api/projects/${fixture.seededProjectId}/conversations`);
 
   // Mocked failure: seeded conversation event endpoint returns HTTP 500.
+  declareInjectedFault(page, { urlPattern: /\/api\/conversations\/[^/]+\/events/, status: 500 });
   await page.route(`**/api/conversations/${fixture.seededConversationId}/events**`, (route) =>
     route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ ok: false, error: { code: "internal_error", message: "Injected activity failure" } }) }));
   await page.getByRole("button", { name: "←" }).click();
   await page.getByRole("heading", { name: "Seeded Fixture", exact: true }).click();
+  // Opening the seeded conversation hits the real backend for its history (404, no
+  // nativeSessionId) and link (409, no live writer); both are the expected states.
+  declareInjectedFault(page, { urlPattern: /\/api\/conversations\/[^/]+\/history/, status: 404 });
+  declareInjectedFault(page, { urlPattern: /\/api\/conversations\/[^/]+\/link/, status: 409 });
   await page.getByRole("heading", { name: "Seeded conversation", exact: true }).click();
   await page.getByRole("button", { name: "Activity" }).click();
   await expect(page.getByRole("alert")).toBeVisible();
@@ -143,6 +150,7 @@ test("V13-09 failed star update does not claim success", async ({ page }) => {
   await login(page);
   const project = await projectByLabel(page, "Seeded Fixture");
   // Mocked failure: reject PATCH without mutating the real project.
+  declareInjectedFault(page, { urlPattern: /\/api\/projects\/[^/]+$/, status: 500 });
   await page.route(`**/api/projects/${project.id}`, (route) =>
     route.request().method() === "PATCH"
       ? route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ ok: false, error: { code: "internal_error", message: "Injected favorite failure" } }) })
@@ -161,6 +169,7 @@ test("V12-03 retry rechecks host link without launching a conversation", async (
   await page.setViewportSize({ width: 375, height: 812 });
   let linkRequests = 0;
   // Mocked initial unavailable link; retry then uses the real endpoint.
+  declareInjectedFault(page, { urlPattern: /\/api\/conversations\/[^/]+\/link/, status: 404 });
   await page.route(`**/api/conversations/${fixture.seededConversationId}/link**`, async (route) => {
     linkRequests++;
     if (linkRequests === 1) {
