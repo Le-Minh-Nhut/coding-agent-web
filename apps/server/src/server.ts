@@ -343,7 +343,7 @@ const tmuxSocketPath = join(config.stateDir, "tmux.sock");
 const tmux = new DefaultTmuxService({ socketPath: tmuxSocketPath });
 const registry = new DefaultCollabRegistryService();
 const modelCatalog = new DefaultModelCatalogService();
-const paths = new WorkspacePathPolicy(config.allowedRoots);
+const paths = new WorkspacePathPolicy(config.allowedRoots, async (canonicalPath) => (await store.listProjects()).some((project) => project.path === canonicalPath));
 
 /**
  * Overlay directory for generated agent configs. Inside the state dir, which is
@@ -437,8 +437,9 @@ const supervisor = createSupervisor({
     sessionPathExists: async (sessionPath) => {
       try {
         return (await stat(sessionPath)).isFile();
-      } catch {
-        return false;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+        throw error;
       }
     },
     findBySessionId: (id) => catalog.findBySessionId(id),

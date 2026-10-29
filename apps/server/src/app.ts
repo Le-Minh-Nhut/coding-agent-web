@@ -2,7 +2,7 @@ import type { Server as HttpServer } from "node:http";
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest, type RouteGenericInterface } from "fastify";
 import { browseQuerySchema, conversationActionSchema, conversationModelSchema, createConversationSchema, createDirectorySchema, createProjectSchema, ERROR_CODES, fail, listEventsQuerySchema, loginSchema, ok, updateProjectSchema } from "@caw/contracts";
 import { z } from "zod";
-import type { Capabilities, CollabLinkResponse, Conversation, ErrorCode, NativeSessionSummary } from "@caw/contracts";
+import type { Capabilities, CollabLinkResponse, Conversation, ErrorCode, NativeSessionSummary, ProjectWithStats } from "@caw/contracts";
 import type { CapabilityService, CollabHost, ModelCatalogService, NativeSessionHistory } from "@caw/omp-adapter";
 import type { Supervisor, RuntimeLaunchSpec } from "@caw/runtime";
 import type { AuthenticationService } from "./auth.js";
@@ -90,7 +90,7 @@ const missingCapabilities: Capabilities = {
 
 export function buildApp(deps: AppDependencies): FastifyInstance<HttpServer> {
   const app = Fastify<HttpServer>({ logger: createLogger(deps.config.logLevel), bodyLimit: BODY_LIMIT, disableRequestLogging: true });
-  const paths = deps.paths ?? new WorkspacePathPolicy(deps.config.allowedRoots);
+  const paths = deps.paths ?? new WorkspacePathPolicy(deps.config.allowedRoots, async (canonicalPath) => (await deps.store.listProjects()).some((project) => project.path === canonicalPath));
   const origins = new Set(deps.originAllowlist ?? [
     `http://localhost:${deps.config.port}`, `http://127.0.0.1:${deps.config.port}`, `http://[::1]:${deps.config.port}`,
     `https://localhost:${deps.config.port}`, `https://127.0.0.1:${deps.config.port}`, `https://[::1]:${deps.config.port}`,
@@ -204,7 +204,13 @@ export function buildApp(deps: AppDependencies): FastifyInstance<HttpServer> {
   });
   app.get("/api/auth/me", { preHandler: protectedHook }, async (request) => ok({ csrfToken: withAuth(request).cawSession!.csrfToken }));
   app.get("/api/capabilities", { preHandler: protectedHook }, async () => ok(await capabilities()));
-  app.get("/api/projects", { preHandler: protectedHook }, async () => ok(await deps.store.listProjects()));
+  app.get("/api/projects", { preHandler: protectedHook }, async () => {
+    const [projects, conversations] = await Promise.all([deps.store.listProjects(), deps.store.listAllConversations()]);
+    return ok(projects.map((project): ProjectWithStats => {
+      const rows = conversations.filter((conversation) => conversation.projectId === project.id);
+      return { ...project, conversationCount: rows.length, lastActivityAt: rows.map((conversation) => conversation.lastActivityAt).filter((value): value is string => value !== null).sort().at(-1) ?? null };
+    }));
+  });
   app.post("/api/projects", { preHandler: protectedHook }, async (request, reply) => {
     const parsed = createProjectSchema.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send(fail("bad_request", "Invalid project request"));

@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -32,6 +32,37 @@ describe("JSONL MetadataStore fallback", () => {
     expect((await recovered.listEvents(conversation.id))[0]?.seq).toBe(1);
     expect(await recovered.getConversation(conversation.id)).toEqual(conversation);
   });
+  it("recovers only an incomplete EOF tail and preserves it before future appends", async () => {
+    const { dir, store } = await create();
+    const project = await store.createProject({ path: "/tmp/torn" });
+    const tail = '{"op":"conversation","value":';
+    await appendFile(join(dir, "metadata.jsonl"), tail);
+    const recovered = createMetadataStore(dir);
+    expect(await recovered.listProjects()).toEqual([project]);
+    expect(await readFile(join(dir, "metadata.jsonl.corrupt-tail"), "utf8")).toBe(tail);
+    await recovered.createProject({ path: "/tmp/after-recovery" });
+    const rows = (await readFile(join(dir, "metadata.jsonl"), "utf8")).trim().split("\n");
+    expect(rows).toHaveLength(2);
+    expect(rows.map((row) => JSON.parse(row).op)).toEqual(["project", "project"]);
+  });
+
+  it("fails on malformed complete records", async () => {
+    const { dir, store } = await create();
+    await store.createProject({ path: "/tmp/corrupt" });
+    await appendFile(join(dir, "metadata.jsonl"), "{bad json}\n");
+    await expect(createMetadataStore(dir).listProjects()).rejects.toThrow(SyntaxError);
+  });
+
+  it("does not truncate a torn tail when evidence preservation fails", async () => {
+    const { dir, store } = await create();
+    await store.createProject({ path: "/tmp/evidence-failure" });
+    const tail = '{"op":"conversation","value":';
+    await appendFile(join(dir, "metadata.jsonl"), tail);
+    await mkdir(join(dir, "metadata.jsonl.corrupt-tail"));
+    await expect(createMetadataStore(dir).listProjects()).rejects.toThrow("metadata tail evidence is not a regular file");
+    expect((await readFile(join(dir, "metadata.jsonl"), "utf8")).endsWith(tail)).toBe(true);
+  });
+
 
   it("registers one external conversation per project and native session", async () => {
     const { store } = await create();

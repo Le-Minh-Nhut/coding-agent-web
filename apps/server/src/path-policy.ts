@@ -47,7 +47,7 @@ function decodeDirectoryCursor(value: string): DirectoryCursor {
 }
 /** Listing validates canonical paths; any later open must use O_NOFOLLOW and fstat the handle to close remaining TOCTOU risk where supported. */
 export class WorkspacePathPolicy {
-  constructor(private readonly configuredRoots: readonly string[], private readonly hasProject: (canonicalPath: string) => boolean = () => false) {}
+  constructor(private readonly configuredRoots: readonly string[], private readonly hasProject: (canonicalPath: string) => boolean | Promise<boolean> = () => false) {}
 
   private async roots(): Promise<string[]> {
     return Promise.all(this.configuredRoots.map(async (root) => {
@@ -143,7 +143,7 @@ export class WorkspacePathPolicy {
       const canonical = await realpath(candidate);
       const roots = await this.roots();
       const allowed = this.inside(canonical, roots);
-      return { name: displayName, path: allowed ? canonical : candidate, isDirectory: allowed && (await lstat(canonical)).isDirectory(), allowed, hasProject: allowed && this.hasProject(canonical) };
+      return { name: displayName, path: allowed ? canonical : candidate, isDirectory: allowed && (await lstat(canonical)).isDirectory(), allowed, hasProject: allowed && await this.hasProject(canonical) };
     } catch (error) {
       if (["ELOOP", "ENOENT"].includes((error as NodeJS.ErrnoException).code ?? "")) return { name: displayName, path: candidate, isDirectory: false, allowed: false, hasProject: false };
       throw error;

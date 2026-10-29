@@ -51,7 +51,7 @@ export function createMetadataStore(stateDir: string, now: () => Date = () => ne
       await mkdir(stateDir, { recursive: true, mode: 0o700 });
       await chmod(stateDir, 0o700);
       let handle;
-      try { handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW); }
+      try { handle = await open(file, constants.O_RDWR | constants.O_NOFOLLOW); }
       catch (error) {
         if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
         throw error;
@@ -61,7 +61,25 @@ export function createMetadataStore(stateDir: string, now: () => Date = () => ne
         if (!(await handle.stat()).isFile()) throw new Error("metadata journal is not a regular file");
         await handle.chmod(0o600);
         text = await handle.readFile("utf8");
+        const lastNewline = text.lastIndexOf("\n");
+        if (lastNewline !== text.length - 1) {
+          const tail = text.slice(lastNewline + 1);
+          const evidence = await open(`${file}.corrupt-tail`, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600).catch(async (error: NodeJS.ErrnoException) => {
+            if (error.code !== "EEXIST") throw error;
+            const existing = await open(`${file}.corrupt-tail`, constants.O_RDONLY | constants.O_NOFOLLOW);
+            try { if (!(await existing.stat()).isFile()) throw new Error("metadata tail evidence is not a regular file"); }
+            finally { await existing.close(); }
+            return null;
+          });
+          if (evidence) {
+            try { await evidence.writeFile(tail); await evidence.sync(); }
+            finally { await evidence.close(); }
+          }
+          await handle.truncate(Buffer.byteLength(text.slice(0, lastNewline + 1), "utf8"));
+          text = text.slice(0, lastNewline + 1);
+        }
       } finally { await handle.close(); }
+      // Complete JSONL rows fail loudly; only an unterminated EOF tail is recoverable.
       for (const line of text.split("\n")) {
         if (!line) continue;
         const row = JSON.parse(line) as Row;
