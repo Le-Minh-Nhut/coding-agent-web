@@ -55,6 +55,19 @@ afterwards:
 - The resolved URL and fixture paths are written to the manifest file the test
   process reads, and printed on stdout.
 
+## Unexpected browser errors
+
+`fixture.ts` attaches `pageerror`, `console` (`error` only) and `requestfailed`
+collectors the first time a spec navigates (`gotoApp`/`login`), and exposes
+`unexpectedAppErrors(page)` / `assertNoUnexpectedAppErrors(page)`. The specs that
+inject faults or carry the most state (all of `round13.spec.ts` and
+`regression.spec.ts`) assert the list is empty before they end. The filter is by
+rule, never by weakening the assertion: a *response with an error status*
+("Failed to load resource: the server responded with a status of 5xx/4xx") is the
+injected case, as are `net::ERR_ABORTED` (navigation and un-routed mocks) and
+favicon/icon requests. An uncaught exception or a `console.error` from the app is
+always reported, and `tests/e2e/error-capture.spec.ts` proves both directions.
+
 ## What still requires a physical iPhone
 
 Playwright emulation is not iOS Safari. These are unverified by this suite and

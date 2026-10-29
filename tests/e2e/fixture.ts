@@ -97,7 +97,85 @@ export async function requireAppServer(request: APIRequestContext): Promise<void
  * auth hook guards every path). That must skip with the exact status, while a
  * 200 root that fails to render the login screen is app breakage and must fail.
  */
+// ─────────────────────────────────────────────────────────────────────────────
+// Unexpected browser errors
+//
+// A spec that ends green while the page threw an uncaught exception or logged a
+// console error proves nothing. The collectors are attached on the first
+// navigation, so every spec that logs in gets them without touching its body;
+// the high-value specs then assert the collected set is empty (see
+// `assertNoUnexpectedAppErrors`). Deliberate fault injection is excluded by rule,
+// not by weakening the assertion — see `unexpectedAppErrors`.
+// ─────────────────────────────────────────────────────────────────────────────
+
+interface AppErrors {
+  /** Uncaught exceptions. Always a defect; no spec injects one. */
+  pageErrors: string[];
+  /** `console.error` output, which in this app only the browser itself emits. */
+  consoleErrors: string[];
+  /** Requests that never produced a response. */
+  requestFailures: string[];
+}
+
+const collectedErrors = new WeakMap<Page, AppErrors>();
+
+/** Attach the collectors to a page. Idempotent: the second call is a no-op. */
+export function recordAppErrors(page: Page): AppErrors {
+  const existing = collectedErrors.get(page);
+  if (existing) return existing;
+  const collected: AppErrors = { pageErrors: [], consoleErrors: [], requestFailures: [] };
+  collectedErrors.set(page, collected);
+  page.on("pageerror", (error) => collected.pageErrors.push(error.message));
+  page.on("console", (message) => {
+    if (message.type() === "error") collected.consoleErrors.push(`${message.text()} @ ${message.location().url}`);
+  });
+  page.on("requestfailed", (request) => {
+    collected.requestFailures.push(`${request.url()} (${request.failure()?.errorText ?? "unknown failure"})`);
+  });
+  return collected;
+}
+
+/** Icon requests the browser makes on its own; their failure says nothing about the app. */
+const BROWSER_ASSET = /\/(?:favicon\.ico|icons\/|apple-touch-icon)/u;
+/** A request the page itself cancelled: navigation, or an unrouted mock. */
+const CANCELLED = /net::ERR_ABORTED/u;
+/**
+ * The browser's generic report that a response carried an error status. Several
+ * specs inject 5xx mocks on purpose (V13-07 is entirely about the rendered error
+ * state), and a *server answering with an error status* is the injected case.
+ * A connection that never answered reports `net::ERR_FAILED`/`CONNECTION_REFUSED`
+ * instead and stays in the list below.
+ */
+const HTTP_ERROR_STATUS = /^Failed to load resource: the server responded with a status of \d+/u;
+
+/** The collected errors no spec asked for, as `<source>: <line>` strings. */
+export function unexpectedAppErrors(page: Page): string[] {
+  const collected = collectedErrors.get(page);
+  if (!collected) return [];
+  const injected = (line: string) => BROWSER_ASSET.test(line) || CANCELLED.test(line);
+  return [
+    ...collected.pageErrors.map((line) => `pageerror: ${line}`),
+    ...collected.consoleErrors.filter((line) => !injected(line) && !HTTP_ERROR_STATUS.test(line)).map((line) => `console: ${line}`),
+    ...collected.requestFailures.filter((line) => !injected(line)).map((line) => `requestfailed: ${line}`),
+  ];
+}
+
+/** Every error collected so far, injected ones included. For capture self-checks. */
+export function collectedAppErrors(page: Page): Readonly<AppErrors> {
+  return collectedErrors.get(page) ?? { pageErrors: [], consoleErrors: [], requestFailures: [] };
+}
+
+/**
+ * Assert the page produced no error no spec asked for. One round trip to the page
+ * first, so an error the browser already dispatched is in the collectors.
+ */
+export async function assertNoUnexpectedAppErrors(page: Page): Promise<void> {
+  await page.evaluate(() => new Promise((done) => requestAnimationFrame(() => done(null))));
+  expect(unexpectedAppErrors(page), "unexpected page errors, console errors or failed requests").toEqual([]);
+}
+
 export async function gotoApp(page: Page): Promise<void> {
+  recordAppErrors(page);
   const response = await page.goto("/");
   const status = response?.status();
   if (status !== 200) {

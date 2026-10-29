@@ -66,12 +66,14 @@ jobs:
         env:
           CI: "true"
 
-      - name: Upload Playwright report on failure
+      # The reporter list+github writes no HTML report, so what a red run leaves
+      # behind is Playwright's own outputDir (traces, screenshots). Upload that.
+      - name: Upload Playwright traces and screenshots on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: playwright-report
-          path: playwright-report/
+          name: playwright-test-results
+          path: test-results/
           retention-days: 7
 
   # Real-OMP compatibility is opt-in and manual-only; it launches agents and may spend provider credits.

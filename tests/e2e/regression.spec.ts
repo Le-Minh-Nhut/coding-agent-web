@@ -1,5 +1,6 @@
 import { expect, test } from "@playwright/test";
 import {
+  assertNoUnexpectedAppErrors,
   createAssistantMessageEntry,
   createUserMessageEntry,
   harnessFixture,
@@ -43,6 +44,7 @@ test("folder created in browser becomes usable project directory", async ({ page
   await page.getByRole("button", { name: "Create", exact: true }).click();
   await expect(page.getByRole("heading", { name: projectLabel, exact: true })).toBeVisible();
   expect((await projectByLabel(page, projectLabel)).path).toBe(createdPath);
+  await assertNoUnexpectedAppErrors(page);
 });
 
 test("invalid folder names show errors or cannot be submitted and create nothing", async ({ page }) => {
@@ -102,6 +104,8 @@ test("free untracked native session resumes without retry after conflict_owner",
   expect(launchRequests).toBe(1);
   await page.waitForTimeout(150);
   expect(launchRequests).toBe(1);
+  // The 409 is injected too, and it still must not smuggle a console error in.
+  await assertNoUnexpectedAppErrors(page);
 });
 
 test("long transcript stays inside viewport, detached reading stays put, and Latest follows tail", async ({ page }) => {
@@ -133,6 +137,7 @@ test("long transcript stays inside viewport, detached reading stays put, and Lat
     const afterLatest = await scroller.evaluate((element: HTMLElement) => ({ scrollTop: element.scrollTop, bottom: element.scrollHeight - element.clientHeight }));
     expect(afterLatest.scrollTop).toBe(afterLatest.bottom);
   }
+  await assertNoUnexpectedAppErrors(page);
 });
 
 test("six-column markdown table scrolls inside its wrapper at 375px", async ({ page }) => {
@@ -160,6 +165,7 @@ test("six-column markdown table scrolls inside its wrapper at 375px", async ({ p
   expect(geometry.pageWidth).toBeLessThanOrEqual(geometry.viewportWidth);
   await wrapper.evaluate((element: HTMLElement) => { element.scrollLeft = 100; });
   expect(await wrapper.evaluate((element: HTMLElement) => element.scrollLeft)).toBeGreaterThan(0);
+  await assertNoUnexpectedAppErrors(page);
 });
 
 test("code copy preserves content and reports rejected clipboard writes", async ({ page }) => {
@@ -180,6 +186,7 @@ test("code copy preserves content and reports rejected clipboard writes", async 
   });
   await page.getByRole("button", { name: "Copy code" }).click();
   await expect(copy).toHaveText("Copy failed");
+  await assertNoUnexpectedAppErrors(page);
 });
 
 test("unsupported slash command is intercepted, explicit plain text sends once, unknown command stays prompt", async ({ page }) => {
@@ -222,6 +229,7 @@ test("reconnect restores snapshot transcript without duplicate rows", async ({ p
   await expect(rows).toHaveCount(before);
   await expect(page.getByText("snapshot user row")).toHaveCount(1);
   await expect(page.getByText("snapshot assistant row")).toHaveCount(1);
+  await assertNoUnexpectedAppErrors(page);
 });
 
 test("draft survives navigation and clears after successful send", async ({ page }) => {
@@ -245,4 +253,5 @@ test("draft survives navigation and clears after successful send", async ({ page
   await expect.poll(() => host.prompts.length).toBe(1);
   expect(host.prompts).toEqual(["send this and clear draft"]);
   await expect(returnedComposer).toHaveValue("");
+  await assertNoUnexpectedAppErrors(page);
 });

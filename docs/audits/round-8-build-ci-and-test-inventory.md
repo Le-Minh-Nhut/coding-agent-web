@@ -149,7 +149,7 @@ The `verify` job runs on `ubuntu-latest`, checks out code, installs pnpm `10.32.
 7. `pnpm --filter @caw/server build`
 8. `npx playwright install --with-deps chromium`
 9. `npx playwright test --project=chromium` with `CI: "true"`.
-10. On failure, upload `playwright-report/` as `playwright-report` for 7 days.
+10. On failure, upload `test-results/` (Playwright's own output dir: failure traces and screenshots) as `playwright-test-results` for 7 days. The reporter is list+github, so no `playwright-report/` directory is ever produced.
 
 The separate `compat` job has condition `github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'`: checkout; setup pnpm `10.32.1` and Node `20.19`; frozen install; `node scripts/compat-check.mjs`; install OMP via `curl -fsSL https://raw.githubusercontent.com/can1357/oh-my-pi/main/install.sh | bash` (warns and exits successfully if unavailable); then `CAW_COMPAT=1 npx vitest run tests/compat`. This opt-in suite launches real agents and was not run. The workflow declares no `schedule` trigger, so this job can currently be reached by manual dispatch only.
 
