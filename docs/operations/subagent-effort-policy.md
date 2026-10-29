@@ -1,6 +1,6 @@
 Configuration discipline note — thinking effort on subagent spawns.
 
-**Rule for this project: never pass the `effort` parameter when spawning a `caw-gemini` subagent.**
+**Rule for this project: never use Gemini; do not pass the `effort` parameter when spawning a GPT subagent.**
 
 Why: verified in upstream source. `packages/coding-agent/src/task/executor.ts:4504` states the precedence explicitly —
 
@@ -20,8 +20,8 @@ The mapping itself (`packages/tui/src/thinking.ts:295` `resolveTaskEffortLevel`)
 | `med` | `supported[(4-1)>>1]` = `supported[1]` = **`low`** |
 | `hi` | `high` |
 
-So `effort: "med"` silently downgrades Gemini to **low** — the opposite of intent. Omitting `effort` leaves `effortLevel === undefined`, and the `:high` suffix in `packages/omp/agents/caw-gemini.md` (`model: 9router/ag/gemini-3.8-flash-high:high`) applies.
+So `effort: "med"` silently downgrades Gemini to **low** — the opposite of intent. Omitting `effort` leaves `effortLevel === undefined`, and the `:high` suffix in the GPT subagent model id applies.
 
 `task.maxEffort: xhigh` in the OMP config is a **ceiling**, not a target: it can only clamp downward, so it never lowers a requested `high`.
 
-**Operational consequence:** the model identifier already encodes the level (`ag/gemini-3.8-flash-high:high`, `cx/gpt-6-luna:xhigh`, `wdb/deepseek-ai/DeepSeek-V4.1-Flash:high`). Pass `model` and let the suffix do the work; pass `effort` only when a deliberate downgrade is wanted, and state that intent in the task.
+**Operational consequence:** GPT subagents and vision use `:high`, never `:xhigh` or `:max`; Gemini is prohibited. The coordinator lane model follows the current config. Pass `model` and let the suffix do the work; pass `effort` only when a deliberate downgrade is wanted, and state that intent in the task.

@@ -7,9 +7,9 @@ several times during the project and an unrecorded reversal gets re-litigated.
 
 | Priority | Agent definition | Model | Use for |
 | --- | --- | --- | --- |
-| 1 | `caw-luna`, `caw-luna-scout` | `cx/gpt-6-luna:xhigh` or `cx/gpt-6-luna:high` | Everything else, including reading images. Luna remains the image reader; never give images to DeepSeek. |
+| 1 | `caw-luna`, `caw-luna-scout` | `cx/gpt-6-luna:high` | Everything else, including reading images. Luna remains the image reader; never give images to DeepSeek. |
 | 2 | `caw-deepseek` | `wdb/deepseek-ai/DeepSeek-V4.1-Flash:high` | Long-horizon or token-heavy reviews: whole-file audits, multi-file independent reviews, full test inventories, regression sweeps, bulk doc-consistency passes, and second-opinion passes. |
-| 3 | `caw-gemini` | `ag/gemini-3.8-flash-high` | Do not use; quota exhausted. |
+| 3 | `caw-gemini` | — | Prohibited; quota exhausted. |
 
 ### Why Luna remains default, DeepSeek handles bulk review
 
@@ -37,12 +37,11 @@ range is `minimal,low,medium,high`, `effort: "med"` resolves to index
 `(4-1)>>1 = 1` = **`low`**. So a "medium" hint silently downgrades a worker to its
 lowest thinking level — observed in a session journal as `"thinkingLevel":"low"`.
 
-State the level in the model id (`cx/gpt-6-luna:xhigh`) and do not pass `effort`.
+State the level in the model id (`cx/gpt-6-luna:high`) and do not pass `effort`.
 
-Owner ruling (2026-10-26): `cx/gpt-6-luna:xhigh` is the ceiling for delegated work; `:high` is also allowed, but the `max` thinking level is prohibited and must never be used.
+Owner ruling (2026-10-29): GPT subagents and vision use `:high`; never use `:xhigh` or `:max` for them. Gemini is prohibited while its quota is exhausted. Subagent/delegated workers (including coordinator-spawned sessions) resolve to `modelRoles.task` and run `:high`; never `:xhigh`/`:max` for GPT subagents; Gemini prohibited.
 
 ## History
 
 History: Gemini-first → Luna-first → Gemini-first again → Luna-first again →
-Luna-default with DeepSeek on bulk review → owner ruling: `:xhigh` ceiling;
-`:high` allowed; `max` prohibited.
+Luna-default with DeepSeek on bulk review → owner ruling: GPT subagents and vision at `:high`; Gemini prohibited; delegated workers resolve to `modelRoles.task`.
