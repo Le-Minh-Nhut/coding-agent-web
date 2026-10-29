@@ -14,21 +14,43 @@ export function ProjectsView({ onSelectProject, onOpenSettings }: ProjectsViewPr
   const [showBrowser, setShowBrowser] = useState(false);
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [newLabel, setNewLabel] = useState("");
-  const [favoritePending, setFavoritePending] = useState<string | null>(null);
-  /** Desired favorite per project while a PATCH is in flight: repeat clicks re-express the same intent instead of toggling the stale prop. */
-  const favoriteDesiredRef = useRef<Record<string, boolean>>({});
+  /**
+   * Star bookkeeping, all keyed per project so one project's flight never clears
+   * another's:
+   * - `seq`/`appliedSeq`: order clicks and their responses; a superseded response
+   *   never writes the UI.
+   * - `intent`: the desired value of the latest unsettled click. A click while a
+   *   request is open re-asserts that intent (double-tap) instead of toggling a
+   *   `favorite` prop that may have drifted; released once its response settles.
+   */
+  const favoriteSeqRef = useRef<Map<string, number>>(new Map());
+  const favoriteAppliedSeqRef = useRef<Map<string, number>>(new Map());
+  const favoriteIntentRef = useRef<Map<string, { desired: boolean; base: boolean }>>(new Map());
+  /** Bumped whenever a favorite response is applied; a list request started before that carries a stale star column. */
+  const favoriteEpochRef = useRef(0);
+  /** Orders list requests so an older snapshot cannot replace a newer one. */
+  const listSeqRef = useRef(0);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Edit / Delete dialogs
+  // Edit / Delete dialogs. Each dialog records the operation token that opened it;
+  // a late response may refresh the list, but only closes the dialog it belongs to.
   const [editingProject, setEditingProject] = useState<ProjectWithStats | null>(null);
   const [editLabel, setEditLabel] = useState("");
+  const renameOperationRef = useRef<object | null>(null);
+  const createOperationRef = useRef<object | null>(null);
   const [deletingProject, setDeletingProject] = useState<ProjectWithStats | null>(null);
+  const deleteOperationRef = useRef<object | null>(null);
 
   const loadProjects = async () => {
     setLoading(true);
+    const seq = ++listSeqRef.current;
+    const epoch = favoriteEpochRef.current;
     const res = await api.listProjects();
     setLoading(false);
+    // Drop a superseded snapshot, and a snapshot taken before a favorite settled
+    // (its star column is stale and must not revert what the PATCH applied).
+    if (seq !== listSeqRef.current || epoch !== favoriteEpochRef.current) return;
     if (res.ok) {
       setProjects(res.data);
     } else {
@@ -42,17 +64,22 @@ export function ProjectsView({ onSelectProject, onOpenSettings }: ProjectsViewPr
 
   const handleToggleFavorite = async (e: React.MouseEvent, project: ProjectWithStats) => {
     e.stopPropagation();
-    if (favoritePending === project.id) return;
-    setFavoritePending(project.id);
-    // State is async, so a second click can land before the re-render disables the
-    // button. The ref records the intent of the first click and later clicks during
-    // that flight repeat it rather than toggling a stale prop.
-    const desired = favoriteDesiredRef.current[project.id] ?? !project.favorite;
-    favoriteDesiredRef.current[project.id] = desired;
+    // A click while this project's request is still open re-asserts the same
+    // intent (double-tap) instead of toggling a prop a stale list response may
+    // have rewound. When nothing is pending the user decides against what they
+    // see right now.
+    const recorded = favoriteIntentRef.current.get(project.id);
+    const desired = recorded && recorded.base === project.favorite ? recorded.desired : !project.favorite;
+    const seq = (favoriteSeqRef.current.get(project.id) ?? 0) + 1;
+    favoriteSeqRef.current.set(project.id, seq);
+    favoriteIntentRef.current.set(project.id, { desired, base: project.favorite });
     const res = await api.updateProject(project.id, { favorite: desired });
-    delete favoriteDesiredRef.current[project.id];
-    setFavoritePending(null);
+    // Only release the intent if no newer click replaced it meanwhile.
+    if (favoriteIntentRef.current.get(project.id)?.desired === desired) favoriteIntentRef.current.delete(project.id);
+    if (seq <= (favoriteAppliedSeqRef.current.get(project.id) ?? 0)) return;
+    favoriteAppliedSeqRef.current.set(project.id, seq);
     if (res.ok) {
+      favoriteEpochRef.current++;
       setProjects((prev) => prev.map((p) => (p.id === project.id ? { ...p, favorite: res.data.favorite } : p)));
     } else setError(res.error.message);
   };
@@ -63,13 +90,17 @@ export function ProjectsView({ onSelectProject, onOpenSettings }: ProjectsViewPr
     setCreating(true);
     setError(null);
 
+    const token = createOperationRef.current;
     const res = await api.createProject(selectedPath, newLabel.trim());
-    setCreating(false);
+    // A stale response must not clear the spinner of a newer create form.
+    if (createOperationRef.current === token) setCreating(false);
     if (res.ok) {
-      setSelectedPath(null);
-      setNewLabel("");
+      if (createOperationRef.current === token) {
+        setSelectedPath(null);
+        setNewLabel("");
+      }
       loadProjects();
-    } else {
+    } else if (createOperationRef.current === token) {
       setError(res.error.message);
     }
   };
@@ -77,22 +108,26 @@ export function ProjectsView({ onSelectProject, onOpenSettings }: ProjectsViewPr
   const handleRenameProject = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!editingProject || !editLabel.trim()) return;
+    // The dialog belongs to one operation. A late response may refresh the list,
+    // but must not close a dialog opened by a different (newer) rename.
+    const token = renameOperationRef.current;
     const res = await api.updateProject(editingProject.id, { label: editLabel.trim() });
     if (res.ok) {
-      setEditingProject(null);
+      if (renameOperationRef.current === token) setEditingProject(null);
       loadProjects();
-    } else {
+    } else if (renameOperationRef.current === token) {
       setError(res.error.message);
     }
   };
 
   const handleDeleteProject = async () => {
     if (!deletingProject) return;
+    const token = deleteOperationRef.current;
     const res = await api.deleteProject(deletingProject.id);
     if (res.ok) {
-      setDeletingProject(null);
+      if (deleteOperationRef.current === token) setDeletingProject(null);
       loadProjects();
-    } else {
+    } else if (deleteOperationRef.current === token) {
       setError(res.error.message);
     }
   };
@@ -170,7 +205,6 @@ export function ProjectsView({ onSelectProject, onOpenSettings }: ProjectsViewPr
                       className="ghost"
                       style={{ padding: "2px 4px", fontSize: "1.1rem" }}
                       onClick={(e) => handleToggleFavorite(e, project)}
-                      disabled={favoritePending === project.id}
                       title={project.favorite ? "Unstar" : "Star"}
                     >
                       {project.favorite ? "★" : "☆"}
@@ -183,6 +217,7 @@ export function ProjectsView({ onSelectProject, onOpenSettings }: ProjectsViewPr
                       className="ghost"
                       style={{ padding: "4px 8px", fontSize: "0.85rem" }}
                       onClick={() => {
+                        renameOperationRef.current = {};
                         setEditingProject(project);
                         setEditLabel(project.label);
                       }}
@@ -193,7 +228,7 @@ export function ProjectsView({ onSelectProject, onOpenSettings }: ProjectsViewPr
                       type="button"
                       className="ghost"
                       style={{ padding: "4px 8px", fontSize: "0.85rem", color: "var(--danger)" }}
-                      onClick={() => setDeletingProject(project)}
+                      onClick={() => { deleteOperationRef.current = {}; setDeletingProject(project); }}
                     >
                       Delete
                     </button>
@@ -221,6 +256,7 @@ export function ProjectsView({ onSelectProject, onOpenSettings }: ProjectsViewPr
           onCancel={() => setShowBrowser(false)}
           onSelect={(path) => {
             setShowBrowser(false);
+            createOperationRef.current = {};
             setSelectedPath(path);
             const defaultName = path.split("/").filter(Boolean).pop() ?? "New Project";
             setNewLabel(defaultName);

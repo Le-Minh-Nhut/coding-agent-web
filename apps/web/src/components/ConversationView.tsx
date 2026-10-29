@@ -39,7 +39,8 @@ interface PendingPrompt {
   sent: boolean;
   refusalMessage?: string;
   draftVersion: number;
-  connectionGeneration: number;
+  /** Physical connection the prompt was sent on; a refusal only matches prompts from the current one. */
+  physicalConnection: number;
   token: object;
 }
 
@@ -120,6 +121,8 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
   const [olderHistoryLoading, setOlderHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState<string | null>(null);
   const [olderHistoryError, setOlderHistoryError] = useState<string | null>(null);
+  /** Bumped by Retry so the saved-history effect re-runs even though linkUnavailable stays true. */
+  const [historyRetryEpoch, setHistoryRetryEpoch] = useState(0);
   const [uiEditorValue, setUiEditorValue] = useState("");
 
   const inputValueRef = useRef(draft);
@@ -143,6 +146,13 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
   const operationGenerationRef = useRef(0);
   const viewActiveRef = useRef(true);
   const connectionGenerationRef = useRef(0);
+  /**
+   * Physical connection identity, bumped on every socket open — including the
+   * automatic reconnect of the same CollabSocket object. Minted-link generation
+   * (connectionGenerationRef) is a separate concern: an unacked prompt from an
+   * earlier physical connection must not consume a refusal meant for a newer one.
+   */
+  const physicalConnectionRef = useRef(0);
   const conversationIdRef = useRef(conversationId);
   conversationIdRef.current = conversationId;
   const watchedTranscriptAgentRef = useRef<string | null>(null);
@@ -249,7 +259,7 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     if (frame.t === "entry" || frame.t === "snapshot-chunk" || (frame.t === "event" && frame.event.type === "message_end" && frame.event.message.role === "user")) removeAcknowledgedPrompts();
     if (frame.t === "error") {
       if (frame.message === STARTUP_PROMPT_REFUSAL) {
-        const prompt = pendingPromptRef.current.find((pending) => pending.connectionGeneration === connectionGenerationRef.current && !pending.refusalMessage);
+        const prompt = pendingPromptRef.current.find((pending) => pending.physicalConnection === physicalConnectionRef.current && !pending.refusalMessage);
         if (prompt) {
           prompt.refusalMessage = frame.message;
           if (prompt.sent) recoverRefusedPrompt(prompt);
@@ -372,6 +382,7 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     if (!linkUnavailable) return;
     let active = true;
     setHistoryLoading(true);
+    setHistoryError(null);
     void api.getConversationHistory(conversationId).then((result) => {
       if (!active) return;
       setHistoryLoading(false);
@@ -389,7 +400,7 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
       setHistoryError(error instanceof Error ? error.message : "Could not load saved transcript.");
     });
     return () => { active = false; };
-  }, [conversationId, linkUnavailable]);
+  }, [conversationId, linkUnavailable, historyRetryEpoch]);
   const loadOlderHistory = async () => {
     const current = savedHistory;
     if (!current?.hasOlder || !current.nextCursor || olderHistoryLoadingRef.current) return;
@@ -507,6 +518,7 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
       const socket = new CollabSocket({ wsUrl: parsed.wsUrl, role: "guest", key });
       socket.onOpen = () => {
         if (!isCurrent() || socketRef.current !== socket) return;
+        physicalConnectionRef.current++;
         setStatus("connecting");
         void socket.send({ t: "hello", proto: 3, name: "Mobile Web Controller", ...(writeToken ? { writeToken: encodeBase64Url(writeToken) } : {}) });
       };
@@ -548,6 +560,9 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
       setModelDraft(result.data.modelPreference ?? result.data.model ?? "");
     }
     await connectToCollab(true);
+    // The live link may still be down; re-run the saved-history read so a
+    // recovered endpoint is picked up without waiting for linkUnavailable to flip.
+    if (conversationIdRef.current === currentId) setHistoryRetryEpoch((epoch) => epoch + 1);
   };
   const sendPrompt = (text: string, allowSlashCommand = false): void => {
     const trimmed = text.trim();
@@ -568,6 +583,7 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     const conversationAtSend = conversationIdRef.current;
     const operationGeneration = operationGenerationRef.current;
     const connectionGeneration = connectionGenerationRef.current;
+    const physicalConnection = physicalConnectionRef.current;
     const sendToken = { id: sendId, text: trimmed };
     const hostEchoCount = transcript.messages.filter((message) => message.role === "user" && message.text === trimmed).length;
     const echoAllowance = hostEchoCount + optimisticMessages.filter((message) => message.text === trimmed && hostEchoCount <= (message.hostEchoCount ?? 0)).length;
@@ -580,7 +596,7 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
       sent: false,
       refusalMessage: undefined,
       draftVersion,
-      connectionGeneration,
+      physicalConnection,
       token: sendToken,
     };
     pendingPromptRef.current.push(pendingPrompt);

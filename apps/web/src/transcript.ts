@@ -500,6 +500,7 @@ export function reduceHostFrame(state: TranscriptState, frame: HostFrame): Trans
         sessionEnded: false,
         readOnly: frame.readOnly ?? false,
         error: null,
+        notice: null,
         turnStatus: frame.state.isStreaming ? "running" as const : "idle" as const,
         streamingMessage: null,
         uiRequests: { current: null, queue: [] },

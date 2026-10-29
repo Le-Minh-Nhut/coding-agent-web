@@ -22,14 +22,20 @@ export function FolderBrowser({ onSelect, onCancel }: FolderBrowserProps) {
   const createdPathRef = useRef<{ directory: string; path: string } | null>(null);
   const navigationGenerationRef = useRef(0);
   useEffect(() => {
-    let active = true;
+    // A same-path reload (refreshVersion) is a new generation too, so a stray
+    // load-more or a late list response from the previous load cannot write into
+    // this one. The generation ref is the single guard: the cleanup bumps it, so
+    // a post-unmount or post-navigation response is dropped uniformly.
+    navigationGenerationRef.current++;
+    const generation = navigationGenerationRef.current;
     setLoading(true);
     setErrorText(null);
     setListing(null);
+    setLoadingMore(false);
 
     const load = async () => {
       let result = await api.browse(currentPath, { limit: 100 });
-      if (!active) return;
+      if (generation !== navigationGenerationRef.current) return;
       if (!result.ok) {
         const message = result.error.code === "path_forbidden"
           ? "Access forbidden: path is outside allowed workspace directories"
@@ -47,7 +53,7 @@ export function FolderBrowser({ onSelect, onCancel }: FolderBrowserProps) {
       const created = createdPathRef.current;
       while (created && page.path === created.directory && !page.entries.some((entry) => entry.path === created.path) && page.nextCursor) {
         result = await api.browse(page.path, { limit: 100, cursor: page.nextCursor });
-        if (!active) return;
+        if (generation !== navigationGenerationRef.current) return;
         if (!result.ok) {
           setErrorText(result.error.message || "Failed to load more folders");
           break;
@@ -60,19 +66,28 @@ export function FolderBrowser({ onSelect, onCancel }: FolderBrowserProps) {
     };
 
     void load();
-    return () => { active = false; };
+    return () => { navigationGenerationRef.current++; };
   }, [currentPath, refreshVersion]);
   const loadMore = async () => {
     if (!listing?.nextCursor || loadingMore) return;
+    // Capture the navigation generation at request start: every state write below
+    // (loading, error, list/cursor) is dropped if the user has navigated since,
+    // including a same-path reload which is also a new generation.
+    const generation = navigationGenerationRef.current;
+    const directory = listing.path;
     setLoadingMore(true);
     setErrorText(null);
-    const result = await api.browse(listing.path, { limit: 100, cursor: listing.nextCursor });
+    const result = await api.browse(directory, { limit: 100, cursor: listing.nextCursor });
     setLoadingMore(false);
+    // The list/error writes below are dropped if the user has navigated since. The
+    // spinner is released first: a generation bump that does not change the effect
+    // deps (New-Folder Cancel) would otherwise leave load-more stuck disabled.
+    if (generation !== navigationGenerationRef.current) return;
     if (!result.ok) {
       setErrorText(result.error.message || "Failed to load more folders");
       return;
     }
-    setListing((current) => current && current.path === result.data.path ? {
+    setListing((current) => current && current.path === directory ? {
       ...current,
       entries: [...current.entries, ...result.data.entries],
       hasMore: result.data.hasMore,
