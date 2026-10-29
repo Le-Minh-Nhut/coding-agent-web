@@ -172,11 +172,15 @@ async function withLaunchLock<T>(operation: () => Promise<T>): Promise<T> {
  * to store. Every key includes the conversation id: two rows can point at one
  * journal without agreeing on its id, and those two must not launch twice.
  */
-function reserveKeys(conversation: Conversation, spec: RuntimeLaunchSpec): string[] {
+function reserveKeys(
+  conversationId: string,
+  nativeSessionId: string | null,
+  resumeSessionPath: string | null,
+): string[] {
   return [
-    `conversation:${conversation.id}`,
-    conversation.nativeSessionId ? `session:${conversation.nativeSessionId}` : null,
-    spec.resumeSessionPath ? `journal:${spec.resumeSessionPath}` : null,
+    `conversation:${conversationId}`,
+    nativeSessionId ? `session:${nativeSessionId}` : null,
+    resumeSessionPath ? `journal:${resumeSessionPath}` : null,
   ].filter((key): key is string => key !== null);
 }
 
@@ -446,12 +450,29 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
     return { count, known: true, reason: null };
   }
   async function start(conversationId: string, spec: RuntimeLaunchSpec): Promise<Conversation> {
-    const initial = await options.store.getConversation(conversationId);
-    if (!initial) throw new RuntimeFailure("agent_not_running", `Unknown conversation ${conversationId}`);
-
-    let heldKeys: string[] = [];
+    // Reserve eagerly and synchronously, before the first await. `isLaunching` is
+    // what a deleter asks, and the event loop turns between that check and its
+    // commit: a reservation registered later (inside the lock, after the store
+    // reads below) would be invisible to a check that had already run, and the
+    // delete would drop the only pointer to the process this call is about to
+    // create. The set is updated here instead, so every interleaving sees it
+    // before it decides. When the key is already held, this call owns nothing and
+    // must not release another launch's reservation on its way out.
+    const reservationKey = `conversation:${conversationId}`;
+    // `heldByAnother` separates the two cases the key can be in: added by this very
+    // call at the line below (no conflict — it is ours), or already present from
+    // another launch (a conflict). Conflating them made every launch refuse itself.
+    const heldByAnother = launchReservations.has(reservationKey);
+    if (!heldByAnother) launchReservations.add(reservationKey);
+    let heldKeys: string[] = heldByAnother ? [] : [reservationKey];
     let ownershipRetained = false;
+    // One try covers the whole body: every exit — the early not-found throw, a
+    // refusal, a failed launch, a fault in anything awaited — releases the keys
+    // it added, unless ownership was deliberately retained.
     try {
+      const initial = await options.store.getConversation(conversationId);
+      if (!initial) throw new RuntimeFailure("agent_not_running", `Unknown conversation ${conversationId}`);
+
       let launched!: RuntimeTmuxSession;
       await withLaunchLock(async () => {
         const conversation = await options.store.getConversation(conversationId);
@@ -463,12 +484,19 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
         // separately let two requests reserve one session twice and start two
         // writers, so the conversation id is added alongside every key, and the
         // resume path — the file OMP will open — is a key in its own right.
-        const keys = reserveKeys(conversation, spec);
-        const held = keys.find((candidate) => launchReservations.has(candidate));
+        const keys = reserveKeys(conversation.id, conversation.nativeSessionId, spec.resumeSessionPath ?? null);
+        // The conversation key is already held by this very call; it only counts
+        // as a conflict when it was already held by *another* launch.
+        const held = heldByAnother ? reservationKey : keys.find((candidate) => candidate !== reservationKey && launchReservations.has(candidate));
         if (held !== undefined) {
           await options.store.recordEvent(conversationId, "launch.refused", { code: "conflict_owner", key: held });
           throw new RuntimeFailure("conflict_owner", "Another launch for this native session is already in progress.");
         }
+        // The whole bookkeeping is synchronous and adjacent: both the adds and the
+        // `heldKeys` record happen with no await between them, so there is no turn
+        // in which a key is held but unrecorded. The `finally` above can therefore
+        // always release what this call added, whatever fails later — including a
+        // `recordEvent` that throws on a poisoned journal.
         for (const candidate of keys) launchReservations.add(candidate);
         heldKeys = keys;
         try {
@@ -617,7 +645,13 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
     } finally {
       // Released unless ownership was deliberately retained for a process that
       // really exists: then the reservation is what stops a retry forking the
-      // session that process is already writing.
+      // session that process is already writing. That retention has no in-process
+      // release — `stop` does not clear it, and a retry is refused by the same
+      // key — so a conversation left in that state stays undeletable and
+      // unstartable until the process is accounted for and the backend restarts
+      // (the set is in-memory), at which point `reconcile` re-reads the machine.
+      // Nothing kills the process automatically; see docs/architecture/
+      // session-lifecycle.md.
       if (!ownershipRetained) {
         for (const candidate of heldKeys) launchReservations.delete(candidate);
       }

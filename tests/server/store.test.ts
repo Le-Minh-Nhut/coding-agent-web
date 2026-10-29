@@ -158,6 +158,116 @@ describe("JSONL MetadataStore fallback", () => {
     await expect(createMetadataStore(dir).listProjects()).rejects.toThrow("metadata tail evidence is not a regular file");
   });
 
+  it("replays a repaired journal from scratch, without resurrecting removed rows or replaying events twice", async () => {
+    // The V16-02 window: a failed load that had already replayed part of the
+    // journal. The retry must land in the state the FILE describes, not the state
+    // the failed attempt had half-built. A row the repair removed must stay gone
+    // across repeated retries, and an event must not come back twice.
+    const { dir } = await create();
+    const journal = join(dir, "metadata.jsonl");
+    const first = createMetadataStore(dir);
+    const project = await first.createProject({ path: "/tmp/retry" });
+    const conversation = await first.createConversation({ projectId: project.id });
+    await first.recordEvent(conversation.id, "audit.event", { i: 1 });
+    const valid = await readFile(journal, "utf8");
+    // Break the journal, then repair it *and* drop the conversation's rows: the
+    // reload must reflect the repair, not the prefix the failed attempt applied.
+    await appendFile(journal, "{bad complete row}\n");
+    const retrying = createMetadataStore(dir);
+    await expect(retrying.listProjects()).rejects.toThrow(SyntaxError);
+    const repaired = valid.split("\n")
+      .filter((line) => line.length > 0 && !line.includes(conversation.id) && !line.includes(project.id))
+      .join("\n");
+    await writeFile(journal, repaired ? `${repaired}\n` : "");
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      expect(await retrying.listProjects()).toEqual([]);
+      expect(await retrying.listConversations(project.id)).toEqual([]);
+      expect(await retrying.listEvents(conversation.id)).toEqual([]);
+    }
+    // The retry state is not a ghost: a fresh append works and is the only row.
+    const created = await retrying.createProject({ path: "/tmp/retry-after" });
+    expect((await retrying.listProjects()).map((item) => item.id)).toEqual([created.id]);
+    expect((await createMetadataStore(dir).listProjects()).map((item) => item.id)).toEqual([created.id]);
+  });
+
+  it("sends a real invalid byte to corrupt-tail while keeping a literal replacement character", async () => {
+    // The two cases the old `tail.includes("\uFFFD")` check conflated: a literal
+    // U+FFFD inside valid UTF-8 data is a record, while a lone lead byte is damage.
+    // Only the latter may be preserved as evidence and truncated away.
+    const { dir } = await create();
+    const journal = join(dir, "metadata.jsonl");
+    const label = "Pasted \uFFFD character";
+    const good = `${JSON.stringify({ op: "project", value: { id: "p1", path: "/tmp/U", label, favorite: false, createdAt: "t", updatedAt: "t" } })}\n`;
+    // Valid UTF-8 with a literal U+FFFD, missing only the final newline → a record.
+    await writeFile(journal, Buffer.from(good.slice(0, -1), "utf8"));
+    const restored = await createMetadataStore(dir).listProjects();
+    expect(restored.map((project) => project.label)).toEqual([label]);
+    // A lone 0xE2 (the first byte of a 3-byte sequence, no continuation) → damage.
+    const damaged = Buffer.concat([Buffer.from(good, "utf8"), Buffer.from([0xe2])]);
+    await writeFile(journal, damaged);
+    const reopened = createMetadataStore(dir);
+    expect((await reopened.listProjects()).map((project) => project.id)).toEqual(["p1"]);
+    expect(await readFile(join(dir, "metadata.jsonl.corrupt-tail"))).toEqual(Buffer.from([0xe2]));
+    expect((await readFile(journal, "utf8")).endsWith("}\n")).toBe(true);
+  });
+
+  it("refuses the delete when a launch reservation is registered before the queued delete runs", async () => {
+    // The V16-01 window: a row whose launch is reserved but has not recorded its
+    // process reads exactly like a never-launched row. The stored state cannot tell
+    // them apart, so the reservation is consulted inside the queued delete, and
+    // again inside the append after that append's own awaits. A reservation held
+    // when either check runs must block even though nothing about the row changed.
+    const { store } = await create();
+    const project = await store.createProject({ path: "/tmp/pending-launch" });
+    const conversation = await store.createConversation({ projectId: project.id });
+    const reserved = new Set<string>();
+    const pending = (id: string): boolean => reserved.has(id);
+    // No reservation yet: the ordinary never-launched delete goes through.
+    expect(await store.deleteProject(project.id, [conversation.id], pending)).toBe("deleted");
+    // And with one held, the same call refuses and keeps every row.
+    const second = await store.createConversation({ projectId: (await store.createProject({ path: "/tmp/pending-launch-2" })).id });
+    reserved.add(second.id);
+    expect(await store.deleteProject(second.projectId, [second.id], pending)).toBe("has_conversations");
+    expect((await store.listConversations(second.projectId)).map((row) => row.id)).toEqual([second.id]);
+    expect((await store.listProjects()).some((item) => item.id === second.projectId)).toBe(true);
+    // Released: the retry succeeds.
+    reserved.delete(second.id);
+    expect(await store.deleteProject(second.projectId, [second.id], pending)).toBe("deleted");
+    expect((await store.listProjects()).some((item) => item.id === second.projectId)).toBe(false);
+  });
+
+  it("refuses the delete when the reservation appears during the delete's own I/O", async () => {
+    // The gap the first check alone leaves: the delete reads the journal, opens it,
+    // stats it and chmods it, and a launch can claim the conversation in any of
+    // those turns. Here the predicate answers "no reservation" to the pre-append
+    // check and "reserved" to the one inside the append — a reservation registered
+    // in exactly that window. Nothing may be written, and both rows must survive.
+    const { dir, store } = await create();
+    const project = await store.createProject({ path: "/tmp/mid-delete-launch" });
+    const conversation = await store.createConversation({ projectId: project.id });
+    const before = await readFile(join(dir, "metadata.jsonl"), "utf8");
+    let asked = 0;
+    const pending = (): boolean => (asked += 1) > 1;
+    expect(await store.deleteProject(project.id, [conversation.id], pending)).toBe("has_conversations");
+    expect(asked).toBe(2);
+    // The declined append wrote nothing: the journal is byte-identical, so no
+    // cascade row exists for a replay to act on.
+    expect(await readFile(join(dir, "metadata.jsonl"), "utf8")).toBe(before);
+    expect(await store.listProjects()).toEqual([project]);
+    expect((await store.listConversations(project.id)).map((row) => row.id)).toEqual([conversation.id]);
+  });
+
+  it("treats a non-boolean reservation answer as no reservation", async () => {
+    // A predicate that returns a Promise (or any truthy non-`true`) would block
+    // every delete forever under loose coercion. Only a strict `true` blocks.
+    const { store } = await create();
+    const project = await store.createProject({ path: "/tmp/loose-pending" });
+    const conversation = await store.createConversation({ projectId: project.id });
+    const loose = (() => Promise.resolve(false)) as unknown as (id: string) => boolean;
+    expect(await store.deleteProject(project.id, [conversation.id], loose)).toBe("deleted");
+    expect(await store.listProjects()).toEqual([]);
+  });
+
   it("drops a conversation's events with it, so a delete leaves no orphans", async () => {
     const { dir, store } = await create();
     const project = await store.createProject({ path: "/tmp/events" });

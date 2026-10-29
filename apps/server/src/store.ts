@@ -30,8 +30,17 @@ export interface MetadataStore {
    * rather than dropped. The re-read, the row removal and the delete share one
    * queued write, so a racing launch writes through the same queue and is visible
    * to the re-read.
+   *
+   * A row whose launch is reserved but has not recorded its process yet reads
+   * exactly like a never-launched row (`starting`, no identity), so the re-read
+   * alone cannot tell them apart. `isProcessPending` is the caller's view of that
+   * reservation, and it is consulted *inside this queued operation*, after every
+   * await of the caller's request: `start()` registers the reservation eagerly and
+   * synchronously (before its own first await), so any launch that has begun by the
+   * time this predicate runs is visible and blocks the delete, instead of the
+   * delete dropping the only pointer to a starting process.
    */
-  deleteProject(id: string, verifiedStoppedConversationIds?: readonly string[]): Promise<"deleted" | "not_found" | "has_conversations">;
+  deleteProject(id: string, verifiedStoppedConversationIds?: readonly string[], isProcessPending?: (conversationId: string) => boolean): Promise<"deleted" | "not_found" | "has_conversations">;
   /** Drop a conversation the app created but never managed to launch. */
   removeConversation(id: string): Promise<boolean>;
   listConversations(projectId: string): Promise<Conversation[]>;
@@ -48,17 +57,41 @@ export interface MetadataStore {
 type Row =
   | { op: "project"; value: Project }
   | { op: "project-delete"; id: string }
+  /**
+   * The whole project delete as ONE record: the project row and every
+   * conversation it drops, applied all-or-nothing on replay. Rows land one line
+   * at a time, so a cascade written as several lines could be torn by a crash
+   * into "some children gone, project still here" — the one state a retry cannot
+   * repair. The older single-purpose rows below still replay, because journals
+   * written before this record exists are still on disk.
+   */
+  | { op: "project-cascade-delete"; id: string; conversationIds: string[] }
   | { op: "conversation"; value: Conversation }
   | { op: "conversation-delete"; id: string }
   | { op: "event"; value: StoreEvent }
   | { op: "command"; value: StoredCommand };
 
+/**
+ * Raised by a guarded `append` that declined to write: the condition it was given
+ * (a launch reservation) became true after the caller's own check, and nothing has
+ * been written yet. So there is nothing to roll back — the caller decides the
+ * outcome — and the journal must not be touched.
+ */
+class AppendDeclined extends Error {}
+
 export function createMetadataStore(stateDir: string, now: () => Date = () => new Date()): MetadataStore {
   const file = join(stateDir, "metadata.jsonl");
-  const projects = new Map<string, Project>();
-  const conversations = new Map<string, Conversation>();
-  const events = new Map<string, StoreEvent[]>();
-  const commands = new Map<string, StoredCommand>();
+  /**
+   * A successful replay REPLACES all four maps rather than filling them, so a
+   * load that fails half way cannot leave live state holding rows the journal no
+   * longer has. The retry that follows a human repair replays from scratch; if
+   * the failed attempt had published the rows it had already applied, every one of
+   * them would land twice (an event would read `seq [1,1]`).
+   */
+  let projects = new Map<string, Project>();
+  let conversations = new Map<string, Conversation>();
+  let events = new Map<string, StoreEvent[]>();
+  let commands = new Map<string, StoredCommand>();
   let loaded: Promise<void> | undefined;
   let queue: Promise<unknown> = Promise.resolve();
   /** Set when a failed write could not be rolled back; every later write refuses. */
@@ -126,12 +159,21 @@ export function createMetadataStore(stateDir: string, now: () => Date = () => ne
         const lastNewline = bytes.lastIndexOf(0x0a);
         if (lastNewline !== bytes.length - 1) {
           const tailBytes = bytes.subarray(lastNewline + 1);
-          const tail = tailBytes.toString("utf8");
           let finalRow: unknown = null;
-          // A tail the decoder had to repair is not a whole row: it is damage, and
-          // must never be edited in place.
-          if (!tail.includes("\uFFFD")) {
-            try { finalRow = JSON.parse(tail); } catch { finalRow = null; }
+          // A tail the UTF-8 decoder had to repair is damage, not a row: a byte
+          // sequence Node replaced with U+FFFD is not what a writer put there. The
+          // check must be on the BYTES, though — a literal U+FFFD inside a valid
+          // label is perfectly good data and `tail.includes("\uFFFD")` would have
+          // thrown it away. `fatal: true` throws exactly on a malformed sequence.
+          let validUtf8 = true;
+          try { new TextDecoder("utf-8", { fatal: true }).decode(tailBytes); }
+          catch { validUtf8 = false; }
+          if (validUtf8) {
+            // A BOM-led tail passes the fatal decoder (a BOM is valid UTF-8) but
+            // `JSON.parse` rejects it, so such a row is preserved as a corrupt tail
+            // rather than replayed. Unreachable in practice — our own writer never
+            // emits a BOM — and harmless: the bytes are kept as evidence.
+            try { finalRow = JSON.parse(tailBytes.toString("utf8")); } catch { finalRow = null; }
           }
           if (finalRow !== null && typeof finalRow === "object" && typeof (finalRow as Row).op === "string") {
             // An older writer could drop the final newline without losing the record
@@ -147,22 +189,41 @@ export function createMetadataStore(stateDir: string, now: () => Date = () => ne
         }
       } finally { await handle.close(); }
       const text = kept.toString("utf8");
-      // Complete JSONL rows fail loudly; only an unterminated EOF tail is recoverable.
+      // Replay into scratch maps and publish only when every row parsed. A
+      // complete JSONL row that fails still fails loudly — only an unterminated EOF
+      // tail is recoverable — but nothing it had already replayed reaches the live
+      // maps, so the retry starts from the journal rather than from half of it.
+      const nextProjects = new Map<string, Project>();
+      const nextConversations = new Map<string, Conversation>();
+      const nextEvents = new Map<string, StoreEvent[]>();
+      const nextCommands = new Map<string, StoredCommand>();
+      const dropFrom = (id: string): void => {
+        nextConversations.delete(id);
+        nextEvents.delete(id);
+        for (const [key, command] of nextCommands) if (command.conversationId === id) nextCommands.delete(key);
+      };
       for (const line of text.split("\n")) {
         if (!line) continue;
         const row = JSON.parse(line) as Row;
-        if (row.op === "project") projects.set(row.value.id, row.value);
-        else if (row.op === "project-delete") projects.delete(row.id);
-        else if (row.op === "conversation") conversations.set(row.value.id, row.value);
+        if (row.op === "project") nextProjects.set(row.value.id, row.value);
+        else if (row.op === "project-delete") nextProjects.delete(row.id);
+        else if (row.op === "project-cascade-delete") {
+          for (const conversationId of row.conversationIds) dropFrom(conversationId);
+          nextProjects.delete(row.id);
+        } else if (row.op === "conversation") nextConversations.set(row.value.id, row.value);
         // A conversation-delete row means the conversation is gone, so its events and
         // commands go with it rather than staying in the journal with no parent.
-        else if (row.op === "conversation-delete") dropConversation(row.id);
+        else if (row.op === "conversation-delete") dropFrom(row.id);
         else if (row.op === "event") {
-          const list = events.get(row.value.conversationId) ?? [];
+          const list = nextEvents.get(row.value.conversationId) ?? [];
           list.push(row.value);
-          events.set(row.value.conversationId, list);
-        } else if (row.op === "command") commands.set(row.value.idempotencyKey, row.value);
+          nextEvents.set(row.value.conversationId, list);
+        } else if (row.op === "command") nextCommands.set(row.value.idempotencyKey, row.value);
       }
+      projects = nextProjects;
+      conversations = nextConversations;
+      events = nextEvents;
+      commands = nextCommands;
     })().catch((error: unknown) => {
       // A rejected load is not memoized: after a human repairs the journal the next
       // call must be able to read it again. A still-broken journal fails per call.
@@ -190,7 +251,7 @@ export function createMetadataStore(stateDir: string, now: () => Date = () => ne
    * store is poisoned: every later write refuses loudly rather than appending onto
    * a journal we cannot trust.
    */
-  async function append(...rows: Row[]): Promise<void> {
+  async function append(rows: Row[], mayWrite?: () => boolean): Promise<void> {
     await load();
     if (journalFailure) throw new Error(journalFailure);
     const handle = await open(file, constants.O_RDWR | constants.O_APPEND | constants.O_CREAT | constants.O_NOFOLLOW, 0o600);
@@ -202,9 +263,19 @@ export function createMetadataStore(stateDir: string, now: () => Date = () => ne
       if (!stat.isFile()) throw new Error("metadata journal is not a regular file");
       offset = stat.size;
       await handle.chmod(0o600);
+      // Last possible instant: `open`, `stat` and `chmod` all yielded, and a launch
+      // may have claimed the conversation since the caller's own check. Asking again
+      // here — before a byte is written — is what makes the guard cover those turns
+      // rather than only the ones before them. Nothing is written, so nothing is
+      // rolled back; the caller maps the refusal to its own outcome.
+      // ponytail: in-process fifo, not a lock — a reservation taken *inside* the
+      // write() call itself is still unobservable, which needs a real cross-process
+      // lease. That window is one syscall wide and has no observable seam.
+      if (mayWrite && !mayWrite()) throw new AppendDeclined();
       await handle.writeFile(rows.map((row) => `${JSON.stringify(row)}\n`).join(""));
       await handle.sync();
     } catch (error) {
+      if (error instanceof AppendDeclined) throw error;
       if (offset === null) throw error;
       try { await handle.truncate(offset); }
       catch {
@@ -232,7 +303,7 @@ export function createMetadataStore(stateDir: string, now: () => Date = () => ne
         if ([...projects.values()].some((item) => item.path === input.path)) throw new Error("Project path already exists");
         const created = stamp();
         const value: Project = { id: randomUUID(), path: input.path, label: input.label ?? input.path.split(/[\\/]/).pop() ?? input.path, favorite: false, createdAt: created, updatedAt: created };
-        await append({ op: "project", value }); projects.set(value.id, value); return value;
+        await append([{ op: "project", value }]); projects.set(value.id, value); return value;
       });
     },
     updateProject(id, patch) {
@@ -244,10 +315,10 @@ export function createMetadataStore(stateDir: string, now: () => Date = () => ne
         // Only a real change is worth a journal row: the log is append-only, and the
         // UI polls. Comparing here (not in the route) covers every caller.
         if (changedKeys(current, patch).length === 0) return current;
-        await append({ op: "project", value }); projects.set(id, value); return value;
+        await append([{ op: "project", value }]); projects.set(id, value); return value;
       });
     },
-    deleteProject(id, verifiedStoppedConversationIds = []) {
+    deleteProject(id, verifiedStoppedConversationIds = [], isProcessPending) {
       return serialize(async () => {
         await load();
         if (!projects.has(id)) return "not_found" as const;
@@ -266,15 +337,34 @@ export function createMetadataStore(stateDir: string, now: () => Date = () => ne
           || conversation.state === "error"
           || (conversation.state === "starting" && conversation.tmuxSessionId === null && conversation.tmuxPanePid === null);
         const below = [...conversations.values()].filter((conversation) => conversation.projectId === id);
-        // A row the caller never saw, or one that no longer reads process-free, blocks.
-        if (below.some((conversation) => !verified.has(conversation.id) || !processFree(conversation))) {
-          return "has_conversations" as const;
-        }
-        // Every row is verified stopped and still process-free: drop them in one write.
-        // A delete that landed half way would destroy rows whose project is still
-        // there, and a retry could not restore them.
+        // The re-read decides on stored state; the reservation is the one thing a
+        // row cannot show, so it is asked here — and again inside the append, after
+        // that append's own awaits. A start that registers its reservation after the
+        // first check but before the write claims this project's conversation, and
+        // only the second check is late enough to see it.
+        const pending = isProcessPending ?? (() => false);
+        // A row the caller never saw, one that no longer reads process-free, or one
+        // whose launch is reserved but not yet recorded, blocks. The result is
+        // compared strictly: an accidental Promise from a sloppy callback is truthy
+        // and would block every delete forever, which is the failure mode this
+        // guard must never introduce.
+        const blocked = (): boolean =>
+          below.some((conversation) => !verified.has(conversation.id) || !processFree(conversation) || pending(conversation.id) === true);
+        if (blocked()) return "has_conversations" as const;
+        // Every row is verified stopped and still process-free: drop them with the
+        // project in ONE journal record. Several rows in one `write` are not atomic
+        // across a crash — a torn write could leave a conversation gone while the
+        // project survived, and no retry can put the row back.
         const gone = below.map((conversation) => conversation.id);
-        await append(...gone.map((conversationId) => ({ op: "conversation-delete", id: conversationId } as const)), { op: "project-delete", id });
+        try {
+          await append([{ op: "project-cascade-delete", id, conversationIds: gone }], () => !blocked());
+        } catch (error) {
+          // A reservation appeared between the check above and the write itself, so
+          // the append declined and wrote nothing. Report the same refusal the first
+          // check would have: the caller sees one outcome for one condition.
+          if (error instanceof AppendDeclined) return "has_conversations" as const;
+          throw error;
+        }
         for (const conversationId of gone) dropConversation(conversationId);
         projects.delete(id); return "deleted" as const;
       });
@@ -283,7 +373,7 @@ export function createMetadataStore(stateDir: string, now: () => Date = () => ne
       return serialize(async () => {
         await load();
         if (!conversations.has(id)) return false;
-        await append({ op: "conversation-delete", id }); dropConversation(id); return true;
+        await append([{ op: "conversation-delete", id }]); dropConversation(id); return true;
       });
     },
     async listConversations(projectId) { await load(); return [...conversations.values()].filter((conversation) => conversation.projectId === projectId); },
@@ -302,7 +392,7 @@ export function createMetadataStore(stateDir: string, now: () => Date = () => ne
           hostInstanceId: null, hostGeneration: null, createdAt: created, updatedAt: created,
           lastActivityAt: null, statusDetail: null,
         };
-        await append({ op: "conversation", value }); conversations.set(value.id, value); return value;
+        await append([{ op: "conversation", value }]); conversations.set(value.id, value); return value;
       });
     },
     registerExternalConversation(input) {
@@ -320,7 +410,7 @@ export function createMetadataStore(stateDir: string, now: () => Date = () => ne
           hostGeneration: input.hostGeneration, createdAt: created, updatedAt: created,
           lastActivityAt: null, statusDetail: "Observed live session; lifecycle is not managed here.",
         };
-        await append({ op: "conversation", value }); conversations.set(value.id, value); return value;
+        await append([{ op: "conversation", value }]); conversations.set(value.id, value); return value;
       });
     },
     updateConversation(id, patch) {
@@ -332,7 +422,7 @@ export function createMetadataStore(stateDir: string, now: () => Date = () => ne
         // and the journal is append-only. Callers that want a touch pass a real change.
         if (changedKeys(current, patch).length === 0) return current;
         const value: Conversation = { ...current, ...patch, id: current.id, projectId: current.projectId, updatedAt: stamp() };
-        await append({ op: "conversation", value }); conversations.set(id, value); return value;
+        await append([{ op: "conversation", value }]); conversations.set(id, value); return value;
       });
     },
     recordEvent(conversationId, type, payload, ts = stamp()) {
@@ -341,7 +431,7 @@ export function createMetadataStore(stateDir: string, now: () => Date = () => ne
         if (!conversations.has(conversationId)) throw new Error("Conversation not found");
         const list = events.get(conversationId) ?? [];
         const value: StoreEvent = { id: randomUUID(), conversationId, seq: (list.at(-1)?.seq ?? 0) + 1, type, ts, payload };
-        await append({ op: "event", value }); list.push(value); events.set(conversationId, list); return value as StoreEvent<typeof payload>;
+        await append([{ op: "event", value }]); list.push(value); events.set(conversationId, list); return value as StoreEvent<typeof payload>;
       });
     },
     async listEvents<T = unknown>(conversationId: string, afterSeq = 0, limit = 100) {
@@ -355,7 +445,7 @@ export function createMetadataStore(stateDir: string, now: () => Date = () => ne
         if (existing) return { first: false, command: existing };
         if (!conversations.has(conversationId)) throw new Error("Conversation not found");
         const command = { idempotencyKey, conversationId, kind, payload, createdAt: stamp() };
-        await append({ op: "command", value: command }); commands.set(idempotencyKey, command);
+        await append([{ op: "command", value: command }]); commands.set(idempotencyKey, command);
         return { first: true, command };
       });
     },

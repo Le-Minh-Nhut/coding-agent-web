@@ -57,6 +57,7 @@ function makeWorld() {
   let tmuxListThrows = false;
   let storeWriteThrows = false;
   let killThrows = false;
+  let recordEventThrows = false;
   let nextId = 1;
   let tmuxServerIdentity: string | null = "private-socket:1";
 
@@ -132,6 +133,7 @@ function makeWorld() {
       return next;
     },
     async recordEvent(conversationId, type, payload) {
+      if (recordEventThrows) throw new Error("simulated journal failure");
       const event = { conversationId, type, payload, seq: events.filter((item) => item.conversationId === conversationId).length + 1 };
       events.push(event);
       return event;
@@ -188,6 +190,9 @@ function makeWorld() {
     },
     breakStoreWrites: (value: boolean) => {
       storeWriteThrows = value;
+    },
+    breakRecordEvents: (value: boolean) => {
+      recordEventThrows = value;
     },
     breakKills: (value: boolean) => {
       killThrows = value;
@@ -1925,6 +1930,102 @@ describe("supervisor.refresh", () => {
     expect(world.launches).toHaveLength(1);
     // Released once the launch settled, so the row can be cleaned up again.
     expect(supervisor.isLaunching("c1")).toBe(false);
+  });
+
+  it("registers the reservation synchronously, before the start's first await", async () => {
+    // The deleter's window: it reads `isLaunching`, then commits after several
+    // awaits. If the reservation only appears inside the lock — after the store
+    // reads that start performs first — the delete's check has already run and
+    // cannot see it. So the set must be updated by the time `start` returns its
+    // promise, before any of its own awaits turn the loop.
+    const world = makeWorld();
+    world.seed({ id: "c1" });
+    let supervisor!: ReturnType<typeof createSupervisor>;
+    let gate!: () => void;
+    const slowRead = new Promise<void>((resolve) => { gate = resolve; });
+    // The first awaited call `start` makes. When a caller can observe `isLaunching`
+    // while this is still outstanding, the reservation was synchronous.
+    const getConversation = world.store.getConversation;
+    world.store.getConversation = async (id) => { await slowRead; return getConversation(id); };
+    supervisor = createSupervisor({ store: world.store, adapters: world.adapters, clock: instantClock, maxActive: 3, publishTimeoutMs: 0 });
+
+    const starting = supervisor.start("c1", { conversationId: "c1", name: "caw-c1", cwd: "/tmp/project" });
+    // No await has completed here: this is exactly what a concurrent deleter sees.
+    expect(supervisor.isLaunching("c1")).toBe(true);
+    gate();
+    await starting;
+    expect(supervisor.isLaunching("c1")).toBe(false);
+  });
+
+  it("refuses a second launch for the same conversation while the first is in flight", async () => {
+    // Reserving before the lock means the *pre-lock* reservation itself must be
+    // recognised as a conflict, not mistaken for this call's own key.
+    const world = makeWorld();
+    world.seed({ id: "c1" });
+    let gate!: () => void;
+    const slowRead = new Promise<void>((resolve) => { gate = resolve; });
+    const getConversation = world.store.getConversation;
+    world.store.getConversation = async (id) => { await slowRead; return getConversation(id); };
+    const supervisor = createSupervisor({ store: world.store, adapters: world.adapters, clock: instantClock, maxActive: 3, publishTimeoutMs: 0 });
+
+    const first = supervisor.start("c1", { conversationId: "c1", name: "caw-c1", cwd: "/tmp/project" });
+    const second = supervisor.start("c1", { conversationId: "c1", name: "caw-c1-again", cwd: "/tmp/project" });
+    gate();
+    const results = await Promise.allSettled([first, second]);
+    expect(world.launches).toHaveLength(1);
+    expect(results.filter((result) => result.status === "rejected").map((result) => (result as PromiseRejectedResult).reason.code)).toEqual([
+      "conflict_owner",
+    ]);
+  });
+
+  it("releases the reservation when a refusal cannot be journalled", async () => {
+    // The leak: keys are added, then awaited work runs — including a refusal's own
+    // `recordEvent`, which throws on a poisoned journal. The reservation must not
+    // survive that throw. Here an untracked live tmux session makes the launch refuse
+    // after the reservation was taken, and the journal write for the refusal fails.
+    const world = makeWorld();
+    world.seed({ id: "c1", state: "stopped" });
+    // A live managed session with no recorded owner: launches are refused, and the
+    // refusal path records an event before throwing.
+    world.tmuxSessions.push({ id: "$9", name: "orphan", alive: true, panePid: 4242, serverIdentity: "private-socket:1" });
+    world.breakRecordEvents(true);
+    const supervisor = createSupervisor({ store: world.store, adapters: world.adapters, clock: instantClock, maxActive: 3, publishTimeoutMs: 0 });
+
+    await expect(supervisor.start("c1", { conversationId: "c1", name: "caw-c1", cwd: "/tmp/project" }))
+      .rejects.toThrow(/simulated journal failure/);
+
+    // Nothing was launched, and nothing stayed reserved: the row is deletable again
+    // once the journal is repaired.
+    expect(world.launches).toHaveLength(0);
+    expect(supervisor.isLaunching("c1")).toBe(false);
+  });
+
+  it("leaves another launch's reservation alone when it refuses", async () => {
+    // A refused call owns no key, so its cleanup must not drop the key the holder
+    // took. `c1` runs from a timed-out publish (reservation released, row still
+    // claimed); `c2` aliasing its journal is refused and must not disturb anything.
+    const world = makeWorld();
+    world.seed({ id: "c1" });
+    world.seed({ id: "c2", state: "stopped" });
+    const journal = "/tmp/journal.jsonl";
+    const supervisor = createSupervisor({ store: world.store, adapters: world.adapters, clock: instantClock, maxActive: 3, publishTimeoutMs: 0 });
+    await supervisor.start("c1", { conversationId: "c1", name: "caw-c1", cwd: "/tmp/project", resumeSessionPath: journal });
+
+    await expect(supervisor.start("c2", { conversationId: "c2", name: "caw-c2", cwd: "/tmp/project", resumeSessionPath: journal }))
+      .rejects.toMatchObject({ code: "conflict_owner" });
+
+    expect(supervisor.isLaunching("c2")).toBe(false);
+    expect(world.launches).toHaveLength(1);
+  });
+
+  it("releases the reservation when the conversation is not found before launch", async () => {
+    // The early not-found throw now sits inside the same try as the reservation, so
+    // it releases rather than leaving a key reserved for a row that does not exist.
+    const world = makeWorld();
+    const supervisor = createSupervisor({ store: world.store, adapters: world.adapters, clock: instantClock, maxActive: 3 });
+    await expect(supervisor.start("ghost", { conversationId: "ghost", name: "caw-ghost", cwd: "/tmp/project" }))
+      .rejects.toMatchObject({ code: "agent_not_running" });
+    expect(supervisor.isLaunching("ghost")).toBe(false);
   });
 
   it("keeps the state unknown, not error, when the journal probe fails", async () => {
