@@ -1080,10 +1080,13 @@ describe("supervisor.start", () => {
 describe("supervisor.stop", () => {
   it("kills by recorded tmux id and settles to stopped", async () => {
     const world = makeWorld();
-    world.seed({ id: "c1", state: "running", nativeSessionId: "native-c1", tmuxSessionId: "$4", tmuxSessionName: "caw-c1", tmuxPanePid: 321, tmuxServerIdentity: "private-socket:1" });
-    world.tmuxSessions.push({ id: "$4", name: "caw-c1", alive: true, panePid: 321, serverIdentity: "private-socket:1" });
+    // The pane PID is pinned out of reach: the test asserts the process is GONE, so
+    // a low PID that happens to exist on the machine would make `processAlive` report
+    // a live pane and the poll would never settle (a real-PID accident, not a bug).
+    world.seed({ id: "c1", state: "running", nativeSessionId: "native-c1", tmuxSessionId: "$4", tmuxSessionName: "caw-c1", tmuxPanePid: 1_000_000_000, tmuxServerIdentity: "private-socket:1" });
+    world.tmuxSessions.push({ id: "$4", name: "caw-c1", alive: true, panePid: 1_000_000_000, serverIdentity: "private-socket:1" });
     // The pane must be positively verified as serving the recorded native session.
-    world.hosts.push(hostRow({ pid: 321, sessionId: "native-c1" }));
+    world.hosts.push(hostRow({ pid: 1_000_000_000, sessionId: "native-c1" }));
     const supervisor = createSupervisor({ store: world.store, adapters: world.adapters, clock: instantClock, maxActive: 3 });
 
     const result = await supervisor.stop("c1");
@@ -1854,14 +1857,17 @@ describe("supervisor.refresh", () => {
     // or deleted (unknown), forever. The enumeration that qualified the session by
     // id and server lifetime is the missing PID.
     const world = makeWorld();
+    // The PID is pinned out of reach, because this test then stops the conversation
+    // and asserts the process is GONE: a low PID that exists on the machine would
+    // make the stop poll see a live pane and never settle.
     world.seed({ id: "c1", nativeSessionId: "native-A", state: "unknown", tmuxSessionId: "$1", tmuxSessionName: "caw-c1", tmuxPanePid: null, tmuxServerIdentity: "private-socket:1" });
-    world.tmuxSessions.push({ id: "$1", name: "caw-c1", alive: true, panePid: 1002, serverIdentity: "private-socket:1" });
-    world.hosts.push(hostRow({ pid: 1002, sessionId: "native-A", instanceId: "host-A" }));
+    world.tmuxSessions.push({ id: "$1", name: "caw-c1", alive: true, panePid: 1_000_000_000, serverIdentity: "private-socket:1" });
+    world.hosts.push(hostRow({ pid: 1_000_000_000, sessionId: "native-A", instanceId: "host-A" }));
     const supervisor = createSupervisor({ store: world.store, adapters: world.adapters, clock: instantClock, maxActive: 3 });
 
     const refreshed = await supervisor.refresh("c1");
 
-    expect(refreshed?.tmuxPanePid).toBe(1002);
+    expect(refreshed?.tmuxPanePid).toBe(1_000_000_000);
     expect(refreshed?.state).toBe("idle");
     // The stop gate can now verify ownership instead of refusing on a missing PID.
     const stopped = await supervisor.stop("c1");
