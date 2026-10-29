@@ -14,6 +14,35 @@ export function SettingsView({ onBack, onLogout }: SettingsViewProps) {
   const [newPassword, setNewPassword] = useState("");
   const [passwordBusy, setPasswordBusy] = useState(false);
   const [passwordMessage, setPasswordMessage] = useState<string | null>(null);
+  const [signingOut, setSigningOut] = useState(false);
+  const [signOutError, setSignOutError] = useState<string | null>(null);
+
+  /**
+   * Confirms sign-out only when the session is actually gone. `api.logout` failing
+   * says nothing about whether the server revoked it first — the network can die
+   * after the revoke lands. So the deciding signal is an auth probe: a 401 proves
+   * the session is finished even if the logout response never arrived, while any
+   * answer (or no answer at all) means it may still be live and must not be
+   * presented as signed out.
+   */
+  const signOut = async (): Promise<void> => {
+    if (signingOut) return;
+    setSigningOut(true);
+    setSignOutError(null);
+    const res = await api.logout();
+    if (res.ok || res.httpStatus === 401) {
+      // Confirmed revoke, or the session was already gone. Both are honest sign-outs.
+      onLogout();
+      return;
+    }
+    const probe = await api.getMe();
+    setSigningOut(false);
+    if (!probe.ok && probe.httpStatus === 401) {
+      onLogout();
+      return;
+    }
+    setSignOutError(res.error.message || "Sign out failed");
+  };
 
   const changePassword = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -128,16 +157,17 @@ export function SettingsView({ onBack, onLogout }: SettingsViewProps) {
 
           {/* Logout */}
           <div style={{ marginTop: "16px" }}>
+            {signOutError && (
+              <p role="alert" style={{ color: "var(--danger)", marginBottom: "8px" }}>{signOutError}</p>
+            )}
             <button
               type="button"
               className="danger"
               style={{ width: "100%" }}
-              onClick={async () => {
-                await api.logout();
-                onLogout();
-              }}
+              disabled={signingOut}
+              onClick={() => void signOut()}
             >
-              Sign out
+              {signingOut ? "Signing out…" : signOutError ? "Retry sign out" : "Sign out"}
             </button>
           </div>
         </div>

@@ -124,6 +124,14 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
   /** Bumped by Retry so the saved-history effect re-runs even though linkUnavailable stays true. */
   const [historyRetryEpoch, setHistoryRetryEpoch] = useState(0);
   const [uiEditorValue, setUiEditorValue] = useState("");
+  /**
+   * The newest refused prompt the composer did not take back. A refusal only
+   * restores itself when the composer is untouched; if the user has typed newer
+   * content, the refused text lives here behind an explicit Recover/Copy strip so
+   * neither draft is destroyed. Only the most recent one is kept.
+   */
+  const [refusedPrompt, setRefusedPrompt] = useState<string | null>(null);
+  const [refusedCopyState, setRefusedCopyState] = useState<"idle" | "copied" | "failed">("idle");
 
   const inputValueRef = useRef(draft);
   const messagesScrollRef = useRef<HTMLDivElement | null>(null);
@@ -213,7 +221,15 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
   const recoverRefusedPrompt = (prompt: PendingPrompt): void => {
     pendingPromptRef.current = pendingPromptRef.current.filter((pending) => pending !== prompt);
     if (prompt.optimisticId) setOptimisticMessages((previous) => previous.filter((message) => message.id !== prompt.optimisticId));
-    if (sendVersionRef.current !== prompt.draftVersion) return;
+    if (sendVersionRef.current !== prompt.draftVersion) {
+      // The user has typed newer content since sending: overwriting it would destroy
+      // that work and dropping the refused prompt would lose it entirely. Keep the
+      // newest refused prompt behind an explicit affordance instead of the composer.
+      setRefusedCopyState("idle");
+      setRefusedPrompt(prompt.text);
+      return;
+    }
+    setRefusedPrompt(null);
     inputValueRef.current = prompt.text;
     setInputText(prompt.text);
     onDraftChange?.(prompt.text);
@@ -366,6 +382,8 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     sendVersionRef.current++;
     pendingPromptRef.current = [];
     setSendError(null);
+    setRefusedPrompt(null);
+    setRefusedCopyState("idle");
     sendingPromptTextsRef.current.clear();
     const currentId = conversationId;
     api.getConversation(conversationId).then((res) => {
@@ -650,6 +668,33 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     onDraftChange?.(value);
   };
   const sendSlashAsText = (): void => sendPrompt(inputValueRef.current, true);
+
+  /**
+   * An explicit Recover click puts the refused prompt back in the composer, even if
+   * the user has typed newer content: they asked for it, and the refused text was
+   * otherwise unreachable. The draft they had is left in place until this replaces
+   * it — the strip is the only path back to the refused prompt, so it stays until use.
+   */
+  const recoverRefusedPromptText = (): void => {
+    if (refusedPrompt === null) return;
+    updateDraft(refusedPrompt);
+    setRefusedPrompt(null);
+    setRefusedCopyState("idle");
+    composerRef.current?.focus();
+  };
+
+  // Same clipboard contract as the code-block copy control: report failure rather
+  // than silently doing nothing when the browser exposes no clipboard.
+  const copyRefusedPromptText = async (): Promise<void> => {
+    if (refusedPrompt === null) return;
+    try {
+      if (!navigator.clipboard?.writeText) throw new Error("Clipboard unavailable");
+      await navigator.clipboard.writeText(refusedPrompt);
+      setRefusedCopyState("copied");
+    } catch {
+      setRefusedCopyState("failed");
+    }
+  };
 
   const openCommandAction = (): void => {
     setInterceptedCommand(null);
@@ -1057,6 +1102,19 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
           )}
           <button type="button" className="primary" disabled={transcript.readOnly} onClick={sendSlashAsText}>Send as plain text anyway</button>
           <button type="button" className="ghost" onClick={() => setInterceptedCommand(null)}>Cancel</button>
+        </div>
+      )}
+      {refusedPrompt && canWriteToHost && (
+        <div className="banner warning refused-prompt" role="status">
+          <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={refusedPrompt}>
+            Refused — {refusedPrompt}
+          </span>
+          <span style={{ display: "flex", gap: "8px", flexShrink: 0 }}>
+            <button type="button" className="ghost" onClick={recoverRefusedPromptText}>Recover</button>
+            <button type="button" className="ghost" onClick={() => void copyRefusedPromptText()}>
+              {refusedCopyState === "copied" ? "Copied" : refusedCopyState === "failed" ? "Copy failed" : "Copy"}
+            </button>
+          </span>
         </div>
       )}
       {canWriteToHost && !linkUnavailable && !isShowingSavedHistory && !historyLive && (

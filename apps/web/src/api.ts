@@ -113,11 +113,14 @@ export const api = {
     });
   },
 
-  async logout(): Promise<ApiResult<{ loggedOut: boolean }>> {
+  async logout(): Promise<ApiResultWithStatus<{ loggedOut: boolean }>> {
     const res = await request<{ loggedOut: boolean }>("/api/auth/logout", {
       method: "POST",
     });
-    setCsrfToken(null);
+    // Only a confirmed revoke (or an already-401 session) ends the session. A
+    // failed request that never reached the server leaves the cookie valid, so the
+    // token must survive: the Retry needs it to present the CSRF header again.
+    if (res.ok || res.httpStatus === 401) setCsrfToken(null);
     return res;
   },
 

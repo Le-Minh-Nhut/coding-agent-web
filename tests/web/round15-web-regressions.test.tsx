@@ -100,14 +100,18 @@ describe("round14/15 web regressions", () => {
     fireEvent.click(loadMoreButton());
     expect(loadMoreButton().disabled).toBe(true);
 
-    // Cancelling the form bumps the navigation generation without changing
-    // currentPath/refreshVersion, so the load effect never re-runs.
+    // Cancelling the form now invalidates only the form's own request; it no longer
+    // bumps the navigation generation (round 17: a bump with no replacement load
+    // stranded the loader). So the pending page still belongs to the live listing
+    // and its completion is applied normally.
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "+ New Folder" })); });
     const form = screen.getByLabelText(/New folder in/).closest("form")!;
     await act(async () => { fireEvent.click(within(form).getByRole("button", { name: "Cancel" })); });
 
-    // The stale page lands; the button must be usable again, not stuck on "Loading…".
-    await act(async () => { complete({ ok: true, data: listing("/work", []).data }); });
+    // The page lands and is applied: the row it carried appears and the button is
+    // usable again, not stuck on "Loading…".
+    await act(async () => { complete({ ok: true, data: listing("/work", ["/work/tail"], "page3").data }); });
+    expect(screen.queryAllByText("📁 tail")).toHaveLength(1);
     expect(loadMoreButton().disabled).toBe(false);
     expect(loadMoreButton().textContent).toBe("Load more");
   });

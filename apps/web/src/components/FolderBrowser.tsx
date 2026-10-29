@@ -26,6 +26,13 @@ export function FolderBrowser({ onSelect, onCancel }: FolderBrowserProps) {
     // load-more or a late list response from the previous load cannot write into
     // this one. The generation ref is the single guard: the cleanup bumps it, so
     // a post-unmount or post-navigation response is dropped uniformly.
+    //
+    // Only this effect — and its cleanup — may bump the generation, because a bump
+    // is only correct when a replacement load actually starts. Re-asserting the
+    // current path (Roots / breadcrumb / the folder already shown) and closing the
+    // new-folder form without reloading do NOT bump: they start no replacement, so
+    // a bump would strand the only in-flight loader with nothing to clear
+    // `loading` and leave the listing stuck empty with every button disabled.
     navigationGenerationRef.current++;
     const generation = navigationGenerationRef.current;
     setLoading(true);
@@ -146,7 +153,7 @@ export function FolderBrowser({ onSelect, onCancel }: FolderBrowserProps) {
             type="button"
             className="ghost"
             style={{ padding: "4px 6px", fontSize: "0.85rem" }}
-          onClick={() => { navigationGenerationRef.current++; setSelectedPath(null); setCurrentPath(undefined); }}
+          onClick={() => { setSelectedPath(null); setCurrentPath(undefined); }}
           >
             Roots
           </button>
@@ -157,7 +164,7 @@ export function FolderBrowser({ onSelect, onCancel }: FolderBrowserProps) {
                 type="button"
                 className="ghost"
                 style={{ padding: "4px 6px", fontSize: "0.85rem" }}
-                onClick={() => { navigationGenerationRef.current++; setSelectedPath(null); setCurrentPath(path); }}
+                onClick={() => { setSelectedPath(null); setCurrentPath(path); }}
               >
                 {part}
               </button>
@@ -168,7 +175,7 @@ export function FolderBrowser({ onSelect, onCancel }: FolderBrowserProps) {
         {!currentPath && listing?.roots && listing.roots.length > 1 && (
           <div aria-label="Workspace roots" style={{ display: "flex", flexWrap: "wrap", gap: "6px", margin: "8px 0" }}>
             {listing.roots.map((root) => (
-              <button type="button" key={root} className="ghost" onClick={() => { navigationGenerationRef.current++; setSelectedPath(null); setCurrentPath(root); }}>
+              <button type="button" key={root} className="ghost" onClick={() => { setSelectedPath(null); setCurrentPath(root); }}>
                 {root}
               </button>
             ))}
@@ -189,7 +196,11 @@ export function FolderBrowser({ onSelect, onCancel }: FolderBrowserProps) {
                   <button type="submit" className="primary" disabled={creatingFolder || !newFolderName.trim()}>
                     {creatingFolder ? "Creating…" : "Create folder"}
                   </button>
-                  <button type="button" onClick={() => { navigationGenerationRef.current++; setShowNewFolder(false); setNewFolderError(null); }}>Cancel</button>
+                  {/* Cancel invalidates only this dialog: the create POST is guarded by
+                      its own generation capture, and the listing loader owns its own
+                      request. Bumping the navigation generation here would drop the
+                      in-flight listing completion with no replacement to clear it. */}
+                  <button type="button" onClick={() => { setShowNewFolder(false); setNewFolderError(null); }}>Cancel</button>
                 </div>
                 {newFolderError && <div role="alert" style={{ color: "var(--danger)", marginTop: "6px" }}>{newFolderError}</div>}
               </form>
@@ -205,7 +216,7 @@ export function FolderBrowser({ onSelect, onCancel }: FolderBrowserProps) {
               <div
                 className="folder-item"
                 style={{ cursor: "pointer" }}
-                onClick={() => { navigationGenerationRef.current++; setSelectedPath(null); setCurrentPath(listing.parent!); }}
+                onClick={() => { setSelectedPath(null); setCurrentPath(listing.parent!); }}
               >
                 <span>📁 .. (Up)</span>
               </div>
@@ -221,7 +232,6 @@ export function FolderBrowser({ onSelect, onCancel }: FolderBrowserProps) {
                   style={{ cursor: disabled ? "not-allowed" : "pointer", borderColor: selected ? "var(--primary)" : undefined }}
                   onClick={() => {
                     if (!disabled) {
-                      navigationGenerationRef.current++;
                       setSelectedPath(null);
                       setCurrentPath(entry.path);
                     }

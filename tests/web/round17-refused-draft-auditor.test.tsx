@@ -1,0 +1,32 @@
+// @vitest-environment jsdom
+import React from "react";
+import { afterEach, expect, it, vi } from "vitest";
+import { act, cleanup, fireEvent, render, waitFor } from "@testing-library/react";
+import { CollabSocket, type HostFrame } from "@caw/collab-protocol";
+import { api } from "../../apps/web/src/api.js";
+import { ConversationView } from "../../apps/web/src/components/ConversationView.js";
+vi.mock("../../apps/web/src/api.js", () => ({ api: { getConversation: vi.fn(), getAttachInstructions: vi.fn(), getConversationLink: vi.fn(), getModels: vi.fn() } }));
+afterEach(() => { cleanup(); vi.restoreAllMocks(); });
+it.each([false, true])("V17 a refused prompt remains recoverable (newer composer draft=%s)", async (hasNewDraft) => {
+  vi.mocked(api.getConversation).mockResolvedValue({ ok: true, data: { id: "c", title: "Chat", state: "idle", ownership: "managed" } } as any);
+  vi.mocked(api.getAttachInstructions).mockResolvedValue({ ok: true, data: { available: false } } as any);
+  vi.mocked(api.getModels).mockResolvedValue({ ok: true, data: { models: [], source: "omp", reason: null } });
+  vi.mocked(api.getConversationLink).mockResolvedValue({ ok: true, data: { url: "ws://127.0.0.1:7466/r/0123456789abcdef.AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE", access: "full", instanceId: "i", generation: 1 } });
+  let socket: CollabSocket | null = null;
+  vi.spyOn(CollabSocket.prototype, "connect").mockImplementation(function (this: CollabSocket) { socket = this; this.onOpen?.(); });
+  vi.spyOn(CollabSocket.prototype, "send").mockResolvedValue(true);
+  const changed = vi.fn();
+  const view = render(<ConversationView conversationId="c" onBack={() => {}} onDraftChange={changed} />);
+  await waitFor(() => expect(socket).not.toBeNull());
+  const welcome: HostFrame = { t: "welcome", proto: 3, header: { type: "session", id: "s", cwd: "/", timestamp: "" }, state: { isStreaming: false, queuedMessageCount: 0, cwd: "/", participants: [] }, agents: [], entryCount: 0 };
+  await act(async () => { socket!.onFrame?.(welcome, 0); });
+  const input = view.container.querySelector("textarea")!;
+  fireEvent.change(input, { target: { value: "PROMPT_B_MUST_BE_RECOVERABLE" } });
+  await act(async () => { fireEvent.submit(input.closest("form")!); });
+  expect(input.value).toBe("");
+  if (hasNewDraft) fireEvent.change(input, { target: { value: "DRAFT_C_STILL_TYPING" } });
+  await act(async () => { socket!.onFrame?.({ t: "error", message: "prompting is unavailable until the host finishes starting up" }, 0); });
+  console.log("AUDIT17 refused newer draft", JSON.stringify({ draft: input.value, recoverablePromptInDOM: view.container.textContent!.includes("PROMPT_B_MUST_BE_RECOVERABLE"), userRows: view.container.querySelectorAll(".message-card.user").length, latestParentDraft: changed.mock.calls.at(-1)?.[0] }));
+  expect(input.value).toBe(hasNewDraft ? "DRAFT_C_STILL_TYPING" : "PROMPT_B_MUST_BE_RECOVERABLE");
+  expect(view.container.textContent).toContain("PROMPT_B_MUST_BE_RECOVERABLE");
+});

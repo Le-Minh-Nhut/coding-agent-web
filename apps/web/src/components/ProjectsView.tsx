@@ -38,6 +38,14 @@ export function ProjectsView({ onSelectProject, onOpenSettings }: ProjectsViewPr
   const [editingProject, setEditingProject] = useState<ProjectWithStats | null>(null);
   const [editLabel, setEditLabel] = useState("");
   const renameOperationRef = useRef<object | null>(null);
+  /**
+   * One rename write per project, coalescing like the favorite flight: two Saves in
+   * the same dialog would otherwise send two PATCHes whose arrival order the server
+   * decides, so a late "First" could overwrite the "Final" the user asked for last.
+   * A Save while a write is open records the newest label; the write chains exactly
+   * one follow-up so the server converges on the last intent regardless of order.
+   */
+  const renameFlightRef = useRef<Map<string, { desired: string; pending: string | null }>>(new Map());
   const createOperationRef = useRef<object | null>(null);
   const [deletingProject, setDeletingProject] = useState<ProjectWithStats | null>(null);
   const deleteOperationRef = useRef<object | null>(null);
@@ -133,19 +141,55 @@ export function ProjectsView({ onSelectProject, onOpenSettings }: ProjectsViewPr
     }
   };
 
-  const handleRenameProject = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!editingProject || !editLabel.trim()) return;
-    // The dialog belongs to one operation. A late response may refresh the list,
-    // but must not close a dialog opened by a different (newer) rename.
-    const token = renameOperationRef.current;
-    const res = await api.updateProject(editingProject.id, { label: editLabel.trim() });
+  /**
+   * Sends one rename write, applies its result, then chains the newest label
+   * intent — the same shape as writeFavorite. Serializing per project means the
+   * server cannot apply a late "First" over the "Final" the user asked for last:
+   * the follow-up is what makes the last Save win regardless of arrival order.
+   * The dialog token is captured at Save, so both this write and its follow-up can
+   * only close the dialog they belong to, never a newer one opened meanwhile.
+   */
+  const writeRename = async (projectId: string, record: { desired: string; pending: string | null }, token: object | null): Promise<void> => {
+    const res = await api.updateProject(projectId, { label: record.desired });
     if (res.ok) {
       if (renameOperationRef.current === token) setEditingProject(null);
       loadProjects();
     } else if (renameOperationRef.current === token) {
       setError(res.error.message);
     }
+    // The newest label differs from what this write asked for: send exactly one
+    // follow-up. Chained even after a failure, so a rejected write never swallows
+    // the label the user expressed while it was open.
+    if (record.pending !== null && record.pending !== record.desired) {
+      const next = { desired: record.pending, pending: null as string | null };
+      renameFlightRef.current.set(projectId, next);
+      await writeRename(projectId, next, token);
+      return;
+    }
+    renameFlightRef.current.delete(projectId);
+  };
+
+  const handleRenameProject = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingProject || !editLabel.trim()) return;
+    // The dialog belongs to one operation. A late response may refresh the list,
+    // but must not close a dialog opened by a different (newer) rename.
+    const token = renameOperationRef.current;
+    const projectId = editingProject.id;
+    const label = editLabel.trim();
+    const flight = renameFlightRef.current.get(projectId);
+    if (flight) {
+      // A write is already open for this project: record the newest label instead
+      // of racing a second PATCH whose arrival order the server decides. The open
+      // write chains exactly one follow-up when it settles.
+      flight.pending = label;
+      return;
+    }
+    const record = { desired: label, pending: null as string | null };
+    renameFlightRef.current.set(projectId, record);
+    // The token is captured at Save: the follow-up reuses it, so it can only close
+    // the dialog this rename belongs to — never a newer one opened meanwhile.
+    void writeRename(projectId, record, token);
   };
 
   const handleDeleteProject = async () => {
