@@ -268,8 +268,21 @@ export function buildApp(deps: AppDependencies): FastifyInstance<HttpServer> {
     // delete. Leaving the rows behind would point at a project that no longer
     // exists, and a re-added folder would then hide their native sessions as
     // "already tracked" with nothing that can open them.
-    const deleted = await deps.store.deleteProject(project.id, verified);
-    if (deleted !== "deleted") return reply.code(409).send(fail("conflict_owner", "This project still has conversations. Stop them before deleting the project."));
+    //
+    // The reservation check travels into that queued write rather than staying in
+    // the observation loop above. `start()` registers its reservation eagerly and
+    // synchronously, before its first `await`, so a launch that begins at any point
+    // during this route's awaits is already visible here — but only a check made
+    // *inside the queued delete* is made after every earlier await of this request,
+    // and looks at a set that no interleaving can mutate between the check and the
+    // commit.
+    const pending = (conversationId: string): boolean => deps.supervisor?.isLaunching?.(conversationId) === true;
+    const deleted = await deps.store.deleteProject(project.id, verified, pending);
+    if (deleted !== "deleted") {
+      return reply.code(409).send(fail("conflict_owner", conversations.some((conversation) => pending(conversation.id))
+        ? "An agent launch is still in flight for this project. Wait for it to settle (or stop the agent) before deleting."
+        : "This project still has conversations. Stop them before deleting the project."));
+    }
     return ok({ deleted: true, filesRemoved: false });
   });
   app.get("/api/projects/:id/sessions", { preHandler: protectedHook }, async (request, reply) => {

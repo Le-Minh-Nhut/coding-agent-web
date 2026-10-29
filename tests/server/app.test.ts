@@ -1,7 +1,7 @@
 import { mkdtemp, mkdir, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { RuntimeError } from "@caw/runtime";
+import { RuntimeError, createSupervisor } from "@caw/runtime";
 import { afterEach, describe, expect, it } from "vitest";
 import { createAuthenticationService } from "../../apps/server/src/auth.js";
 import { createRuntimeSpec, launchWithOverlay } from "../../apps/server/src/server.js";
@@ -23,7 +23,7 @@ async function fixture(options: { paths?: WorkspacePathPolicy; tmuxSocketPath?: 
   const app = buildApp({ config, auth, store, originAllowlist: ["https://workspace.test"], ...options });
   const session = auth.createSession();
   const headers = { cookie: `__Host-caw_session=${session.token}`, origin: "https://workspace.test", "x-caw-csrf": session.csrfToken };
-  return { app, headers, dir, store };
+  return { app, headers, dir, store, config, auth };
 }
 describe("launch overlay failure", () => {
   it("refuses launch when the required overlay cannot be written", async () => {
@@ -764,6 +764,80 @@ describe("project deletion guard", () => {
     expect(refused.statusCode).toBe(409);
     expect(refused.json().error.code).toBe("conflict_owner");
     expect((await store.listConversations(project.id)).map((item) => item.id)).toEqual([conversation.id]);
+    await app.close();
+  });
+
+  it("refuses when a launch reservation appears after the observation but before the delete commits", async () => {
+    // The V16-01 window the loop alone cannot close: the row was observed and
+    // verified stopped, then a start reserved the session while the observation was
+    // still in flight. The row still reads process-free, so only the reservation —
+    // asked inside the queued delete, and again inside its append — can stop the
+    // delete from dropping the only pointer to a starting process.
+    let observed = false;
+    const supervisor = {
+      // False during the observation loop (nothing was launching yet), true the
+      // moment the loop's `observe` has run — exactly the race being pinned.
+      isLaunching: () => observed,
+      observe: async () => { observed = true; return null; },
+    } as unknown as Supervisor;
+    const { app, headers, dir, store } = await fixture({ supervisor });
+    const project = await store.createProject({ path: dir });
+    const conversation = await store.createConversation({ projectId: project.id });
+    await store.updateConversation(conversation.id, { state: "stopped" });
+    const refused = await app.inject({ method: "DELETE", url: `/api/projects/${project.id}`, headers });
+    expect(refused.statusCode).toBe(409);
+    expect(refused.json().error.code).toBe("conflict_owner");
+    expect((await store.listProjects()).map((item) => item.id)).toEqual([project.id]);
+    expect((await store.listConversations(project.id)).map((item) => item.id)).toEqual([conversation.id]);
+    await app.close();
+  });
+
+  it("refuses to delete while a launch reservation is retained, and never auto-kills", async () => {
+    // The retained state from the runtime: a launch created a process it could not
+    // record and could not kill, so the reservation is deliberately held and the
+    // row keeps the tmux identity. That reservation is the only thing marking the
+    // session as taken, so DELETE must refuse — the project stays, the row stays,
+    // and no kill is attempted. Recovery is a restart plus manual accounting, which
+    // this test does not (and must not) perform.
+    const { app: initialApp, headers, store, dir, auth, config } = await fixture();
+    await initialApp.close();
+    const project = await store.createProject({ path: dir });
+    const conversation = await store.createConversation({ projectId: project.id });
+    const killed: string[] = [];
+    const adapters = {
+      listManagedTmux: async () => [], listHosts: async () => [], isSessionLive: async () => false,
+      tmuxServerIdentity: async () => "private:1", getTmux: async () => ({ ok: true as const, session: null }),
+      sessionPathExists: async () => true, findBySessionId: async () => null,
+      isProcessDescendant: async () => false, newestSessionFor: async () => null,
+      launch: async () => ({ id: "$7", name: "pane", alive: true, panePid: 1_000_000_000, serverIdentity: "private:1" }),
+      killTmux: async (id: string) => { killed.push(id); throw new Error("injected guarded kill failure"); },
+    };
+    const supervisor = createSupervisor({ store, adapters: adapters as never, maxActive: 3, publishTimeoutMs: 0 });
+    const app = buildApp({ config, auth, store, supervisor, originAllowlist: ["https://workspace.test"] });
+
+    // The launch records a process it cannot persist (store write fails) and the
+    // undo kill fails, so ownership is retained.
+    const originalUpdate = store.updateConversation.bind(store);
+    let failNext = true;
+    store.updateConversation = async (id, patch) => {
+      if (failNext && patch.tmuxSessionId) { failNext = false; throw new Error("simulated store write failure"); }
+      return originalUpdate(id, patch);
+    };
+    await expect(supervisor.start(conversation.id, { conversationId: conversation.id, name: "caw", cwd: dir }))
+      .rejects.toThrow(/simulated store write failure/);
+    store.updateConversation = originalUpdate;
+
+    expect(supervisor.isLaunching(conversation.id)).toBe(true);
+    expect(killed).toEqual(["$7"]);
+
+    const refused = await app.inject({ method: "DELETE", url: `/api/projects/${project.id}`, headers });
+    expect(refused.statusCode).toBe(409);
+    expect(refused.json().error.code).toBe("conflict_owner");
+    // Both rows survive: the retained reservation keeps the only pointer to the
+    // process alive. And the delete never tried to kill anything itself.
+    expect((await store.listProjects()).map((row) => row.id)).toEqual([project.id]);
+    expect((await store.listConversations(project.id)).map((row) => row.id)).toEqual([conversation.id]);
+    expect(killed).toEqual(["$7"]);
     await app.close();
   });
 
