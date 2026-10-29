@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { api } from "../api.js";
 import type { Conversation, NativeSessionSummary, ProjectWithStats } from "@caw/contracts";
 
@@ -25,35 +25,45 @@ export function ProjectDetailView({
   const [resumingSessionId, setResumingSessionId] = useState<string | null>(null);
   const [attachingSessionId, setAttachingSessionId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const viewGenerationRef = useRef(0);
+  const [conversationsLoaded, setConversationsLoaded] = useState(false);
 
   const loadData = async () => {
+    setError(null);
     setLoading(true);
+    const generation = viewGenerationRef.current;
     const [projRes, convRes, sessRes] = await Promise.all([
       api.listProjects(),
       api.listConversations(projectId),
       api.listNativeSessions(projectId),
     ]);
+    if (generation !== viewGenerationRef.current) return;
     setLoading(false);
 
     if (projRes.ok) {
       const found = projRes.data.find((item) => item.id === projectId);
       if (found) setProject(found);
     }
-    if (convRes.ok) setConversations(convRes.data);
+    if (convRes.ok) { setConversations(convRes.data); setConversationsLoaded(true); }
+    else setError(convRes.error.message || "Could not load conversations.");
     if (sessRes.ok) setNativeSessions(sessRes.data);
     else setError(sessRes.error.message || "Could not verify native session hosts.");
   };
 
   useEffect(() => {
-    loadData();
+    viewGenerationRef.current++;
+    void loadData();
+    return () => { viewGenerationRef.current++; };
   }, [projectId]);
 
   const handleNewChat = async () => {
     if (creating) return;
+    const generation = viewGenerationRef.current;
     setCreating(true);
     setError(null);
 
     const res = await api.createConversation(projectId, "New chat");
+    if (generation !== viewGenerationRef.current) return;
     setCreating(false);
     if (res.ok) onSelectConversation(res.data.id);
     else setError(res.error.message || "Failed to create conversation");
@@ -61,9 +71,11 @@ export function ProjectDetailView({
 
   const handleResume = async (session: NativeSessionSummary) => {
     if (resumingSessionId || session.tracked) return;
+    const generation = viewGenerationRef.current;
     setResumingSessionId(session.sessionId);
     setError(null);
     const result = await api.createConversation(projectId, session.title ?? "Resumed session", session.sessionId);
+    if (generation !== viewGenerationRef.current) return;
     setResumingSessionId(null);
     if (result.ok) onSelectConversation(result.data.id);
     else if (result.error.code === "conflict_owner") {
@@ -73,9 +85,11 @@ export function ProjectDetailView({
 
   const handleAttachLive = async (session: NativeSessionSummary) => {
     if (attachingSessionId !== null || session.tracked || session.live !== true || !hasLiveCollabHost(session)) return;
+    const generation = viewGenerationRef.current;
     setAttachingSessionId(session.sessionId);
     setError(null);
     const result = await api.attachLiveSession(projectId, session.sessionId);
+    if (generation !== viewGenerationRef.current) return;
     setAttachingSessionId(null);
     if (result.ok) onSelectConversation(result.data.id);
     else setError(result.error.message);
@@ -99,7 +113,7 @@ export function ProjectDetailView({
 
       {error && (
         <div role="alert" style={{ color: "var(--danger)", padding: "10px", backgroundColor: "rgba(218,54,51,0.1)", borderRadius: "var(--radius)", marginBottom: "12px" }}>
-          {error}
+          {error} <button type="button" onClick={() => void loadData()} disabled={loading}>Retry</button>
         </div>
       )}
 
@@ -112,6 +126,8 @@ export function ProjectDetailView({
 
       {loading ? (
         <div style={{ padding: "24px", textAlign: "center", color: "var(--text-muted)" }}>Loading…</div>
+      ) : !conversationsLoaded ? (
+        <div style={{ color: "var(--danger)" }}>Conversation list unavailable. <button type="button" onClick={() => void loadData()} disabled={loading}>Retry</button></div>
       ) : conversations.length === 0 ? (
         <div className="card" style={{ textAlign: "center", padding: "30px 16px" }}>
           <p style={{ color: "var(--text-muted)", marginBottom: "12px" }}>No conversations yet.</p>

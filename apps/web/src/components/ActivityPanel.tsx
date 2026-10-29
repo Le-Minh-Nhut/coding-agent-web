@@ -48,33 +48,39 @@ export function ActivityPanel({
   const [nextAfter, setNextAfter] = useState<number | null>(initialNextAfter);
   const [loading, setLoading] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const loadEvents = async () => {
+    if (!conversationId) return;
+    setLoading(true);
+    setError(null);
+    const res = await api.getConversationEvents(conversationId);
+    setLoading(false);
+    if (res.ok) {
+      setEvents(res.data.events);
+      setNextAfter(res.data.nextAfter);
+    } else setError(res.error.message || "Could not load activity.");
+  };
 
   useEffect(() => {
     if (initialEvents !== undefined) {
       setEvents(initialEvents);
+      setNextAfter(initialNextAfter);
       return;
     }
-    if (!conversationId) return;
-
-    setLoading(true);
-    api.getConversationEvents(conversationId).then((res) => {
-      setLoading(false);
-      if (res.ok) {
-        setEvents(res.data.events);
-        setNextAfter(res.data.nextAfter);
-      }
-    });
+    void loadEvents();
   }, [conversationId, initialEvents]);
 
   const handleLoadMore = async () => {
     if (!conversationId || nextAfter === null || loadingMore) return;
     setLoadingMore(true);
+    setError(null);
     const res = await api.getConversationEvents(conversationId, { after: nextAfter });
     setLoadingMore(false);
     if (res.ok) {
       setEvents((prev) => [...prev, ...res.data.events]);
       setNextAfter(res.data.nextAfter);
-    }
+    } else setError(res.error.message || "Could not load more activity.");
   };
 
   const sortedEvents = [...events].sort((a, b) => b.seq - a.seq);
@@ -123,13 +129,14 @@ export function ActivityPanel({
         </div>
 
         <div style={{ overflowY: "auto", flex: 1, paddingRight: "4px" }}>
+          {error && <div role="alert" style={{ padding: "10px", color: "var(--danger)" }}>{error} <button type="button" onClick={() => void loadEvents()} disabled={loading}>Retry</button></div>}
           {loading && events.length === 0 && (
             <div role="status" style={{ padding: "20px 0", textAlign: "center", color: "var(--text-muted)" }}>
               Loading activity…
             </div>
           )}
 
-          {!loading && events.length === 0 && (
+          {!loading && !error && events.length === 0 && (
             <div role="status" style={{ padding: "20px 0", textAlign: "center", color: "var(--text-muted)" }}>
               No activity recorded for this conversation yet.
             </div>

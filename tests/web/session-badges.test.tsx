@@ -118,7 +118,7 @@ describe("native session liveness badge", () => {
     vi.mocked(api.listConversations).mockResolvedValue({ ok: true, data: [] } as never);
     vi.mocked(api.listNativeSessions).mockResolvedValue({ ok: false, error: { code: "internal", message: "Could not read Collab host registry." } } as never);
     await act(async () => { render(<ProjectDetailView projectId="p1" onBack={() => {}} onSelectConversation={() => {}} />); });
-    expect(screen.getByRole("alert").textContent).toBe("Could not read Collab host registry.");
+    expect(screen.getByRole("alert").textContent).toMatch(/Could not read Collab host registry\./);
   });
 
   it("surfaces a conflict_owner response if writer appears after listing", async () => {
