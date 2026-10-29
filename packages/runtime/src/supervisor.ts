@@ -354,6 +354,11 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
     if (!conversation) return null;
     const observations = await observationsFor(conversation);
     const verdict: StateVerdict = evaluateState(observations);
+    // A launch that was refused never started a process, so there is nothing to
+    // observe that would make it "starting" again: `evaluateState`'s fallback for a
+    // never-launched row would resurrect the refusal as a ghost launch and discard
+    // the reason. Keep the recorded failure as it stands.
+    if (verdict.state === "starting" && conversation.state === "error" && !observations.everLaunched) return conversation;
 
     // Compute the patch once and use those same values for the comparison and the
     // write. Comparing a normalized patch against the row and then writing a

@@ -790,13 +790,20 @@ describe("project deletion guard", () => {
 });
 
 describe("refused conversation creation", () => {
-  it("removes the row when the launch was refused before any process existed", async () => {
+  it("keeps the row marked as refused when the launch was refused before any process existed", async () => {
+    // The row is the chat the user just created. Deleting it loses the only handle
+    // they have to see the reason and retry; leaving it at `starting` would claim a
+    // launch forever. It is kept with the refusal recorded and no process identity.
     const supervisor = { start: async () => { throw new RuntimeError("conflict_limit", "No active slots"); } } as unknown as Supervisor;
     const { app, headers, dir, store } = await fixture({ supervisor, runtimeSpec: () => ({} as RuntimeLaunchSpec) });
     const project = await store.createProject({ path: dir });
     const response = await app.inject({ method: "POST", url: `/api/projects/${project.id}/conversations`, headers, payload: {} });
     expect(response.statusCode).toBe(409);
-    expect(await store.listConversations(project.id)).toEqual([]);
+    const rows = await store.listConversations(project.id);
+    expect(rows.map((row) => row.state)).toEqual(["error"]);
+    expect(rows[0]?.statusDetail).toBe("Agent launch was refused: No active slots");
+    expect(rows[0]).toMatchObject({ tmuxSessionId: null, tmuxPanePid: null });
+    expect(rows[0]?.state).not.toBe("starting");
     await app.close();
   });
 

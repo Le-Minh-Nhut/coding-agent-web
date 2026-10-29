@@ -1976,4 +1976,18 @@ describe("supervisor.refresh", () => {
     expect(conversation?.state).not.toBe("stopped");
     expect(conversation?.statusDetail).toMatch(/tmux session list could not be read/i);
   });
+
+  it("does not resurrect a refused launch as a ghost starting row", async () => {
+    // A launch refused before any process existed leaves the row at `error` with the
+    // refusal recorded. Nothing has ever launched for it, so no observation can make
+    // it "starting"; the never-launched fallback must not turn the refusal into a
+    // launch claim that overwrites the reason.
+    const world = makeWorld();
+    world.seed({ id: "c1", state: "error", statusDetail: "Agent launch was refused: No active slots" });
+    const supervisor = createSupervisor({ store: world.store, adapters: world.adapters, clock: instantClock, maxActive: 3 });
+
+    const conversation = await supervisor.refresh("c1");
+    expect(conversation?.state).toBe("error");
+    expect(conversation?.statusDetail).toBe("Agent launch was refused: No active slots");
+  });
 });

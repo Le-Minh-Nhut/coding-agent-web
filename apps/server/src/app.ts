@@ -382,18 +382,26 @@ export function buildApp(deps: AppDependencies): FastifyInstance<HttpServer> {
       const spec = await deps.runtimeSpec(conversation, { resumeSessionId: body.data.resumeSessionId });
       return reply.code(201).send(ok(await deps.supervisor.start(conversation.id, spec)));
     } catch (error) {
-      // A row left at `starting` with no process would sit in every listing as an
-      // agent that is launching forever. But the launch may equally have created a
-      // process it could not record — that is exactly what `agent.launch_unrecorded`
-      // means, and deleting such a row would lose the only pointer to a live writer.
-      // So the row is dropped only when nothing records a process against it *and*
-      // no launch is still in flight for it.
-      const started = await deps.store.getConversation(conversation.id);
-      if (started && started.tmuxSessionId === null && !deps.supervisor?.isLaunching?.(conversation.id)) {
-        await deps.store.removeConversation(conversation.id).catch(() => false);
-      }
       const code = runtimeErrorCode(error);
-      return reply.code(code === "internal" ? 500 : code === "not_found" ? 404 : 409).send(fail(code, error instanceof Error ? String(redactLogValue(error.message)) : "Agent launch failed."));
+      const message = error instanceof Error ? String(redactLogValue(error.message)) : "Agent launch failed.";
+      // A row left at `starting` with no process would sit in every listing as an
+      // agent that is launching forever. Deleting it is the other wrong answer: the
+      // row is the chat the user just created, and the only handle they have to
+      // retry from, so a refused launch must not silently lose it. The row is kept
+      // and marked for what happened instead — never left claiming to launch.
+      //
+      // Untouched: a launch that may have created a writer it could not record
+      // (`agent.launch_unrecorded`) or one still reserving the session. Those rows
+      // already carry the process identity, or the reservation, that makes them the
+      // only pointer to something live.
+      const started = await deps.store.getConversation(conversation.id);
+      if (started && started.state === "starting" && started.tmuxSessionId === null && !deps.supervisor?.isLaunching?.(conversation.id)) {
+        await deps.store.updateConversation(conversation.id, {
+          state: "error",
+          statusDetail: `Agent launch was refused: ${message}`,
+        }).catch(() => null);
+      }
+      return reply.code(code === "internal" ? 500 : code === "not_found" ? 404 : 409).send(fail(code, message));
     }
   });
   // SEC-7: A top-level cross-site navigation to GET /api/conversations/:id with an

@@ -86,6 +86,11 @@ it("V15 launch failure: a refused creation must not remain falsely starting",asy
   const rows=await store.listConversations(p.id);
   console.log("AUDIT15 failed creation",JSON.stringify({status:response.statusCode,rows:rows.map(({state,nativeSessionId,tmuxSessionId})=>({state,nativeSessionId,tmuxSessionId}))}));
   expect(response.statusCode).toBe(409);
+  // The row survives so the user keeps the chat and its refusal reason; what must
+  // never survive is the claim that a launch is in progress.
+  expect(rows).toHaveLength(1);
   expect(rows.every(row=>row.state!=="starting")).toBe(true);
+  expect(rows[0]?.state).toBe("error");
+  expect(rows[0]?.statusDetail).toMatch(/refused/i);
  }finally{await app.close();}
 });
