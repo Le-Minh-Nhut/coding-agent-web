@@ -781,7 +781,9 @@ describe("supervisor.start", () => {
     const originalLaunch = world.adapters.launch;
     world.adapters.launch = async (spec) => {
       const session = await originalLaunch(spec);
-      // The process dies before it ever hosts a room.
+      // The process dies before it ever hosts a room. The pane PID is pinned out of
+      // reach so "exited" is a fact rather than an accident of which PIDs exist.
+      session.panePid = 1_000_000_000;
       world.tmuxSessions.splice(0, world.tmuxSessions.length);
       return session;
     };
@@ -789,6 +791,35 @@ describe("supervisor.start", () => {
     const result = await supervisor.start("c1", { conversationId: "c1", name: "caw-c1", cwd: "/tmp/project" });
     expect(result.state).toBe("error");
     expect(world.events.map((e) => e.type)).toContain("agent.exited");
+  });
+
+  it("keeps waiting for a launch whose pane is missing while its PID is alive", async () => {
+    // The session list loses our `$N` right after launch, but the pane process the
+    // launch recorded is this very process: that is an unverified observation, not
+    // an exit, so the startup must not claim `error` or `agent.exited`.
+    const world = makeWorld();
+    world.seed({ id: "c1" });
+    world.adapters.launch = async (spec) => {
+      world.launches.push(spec);
+      const session: RuntimeTmuxSession = { id: "$1", name: spec.name, alive: true, panePid: process.pid, serverIdentity: "private-socket:1" };
+      world.tmuxSessions.push(session);
+      world.tmuxSessions.splice(0, world.tmuxSessions.length);
+      return session;
+    };
+    let now = 0;
+    const supervisor = createSupervisor({
+      store: world.store,
+      adapters: world.adapters,
+      clock: { now: () => (now += 1_000), sleep: async () => {} },
+      maxActive: 3,
+      publishTimeoutMs: 5_000,
+      publishPollMs: 0,
+    });
+
+    const result = await supervisor.start("c1", { conversationId: "c1", name: "caw-c1", cwd: "/tmp/project" });
+
+    expect(result.state).not.toBe("error");
+    expect(world.events.some((e) => e.type === "agent.exited")).toBe(false);
   });
 
   it("adopts only the room it launched, never a stranger's room in the same directory", async () => {
@@ -1455,6 +1486,30 @@ describe("supervisor.stop", () => {
     await expect(supervisor.stop("c1")).rejects.toMatchObject({ code: "agent_not_running" });
   });
 
+  it("refuses to settle a stop when the pane is missing but its recorded PID lives", async () => {
+    const world = makeWorld();
+    world.seed({ id: "c1", state: "running", nativeSessionId: "native-c1", tmuxSessionId: "$4", tmuxSessionName: "caw-c1", tmuxServerIdentity: "private-socket:1", tmuxPanePid: process.pid });
+    // The session list does not contain `$4` any more, but its recorded pane PID is
+    // this very process. Absence of the session is not proof of exit.
+    const supervisor = createSupervisor({ store: world.store, adapters: world.adapters, clock: instantClock, maxActive: 3 });
+
+    await expect(supervisor.stop("c1")).rejects.toMatchObject({ code: "agent_not_running" });
+    expect(world.kills).toHaveLength(0);
+    expect(world.events.map((event) => event.type)).not.toContain("agent.stopped");
+    expect((await world.store.getConversation("c1"))?.state).not.toBe("stopped");
+  });
+
+  it("settles a stop when the pane is missing and its recorded PID is confirmed gone", async () => {
+    const world = makeWorld();
+    world.seed({ id: "c1", state: "running", nativeSessionId: "native-c1", tmuxSessionId: "$4", tmuxSessionName: "caw-c1", tmuxServerIdentity: "private-socket:1", tmuxPanePid: 1_000_000_000 });
+    const supervisor = createSupervisor({ store: world.store, adapters: world.adapters, clock: instantClock, maxActive: 3 });
+
+    const result = await supervisor.stop("c1");
+
+    expect(result.state).toBe("stopped");
+    expect(world.events.map((event) => event.type)).toContain("agent.stopped");
+  });
+
   it("reports a stop that does not complete as still stopping, and says so", async () => {
     const world = makeWorld();
     world.seed({ id: "c1", state: "running", nativeSessionId: "native-c1", tmuxSessionId: "$5", tmuxSessionName: "caw-c1", tmuxPanePid: 900, tmuxServerIdentity: "private-socket:1" });
@@ -1723,10 +1778,147 @@ describe("supervisor.refresh", () => {
     expect(world.events).toHaveLength(0);
   });
 
+  it("keeps a live pane's ownership unknown when no host descends from it", async () => {
+    // The pane exists under us, but the only registry row for the recorded native
+    // session belongs to a process that is not behind that pane. Labelling it
+    // `managed` would pair two different processes in the UI.
+    const world = makeWorld();
+    world.seed({ id: "c1", nativeSessionId: "native-A", state: "running", tmuxSessionId: "$1", tmuxSessionName: "caw-c1", tmuxPanePid: 1002, tmuxServerIdentity: "private-socket:1" });
+    world.tmuxSessions.push({ id: "$1", name: "caw-c1", alive: true, panePid: 1002, serverIdentity: "private-socket:1" });
+    world.hosts.push(hostRow({ pid: 9000, sessionId: "native-A", instanceId: "external-A", generation: 2 }));
+    const supervisor = createSupervisor({ store: world.store, adapters: world.adapters, clock: instantClock, maxActive: 3 });
+
+    const refreshed = await supervisor.refresh("c1");
+
+    expect(refreshed?.state).toBe("unknown");
+    expect(refreshed?.ownership).toBe("managed");
+    expect(refreshed?.hostInstanceId).toBeNull();
+  });
+
+  it("persists a model the host reports without touching the next-launch preference", async () => {
+    const world = makeWorld();
+    world.seed({ id: "c1", nativeSessionId: "native-A", state: "idle", model: "old-model", modelPreference: "chosen-model", statusDetail: "No turn in flight.", tmuxSessionId: "$1", tmuxSessionName: "caw-c1", tmuxPanePid: 1002, tmuxServerIdentity: "private-socket:1" });
+    world.tmuxSessions.push({ id: "$1", name: "caw-c1", alive: true, panePid: 1002, serverIdentity: "private-socket:1" });
+    world.hosts.push(hostRow({ pid: 1002, sessionId: "native-A", model: "new-model" }));
+    const supervisor = createSupervisor({ store: world.store, adapters: world.adapters, clock: instantClock, maxActive: 3 });
+
+    const refreshed = await supervisor.refresh("c1");
+
+    expect(refreshed?.model).toBe("new-model");
+    expect(refreshed?.modelPreference).toBe("chosen-model");
+  });
+
+  it("does not rewrite the row when an optional host generation is absent", async () => {
+    const world = makeWorld();
+    world.seed({ id: "c1", nativeSessionId: "native-A", state: "idle", hostGeneration: 3, hostInstanceId: "host-A", statusDetail: "No turn in flight.", tmuxSessionId: "$1", tmuxSessionName: "caw-c1", tmuxPanePid: 1002, tmuxServerIdentity: "private-socket:1" });
+    world.tmuxSessions.push({ id: "$1", name: "caw-c1", alive: true, panePid: 1002, serverIdentity: "private-socket:1" });
+    world.hosts.push(hostRow({ pid: 1002, sessionId: "native-A", instanceId: "host-A", generation: null }));
+    const supervisor = createSupervisor({ store: world.store, adapters: world.adapters, clock: instantClock, maxActive: 3 });
+
+    await supervisor.refresh("c1");
+    const first = await world.store.getConversation("c1");
+    await supervisor.refresh("c1");
+    const second = await world.store.getConversation("c1");
+
+    expect(second?.updatedAt).toBe(first?.updatedAt);
+    expect(second?.hostGeneration).toBe(3);
+  });
+
   it("returns null for an unknown conversation instead of inventing one", async () => {
     const world = makeWorld();
     const supervisor = createSupervisor({ store: world.store, adapters: world.adapters, clock: instantClock, maxActive: 3 });
     expect(await supervisor.refresh("nope")).toBeNull();
+  });
+
+  it("keeps a matched pane managed when an unrelated host row has no PID", async () => {
+    // A row without a PID cannot prove anything either way. Letting it be blanket
+    // uncertainty blanked ownership for *every* live pane, even one with a clean
+    // match sitting right next to it.
+    const world = makeWorld();
+    world.seed({ id: "c1", nativeSessionId: "native-A", state: "running", tmuxSessionId: "$1", tmuxSessionName: "caw-c1", tmuxPanePid: 1002, tmuxServerIdentity: "private-socket:1" });
+    world.tmuxSessions.push({ id: "$1", name: "caw-c1", alive: true, panePid: 1002, serverIdentity: "private-socket:1" });
+    world.hosts.push(hostRow({ pid: 1002, sessionId: "native-A", instanceId: "host-A" }));
+    world.hosts.push(hostRow({ pid: null, sessionId: "other-native", instanceId: "unknown-pid-host" }));
+    const supervisor = createSupervisor({ store: world.store, adapters: world.adapters, clock: instantClock, maxActive: 3 });
+
+    const refreshed = await supervisor.refresh("c1");
+
+    expect(refreshed?.state).toBe("idle");
+    expect(refreshed?.ownership).toBe("managed");
+    expect(refreshed?.hostInstanceId).toBe("host-A");
+  });
+
+  it("backfills the pane PID a failed post-launch listing never recorded", async () => {
+    // The launch returned a session whose pane PID was null, and no writer ever
+    // filled it in. Without a PID the row cannot be stopped (identity incomplete)
+    // or deleted (unknown), forever. The enumeration that qualified the session by
+    // id and server lifetime is the missing PID.
+    const world = makeWorld();
+    world.seed({ id: "c1", nativeSessionId: "native-A", state: "unknown", tmuxSessionId: "$1", tmuxSessionName: "caw-c1", tmuxPanePid: null, tmuxServerIdentity: "private-socket:1" });
+    world.tmuxSessions.push({ id: "$1", name: "caw-c1", alive: true, panePid: 1002, serverIdentity: "private-socket:1" });
+    world.hosts.push(hostRow({ pid: 1002, sessionId: "native-A", instanceId: "host-A" }));
+    const supervisor = createSupervisor({ store: world.store, adapters: world.adapters, clock: instantClock, maxActive: 3 });
+
+    const refreshed = await supervisor.refresh("c1");
+
+    expect(refreshed?.tmuxPanePid).toBe(1002);
+    expect(refreshed?.state).toBe("idle");
+    // The stop gate can now verify ownership instead of refusing on a missing PID.
+    const stopped = await supervisor.stop("c1");
+    expect(stopped.state).toBe("stopped");
+    expect(world.kills).toEqual(["$1"]);
+  });
+
+  it("takes a new host's generation with its instance instead of pairing the old one", async () => {
+    const world = makeWorld();
+    world.seed({ id: "c1", nativeSessionId: "native-A", state: "idle", statusDetail: "No turn in flight.", hostInstanceId: "host-A", hostGeneration: 3, tmuxSessionId: "$1", tmuxSessionName: "caw-c1", tmuxPanePid: 1002, tmuxServerIdentity: "private-socket:1" });
+    world.tmuxSessions.push({ id: "$1", name: "caw-c1", alive: true, panePid: 1002, serverIdentity: "private-socket:1" });
+    world.hosts.push(hostRow({ pid: 1002, sessionId: "native-A", instanceId: "host-B", generation: null }));
+    const supervisor = createSupervisor({ store: world.store, adapters: world.adapters, clock: instantClock, maxActive: 3 });
+
+    const refreshed = await supervisor.refresh("c1");
+
+    // host-A's generation 3 belongs to host-A. Carrying it onto host-B would claim
+    // a pair that never existed.
+    expect(refreshed?.hostInstanceId).toBe("host-B");
+    expect(refreshed?.hostGeneration).toBeNull();
+  });
+
+  it("drops stale host identity when no host matches the live pane", async () => {
+    const world = makeWorld();
+    world.seed({ id: "c1", nativeSessionId: "native-A", state: "running", hostInstanceId: "old-host", hostGeneration: 3, tmuxSessionId: "$1", tmuxSessionName: "caw-c1", tmuxPanePid: 1002, tmuxServerIdentity: "private-socket:1" });
+    world.tmuxSessions.push({ id: "$1", name: "caw-c1", alive: true, panePid: 1002, serverIdentity: "private-socket:1" });
+    world.hosts.push(hostRow({ pid: 9000, sessionId: "native-A", instanceId: "external-A", generation: 2 }));
+    const supervisor = createSupervisor({ store: world.store, adapters: world.adapters, clock: instantClock, maxActive: 3 });
+
+    const refreshed = await supervisor.refresh("c1");
+
+    // Nothing matched this pane, so no room can be claimed to be serving it.
+    expect(refreshed?.hostInstanceId).toBeNull();
+    expect(refreshed?.hostGeneration).toBeNull();
+  });
+
+  it("reports a launch as in flight until its process identity is recorded", async () => {
+    const world = makeWorld();
+    world.seed({ id: "c1" });
+    let supervisor!: ReturnType<typeof createSupervisor>;
+    let inFlightWhenSpawning = false;
+    world.adapters.launch = async (spec) => {
+      world.launches.push(spec);
+      // The process is being created right now: the row still says nothing is
+      // running, so the reservation is the only signal that a launch is in flight.
+      inFlightWhenSpawning = supervisor.isLaunching("c1");
+      throw new Error("simulated launch failure");
+    };
+    supervisor = createSupervisor({ store: world.store, adapters: world.adapters, clock: instantClock, maxActive: 3, publishTimeoutMs: 0, publishPollMs: 0 });
+
+    expect(supervisor.isLaunching("c1")).toBe(false);
+    await expect(supervisor.start("c1", { conversationId: "c1", name: "caw-c1", cwd: "/tmp/project" })).rejects.toThrow(/simulated launch failure/);
+
+    expect(inFlightWhenSpawning).toBe(true);
+    expect(world.launches).toHaveLength(1);
+    // Released once the launch settled, so the row can be cleaned up again.
+    expect(supervisor.isLaunching("c1")).toBe(false);
   });
 
   it("keeps the state unknown, not error, when the journal probe fails", async () => {

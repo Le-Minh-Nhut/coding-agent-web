@@ -61,6 +61,13 @@ export interface Supervisor {
   reconcile(): Promise<ReconcileReport>;
   /** How many agents are confirmed running, and whether that could be determined. */
   activeCount(): Promise<{ count: number; known: boolean; reason: string | null }>;
+  /**
+   * True while a launch for this conversation is inside the critical section —
+   * including the window after the process exists but before its tmux identity is
+   * recorded. Callers that would otherwise delete or overwrite the row must wait
+   * or refuse rather than drop the only pointer to a process that may be starting.
+   */
+  isLaunching(conversationId: string): boolean;
   /** The observations behind a state verdict, for diagnostics and tests. */
   observe(conversationId: string): Promise<Observations | null>;
 }
@@ -210,12 +217,12 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
     if (panePid === null) return { host: null, detail: "The published host could not be positively matched because the managed tmux pane PID was not recorded.", uncertain: true };
     const matched: RuntimeHost[] = [];
     let lineageUnknown = false;
-    let missingHostPid = false;
     for (const candidate of hosts) {
-      if (candidate.pid === null) {
-        missingHostPid = true;
-        continue;
-      }
+      // A row with no PID cannot prove anything, positively or negatively, so it is
+      // simply not a participant in lineage matching. Treating it as blanket
+      // uncertainty let one unrelated PID-less row blank ownership for every
+      // conversation, including panes with a perfectly good match.
+      if (candidate.pid === null) continue;
       let descendant: Tri;
       try {
         descendant = await options.adapters.isProcessDescendant(candidate.pid, panePid);
@@ -225,12 +232,10 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
       if (descendant === true) matched.push(candidate);
       else if (descendant === "unknown") lineageUnknown = true;
     }
-    if (lineageUnknown || missingHostPid) {
+    if (lineageUnknown) {
       return {
         host: null,
-        detail: missingHostPid
-          ? "A published host has no PID, so its lineage cannot be verified."
-          : "Host process lineage could not be determined from the managed tmux pane.",
+        detail: "Host process lineage could not be determined from the managed tmux pane.",
         uncertain: true,
       };
     }
@@ -287,16 +292,28 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
     let host: RuntimeHost | null = null;
     let hostMatchReason: string | null = null;
     let recoveredHost = false;
-    if (hosts.ok && conversation.nativeSessionId) {
-      host = hosts.rows.find((candidate) => candidate.sessionId === conversation.nativeSessionId) ?? null;
-      recoveredHost = Boolean(host);
-    }
-    if (hosts.ok && !host && tmux?.alive) {
-      const panePid = conversation.tmuxPanePid !== null && conversation.tmuxPanePid === tmux.panePid ? conversation.tmuxPanePid : null;
+    if (hosts.ok && tmux?.alive) {
+      // A live pane of ours is the only thing that may confer `managed`. A registry
+      // row that merely shares the recorded native session id proves nothing about
+      // which process is behind *our* pane: the owner may have switched that pane to
+      // another session and resumed this id in an external TUI. So when we hold a
+      // live pane, ownership goes through the same lineage check the stop gate uses,
+      // and an unverifiable pairing stays unknown instead of being labelled managed.
+      // The recorded pane PID, or the enumerated one when the launch's follow-up
+      // listing failed and never recorded it. `findManagedTmux` already qualified the
+      // session by id *and* server lifetime, so this is the same pane, not a guess.
+      const panePid = conversation.tmuxPanePid === null
+        ? tmux.panePid
+        : conversation.tmuxPanePid === tmux.panePid ? conversation.tmuxPanePid : null;
       const match = await matchPublishedHost(hosts.rows, panePid, conversation.nativeSessionId);
       host = match.host;
       hostMatchReason = match.detail;
       recoveredHost = Boolean(match.host);
+    } else if (hosts.ok && conversation.nativeSessionId) {
+      // No live pane of ours: the row can only describe a process we do not
+      // manage, which `evaluateState` reports as external.
+      host = hosts.rows.find((candidate) => candidate.sessionId === conversation.nativeSessionId) ?? null;
+      recoveredHost = Boolean(host);
     }
     return {
       tmux,
@@ -338,27 +355,49 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
     const observations = await observationsFor(conversation);
     const verdict: StateVerdict = evaluateState(observations);
 
-    // Only write when something changed: the store is append-only, and a log that
-    // grows on every poll is a log nobody can read.
+    // Compute the patch once and use those same values for the comparison and the
+    // write. Comparing a normalized patch against the row and then writing a
+    // differently-normalized one is how a poll loop appends an identical row on
+    // every read: the store is append-only, so a log that grows on every poll is
+    // a log nobody can read.
     const host = observations.recoveredHost ? observations.host : null;
-    const unchanged =
-      conversation.state === verdict.state &&
-      conversation.ownership === verdict.ownership &&
-      conversation.statusDetail === verdict.detail &&
-      (!host || (conversation.nativeSessionId === host.sessionId && conversation.hostInstanceId === host.instanceId && conversation.hostGeneration === host.generation));
-    if (unchanged) return conversation;
-
-    return options.store.updateConversation(conversationId, {
+    const patch: Partial<Conversation> = {
       state: verdict.state,
       ownership: verdict.ownership,
       statusDetail: verdict.detail,
-      ...(host ? {
-        nativeSessionId: host.sessionId,
-        hostInstanceId: host.instanceId,
-        hostGeneration: host.generation ?? conversation.hostGeneration,
-        model: host.model ?? conversation.model,
-      } : {}),
-    });
+    };
+    const pane = observations.tmux?.alive ? observations.tmux : null;
+    if (pane?.panePid !== null && pane?.panePid !== undefined && conversation.tmuxPanePid === null) {
+      // The launch's follow-up tmux listing failed, so the row never got a PID and
+      // no writer will ever backfill it. The session was qualified by id *and*
+      // server identity, so the live enumeration is the pane PID we are missing.
+      // Without this the row is permanently unstoppable (identity incomplete) and
+      // permanently unknown.
+      patch.tmuxPanePid = pane.panePid;
+    }
+    if (host) {
+      patch.nativeSessionId = host.sessionId;
+      patch.hostInstanceId = host.instanceId;
+      // A generation belongs to one host instance. For the same instance an absent
+      // generation is not evidence of a rotation, so the recorded value stands; a
+      // *different* instance brings its own generation, `null` included, because
+      // carrying the old number over would pair two identities that never coexisted.
+      patch.hostGeneration = host.instanceId === conversation.hostInstanceId
+        ? host.generation ?? conversation.hostGeneration
+        : host.generation;
+      // The model the host reports is what is running now; `modelPreference` is the
+      // next-launch choice and is never written here.
+      patch.model = host.model ?? conversation.model;
+    } else if (pane) {
+      // A live pane with no attributable host: keeping the previous instance would
+      // claim a room is serving this process when nothing matched it.
+      patch.hostInstanceId = null;
+      patch.hostGeneration = null;
+    }
+    const changed = (Object.keys(patch) as Array<keyof Conversation>).some((key) => conversation[key] !== patch[key]);
+    if (!changed) return conversation;
+
+    return options.store.updateConversation(conversationId, patch);
   }
 
   /** Record the runtime facts we can only learn from the machine. */
@@ -609,7 +648,12 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
 
       const still = managed.find((session) => session.id === launched.id && session.serverIdentity === launched.serverIdentity);
       if (!still || !still.alive) {
-        await options.store.recordEvent(conversationId, "agent.exited", { duringStartup: true });
+        // Not seeing the session is not the same as the process having exited. The
+        // pane PID the launch recorded is the corroboration; while it lives (or its
+        // liveness cannot be established) this is an unverified observation and the
+        // loop keeps waiting rather than claiming an exit we did not observe.
+        if (processAlive(launched.panePid) !== false) continue;
+        await options.store.recordEvent(conversationId, "agent.exited", { duringStartup: true, tmuxSessionId: launched.id });
         return (
           (await options.store.updateConversation(conversationId, {
             state: "error",
@@ -683,6 +727,10 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
     if (serverIdentity === "unknown") return refuse("The tmux server identity could not be verified, so this process cannot be safely stopped.");
     if (serverIdentity === null) {
       if (processAlive(conversation.tmuxPanePid) === false) {
+        // Accepted: ESRCH means no process holds the recorded pane PID any more, so
+        // there is no writer on that pane to protect. A renamed-but-live session runs
+        // under a *different* PID; a different PID behind this one is PID reuse, which
+        // can only delay a stop, never fabricate one.
         await options.store.recordEvent(conversationId, "agent.stopped", { tmuxSessionId: conversation.tmuxSessionId, alreadyGone: true });
         return (await options.store.updateConversation(conversationId, { state: "stopped", statusDetail: "Stopped." })) ?? conversation;
       }
@@ -692,6 +740,12 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
     const pane = await options.adapters.getTmux(conversation.tmuxSessionId);
     if (!pane.ok) return refuse("The recorded tmux pane could not be verified, so this process cannot be safely stopped.");
     if (!pane.session || !pane.session.alive) {
+      // A missing pane is not proof its process exited: the session may have been
+      // renamed away, or the enumeration may be racing a restart. The recorded pane
+      // PID is the corroboration, exactly as in the polling loop below.
+      if (processAlive(conversation.tmuxPanePid) !== false) {
+        return refuse("The recorded tmux pane is not verifiably gone; its process may still be running, so ownership cannot be confirmed.");
+      }
       await options.store.recordEvent(conversationId, "agent.stopped", { tmuxSessionId: conversation.tmuxSessionId, alreadyGone: true });
       return (await options.store.updateConversation(conversationId, { state: "stopped", statusDetail: "Stopped." })) ?? conversation;
     }
@@ -852,5 +906,15 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
     return report;
   }
 
-  return { refresh, start, stop, reconcile, activeCount, observe };
+  /**
+   * A launch is "in flight" for a conversation from the moment it holds a
+   * reservation until the process identity is recorded (or the reservation is
+   * released). The reservation set is the only place that covers the window where
+   * the process exists but `tmuxSessionId` is still null.
+   */
+  function isLaunching(conversationId: string): boolean {
+    return launchReservations.has(`conversation:${conversationId}`);
+  }
+
+  return { refresh, start, stop, reconcile, activeCount, isLaunching, observe };
 }
