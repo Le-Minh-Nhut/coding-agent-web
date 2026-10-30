@@ -118,16 +118,22 @@ export class DefaultCollabRegistryService implements CollabRegistryService {
         : path.join(homedir(), ".omp", "run", "collab-hosts"));
   }
 
-  async #checkRegistryReadable(): Promise<void> {
+  /**
+   * Returns whether the registry directory exists. A missing directory is a
+   * fact (`false`); a directory that exists but cannot be read throws, because
+   * "I could not look" must never collapse into "there are no hosts".
+   */
+  async #checkRegistryReadable(): Promise<boolean> {
     try {
       await access(this.#registryDir, constants.R_OK);
+      return true;
     } catch (err: unknown) {
       const code = err && typeof err === "object" && "code" in err ? err.code : null;
       // ENOENT is the only failure that is itself a fact: no registry directory
       // exists yet, so no host has ever published. Anything else — EACCES, EPERM,
       // ENOTDIR, ELOOP, EIO — means we could not look, and reporting "no hosts"
       // there is how a live room gets written off as absent.
-      if (code === "ENOENT") return;
+      if (code === "ENOENT") return false;
       throw new RegistryUnreadableError(
         `Collab registry directory could not be read: ${this.#registryDir} (${code ?? (err instanceof Error ? err.message : String(err))})`,
       );
@@ -135,7 +141,10 @@ export class DefaultCollabRegistryService implements CollabRegistryService {
   }
 
   async list(): Promise<CollabHost[]> {
-    await this.#checkRegistryReadable();
+    // No directory is itself the proof of zero hosts, so the empty list is a
+    // confirmed answer and no shell-out is needed. It also keeps a machine with
+    // no `omp` (CI runner, fresh install) answering honestly instead of 500.
+    if (!(await this.#checkRegistryReadable())) return [];
 
     let stdout: string;
     try {

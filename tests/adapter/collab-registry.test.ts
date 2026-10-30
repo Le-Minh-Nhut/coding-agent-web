@@ -278,11 +278,16 @@ describe("collab registry readability failures", () => {
     await rm(root, { recursive: true, force: true });
   });
 
-  it("accepts a genuinely absent registry directory as no hosts", async () => {
-    // ENOENT is the one failure that means "nothing has ever run here".
-    const service = new DefaultCollabRegistryService({ ompBinary: stub, registryDir: path.join(root, "never-existed") });
-    const hosts = await service.list();
-    expect(hosts).toHaveLength(1);
+  it("accepts a genuinely absent registry directory as no hosts, without shelling out", async () => {
+    // ENOENT is the one failure that means "nothing has ever run here", so the
+    // empty list is a confirmed answer. `omp` points at a path that cannot exist:
+    // if `list()` shelled out at all it would raise AdapterError instead of
+    // answering, which is the proof that no process is spawned.
+    const service = new DefaultCollabRegistryService({
+      ompBinary: path.join(root, "no-such-binary-omp"),
+      registryDir: path.join(root, "never-existed"),
+    });
+    await expect(service.list()).resolves.toEqual([]);
   });
 
   it("propagates a registry path that cannot be read (ENOTDIR)", async () => {
