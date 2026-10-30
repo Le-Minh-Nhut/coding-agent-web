@@ -156,7 +156,9 @@ describe("Connection status banners", () => {
       const { container } = render(<ConversationView conversationId="c-1" onBack={() => {}} />);
       viewContainer = container;
     });
-    await waitFor(() => expect(viewContainer?.textContent).toContain("This session is live. Open the live view to read it."));
+    // V22-01: conflict_owner means a writer is live OR unverifiable, so the UI now
+    // hedges instead of asserting a live session outright.
+    await waitFor(() => expect(viewContainer?.textContent).toContain("Writer status could not be verified — this session may be live. Open the live view to read it."));
     expect(viewContainer?.querySelector(".composer-container")).toBeNull();
   });
 });

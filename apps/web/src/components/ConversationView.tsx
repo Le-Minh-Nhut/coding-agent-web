@@ -167,7 +167,15 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
   const [showActivity, setShowActivity] = useState(false);
   const [transcriptErrors, setTranscriptErrors] = useState<Record<string, string>>({});
   const [savedHistory, setSavedHistory] = useState<(SavedConversationHistory & { messages: TranscriptMessage[] }) | null>(null);
-  const [historyLive, setHistoryLive] = useState(false);
+  /**
+   * V22-01: what a fresh history read actually proves. `conflict_owner` means a
+   * writer is live OR its status cannot be verified, so it is `live` (a live claim
+   * the copy must hedge) and never a verified fact. `archived` = a readable journal.
+   * `unverified` = not_found/internal/path_forbidden/network, none of which is proof
+   * the host is stopped, but none of which sustains a stale live claim either: every
+   * current-generation verdict replaces the previous one.
+   */
+  const [historyVerdict, setHistoryVerdict] = useState<"unverified" | "live" | "archived">("unverified");
   const [historyLoading, setHistoryLoading] = useState(false);
   const [olderHistoryLoading, setOlderHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState<string | null>(null);
@@ -283,6 +291,16 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
    * draft baseline for the restart completion.
    */
   const modelDraftTouchedRef = useRef(false);
+  /**
+   * V23-04: metadata generation. A conversation read captures this at request start
+   * and applies its snapshot only while it still matches. A mutation that changes
+   * conversation metadata (save model, restart) bumps it as it applies its
+   * server-returned truth, so a read that began BEFORE that success cannot repaint
+   * the pre-save value over it. Only successful mutations bump: a failed save lands
+   * nothing, so a read in flight still applies. A read started after the mutation
+   * completes takes the new generation and is applied normally.
+   */
+  const metadataGenerationRef = useRef(0);
   const watchedTranscriptAgentRef = useRef<string | null>(null);
   const reqIdCounterRef = useRef(1);
   const transcriptRequestsRef = useRef(new Map<number, { agentId: string; fromByte: number; timer: ReturnType<typeof setTimeout> }>());
@@ -299,7 +317,7 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
   // over a saved snapshot. Belt-and-braces alongside the generation guards — a
   // stale page that somehow landed must not shadow the live fact and claim the
   // session is not running.
-  const isShowingSavedHistory = linkUnavailable && savedHistory !== null && !historyLive;
+  const isShowingSavedHistory = linkUnavailable && savedHistory !== null && historyVerdict !== "live";
   const commandSuggestions = inputText.startsWith("/") && !/\s/.test(inputText)
     ? slashCommands.filter((command) => command.name.startsWith(inputText)).slice(0, 5)
     : [];
@@ -593,7 +611,7 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     setViewAccessOffer(null);
     setLinkFailure(null);
     setSavedHistory(null);
-    setHistoryLive(false);
+    setHistoryVerdict("unverified");
     setHistoryLoading(false);
     setOlderHistoryLoading(false);
     olderHistoryLoadingRef.current = false;
@@ -618,11 +636,17 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     // This conversation's model draft starts untouched again: the initial read may
     // hydrate the server preference until the user edits the control (V21-01).
     modelDraftTouchedRef.current = false;
+    // V23-04: a new conversation is a new metadata generation, so a read still in
+    // flight for the previous one can never repaint this one's metadata.
+    metadataGenerationRef.current += 1;
     const currentId = conversationId;
+    const metadataGeneration = metadataGenerationRef.current;
     api.getConversation(conversationId).then((res) => {
       // An initial read that lands after the user picked a model must not overwrite
-      // that choice with the stale saved preference.
-      if (conversationIdRef.current === currentId && res.ok) {
+      // that choice with the stale saved preference. V23-04: it must also not repaint
+      // metadata a successful mutation already replaced — the generation is captured
+      // here and a mutation that lands mid-fetch invalidates this snapshot.
+      if (conversationIdRef.current === currentId && metadataGenerationRef.current === metadataGeneration && res.ok) {
         setConversation(res.data);
         if (!modelDraftTouchedRef.current) setModelDraft(res.data.modelPreference ?? res.data.model ?? "");
       }
@@ -654,16 +678,23 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
         // F1: ok and conflict_owner are mutually exclusive verdicts of the same read,
         // so a good read must clear a verdict a previous one left stuck. Only a
         // current generation reaches here, so a stale read cannot clear a newer one.
-        setHistoryLive(false);
+        setHistoryVerdict("archived");
         setSavedHistory({ ...result.data, messages: transcriptMessagesFromEntries(result.data.entries as unknown as SessionEntry[]) });
       } else if (result.error.code === "conflict_owner") {
-        setHistoryLive(true);
-      } else if (result.error.code !== "not_found") {
-        setHistoryError(result.error.message || "Could not load saved transcript.");
+        // V22-01: a writer is live OR its status cannot be verified. Record it as a
+        // hedged `live` claim (the copy says so) rather than a stale `archived`.
+        setHistoryVerdict("live");
+      } else {
+        // V22-01: not_found/internal/path_forbidden (and anything else) prove nothing
+        // about the host, but they DO supersede the previous verdict — a fresh read
+        // must clear a stale live claim instead of leaving it on screen.
+        setHistoryVerdict("unverified");
+        setHistoryError(result.error.code === "not_found" ? null : result.error.message || "Could not load saved transcript.");
       }
     }).catch((error: unknown) => {
       if (!active || historyModeGenerationRef.current !== generation) return;
       setHistoryLoading(false);
+      setHistoryVerdict("unverified");
       setHistoryError(error instanceof Error ? error.message : "Could not load saved transcript.");
     });
     return () => { active = false; };
@@ -785,7 +816,7 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     historyModeGenerationRef.current += 1;
     historyScrollAnchorRef.current = null;
     setSavedHistory(null);
-    setHistoryLive(false);
+    setHistoryVerdict("unverified");
     rawUrlRef.current = linkRes.data.url;
     const parsed = parseCollabLink(rawUrlRef.current);
     if ("error" in parsed) {
@@ -837,9 +868,13 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
 
   const retryUnavailableConversation = async (): Promise<void> => {
     const currentId = conversationIdRef.current;
+    // V23-04: capture the metadata generation BEFORE the read. If a model save or
+    // restart succeeds while this is in flight, that mutation bumps the generation
+    // and this stale snapshot is dropped instead of rewinding the saved model.
+    const metadataGeneration = metadataGenerationRef.current;
     const result = await api.getConversation(currentId);
     if (conversationIdRef.current !== currentId) return;
-    if (result.ok) {
+    if (result.ok && metadataGenerationRef.current === metadataGeneration) {
       setConversation(result.data);
       if (!modelDraftTouchedRef.current) setModelDraft(result.data.modelPreference ?? result.data.model ?? "");
     }
@@ -1002,7 +1037,12 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     if (!viewActiveRef.current || operationGenerationRef.current !== operationGeneration || conversationIdRef.current !== conversationAtSave) return;
     setModelBusy(false);
     setModelMessage(result.ok ? "Model saved for next launch." : result.error.message);
-    if (result.ok) setConversation(result.data);
+    if (result.ok) {
+      // V23-04: this success is the newest metadata truth. Bump so any read that
+      // began before it cannot land afterwards and rewind the saved model.
+      metadataGenerationRef.current += 1;
+      setConversation(result.data);
+    }
   };
 
   const handleRestart = async () => {
@@ -1019,11 +1059,13 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
       setModelMessage(saved.error.message);
       return;
     }
+    metadataGenerationRef.current += 1;
     setConversation(saved.data);
     const result = await api.restartConversation(conversationId);
     if (!viewActiveRef.current || operationGenerationRef.current !== operationGeneration || conversationIdRef.current !== conversationAtRestart) return;
     setModelBusy(false);
     if (result.ok) {
+      metadataGenerationRef.current += 1;
       setConversation(result.data);
       // Only adopt the server's value when the user has not edited the draft while
       // the restart was pending; a newer unsaved choice must not be clobbered.
@@ -1251,11 +1293,14 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
           </>
         ) : linkUnavailable ? (
           <div className="card" style={{ borderColor: "var(--warning)", backgroundColor: "#1e180d" }}>
-            <h4 style={{ color: "var(--warning)", marginBottom: "8px" }}>{historyLive ? "Live host available" : "Live host unavailable"}</h4>
+            <h4 style={{ color: "var(--warning)", marginBottom: "8px" }}>{historyVerdict === "live" ? "Live host available" : "Live host unavailable"}</h4>
             <p style={{ fontSize: "0.9rem", color: "var(--text-muted)", marginBottom: "12px" }}>
-              {historyLive ? "This session is live. Open the live view to read it." : historyLoading ? "Checking for a saved transcript…" : historyError ?? "Host presence is not yet verified. No saved transcript is available; retry to check for a live host."}
+              {/* V22-01: the history endpoint cannot tell a live writer from an
+                  unverifiable one, so this copy hedges the claim rather than
+                  asserting "This session is live". */}
+              {historyVerdict === "live" ? "Writer status could not be verified — this session may be live. Open the live view to read it." : historyLoading ? "Checking for a saved transcript…" : historyError ?? "Host presence is not yet verified. No saved transcript is available; retry to check for a live host."}
             </p>
-            {(historyLive || !historyLoading) && <button type="button" className="primary" onClick={() => void retryUnavailableConversation()}>{historyLive ? "Open live view" : "Retry"}</button>}
+            {(historyVerdict === "live" || !historyLoading) && <button type="button" className="primary" onClick={() => void retryUnavailableConversation()}>{historyVerdict === "live" ? "Open live view" : "Retry"}</button>}
             {attachInfo?.command ? (
               <div>
                 <span style={{ fontSize: "0.8rem", color: "var(--text-muted)" }}>How to attach in terminal:</span>
@@ -1393,7 +1438,7 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
             {item.unconfirmed ? "Unconfirmed — not yet received by the host — " : "Refused — "}{item.text}
           </span>
           <span style={{ display: "flex", gap: "8px", flexShrink: 0 }}>
-            {canWriteToHost && !linkUnavailable && !isShowingSavedHistory && !historyLive && (
+            {canWriteToHost && !linkUnavailable && !isShowingSavedHistory && historyVerdict !== "live" && (
               <button type="button" className="ghost" onClick={() => recoverRefusedPromptText(item)}>Recover</button>
             )}
             <button type="button" className="ghost" onClick={() => void copyRefusedPromptText(item)}>
@@ -1403,7 +1448,7 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
           </span>
         </div>
       ))}
-      {canWriteToHost && !linkUnavailable && !isShowingSavedHistory && !historyLive && (
+      {canWriteToHost && !linkUnavailable && !isShowingSavedHistory && historyVerdict !== "live" && (
       <form onSubmit={handleSendPrompt} className="composer-container">
         <textarea
           className="composer-input"
