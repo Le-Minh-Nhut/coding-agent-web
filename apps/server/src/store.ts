@@ -3,7 +3,7 @@ import { chmod, lstat, mkdir, open } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import type { Conversation, Project } from "@caw/contracts";
-import { epochOf } from "@caw/contracts";
+import { epochOf, observationSeqOf } from "@caw/contracts";
 
 /*
  * Storage fallback: Node 20.19 smoke probe returned `Error: No such built-in
@@ -92,11 +92,25 @@ export interface MetadataStore {
    * learned, and a launch or stop can open a new life during that window. The
    * freshness check and the mutation are one section of this store's queue, so no
    * interleaving can slip between them.
+   *
+   * `opts.observation` marks a write that is a *routine observation* of the
+   * running process (refresh/reconcile/adopt), not a lifecycle transition:
+   *
+   *  - while a launch reservation is held the row is mid-replacement and the
+   *    launch owns the truth, so the write is dropped (`applied: false`);
+   *  - `opts.expectedObservationSeq`, when given, refuses a commit whose revision
+   *    is already behind the stored row, so two same-life observations cannot
+   *    land out of order.
+   *
+   * Intent writes (start's record/undo, stop's commit/refuse, publish) leave both
+   * off: a real stop or replacement must still beat a launch's publish, and a
+   * launch must still beat an observation.
    */
   updateConversationIfCurrent(
     id: string,
     expectedEpoch: number,
     patch: Partial<Conversation>,
+    opts?: { observation?: boolean; expectedObservationSeq?: number },
   ): Promise<{ conversation: Conversation; applied: boolean } | null>;
   recordEvent<T>(conversationId: string, type: string, payload: T, ts?: string): Promise<StoreEvent<T>>;
   listEvents<T = unknown>(conversationId: string, afterSeq?: number, limit?: number): Promise<Array<StoreEvent<T>>>;
@@ -503,23 +517,43 @@ export function createMetadataStore(stateDir: string, now: () => Date = () => ne
         // The store owns the lifecycle counter: a patch that changes any lifecycle
         // field opens a new life, so an observation taken before it can no longer be
         // committed over the row. A caller-supplied `lifecycleEpoch` is ignored — the
-        // authority is the comparison of the stored row against this patch.
+        // authority is the comparison of the stored row against this patch. The same
+        // holds for `observationSeq`, which advances on *every* applied change so a
+        // same-life observation still has an ordering fact to present.
         const value: Conversation = {
           ...current,
           ...patch,
           id: current.id,
           projectId: current.projectId,
           lifecycleEpoch: nextEpoch(current, patch),
+          observationSeq: observationSeqOf(current) + 1,
           updatedAt: stamp(),
         };
         await append([{ op: "conversation", value }]); conversations.set(id, value); return value;
       });
     },
-    updateConversationIfCurrent(id, expectedEpoch, patch) {
+    updateConversationIfCurrent(id, expectedEpoch, patch, opts) {
       return serialize(async () => {
         await load();
         const current = conversations.get(id);
         if (!current) return null;
+        // A routine observation of a row whose launch is mid-flight is dropped
+        // before anything else: the launch is about to record its own identity
+        // (between the reserve and the publish), and an observation taken now speaks
+        // for a row the launch is replacing. This is what stops a refresh from
+        // discarding the very launch it observed — both the pre-record window (the
+        // row has no pane yet, so the observation would call the launch's host
+        // external) and the pre-publish window (where an `unknown` write would bump
+        // the epoch the launch's publish is bound to). Intent writes leave the flag
+        // off, so a real stop or a newer launch still beats an observation.
+        if (opts?.observation && launchReservations.has(id)) return { conversation: current, applied: false };
+        // Out-of-order same-life observation: the row already moved past the
+        // revision this observation read, so it is older news of the same life and
+        // must not overwrite the newer verdict (a delayed older-model refresh
+        // otherwise repaints `older-model` over `newer-model`).
+        if (opts?.expectedObservationSeq !== undefined && observationSeqOf(current) !== opts.expectedObservationSeq) {
+          return { conversation: current, applied: false };
+        }
         // The freshness decision and the mutation are one queued section: a launch
         // that advanced the epoch is either already visible here (so this refuses)
         // or runs after this section (so its own identity is what the row ends up
@@ -533,6 +567,7 @@ export function createMetadataStore(stateDir: string, now: () => Date = () => ne
           id: current.id,
           projectId: current.projectId,
           lifecycleEpoch: nextEpoch(current, patch),
+          observationSeq: observationSeqOf(current) + 1,
           updatedAt: stamp(),
         };
         await append([{ op: "conversation", value }]); conversations.set(id, value); return { conversation: value, applied: true };

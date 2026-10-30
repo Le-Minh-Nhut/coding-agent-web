@@ -196,6 +196,24 @@ export interface Conversation {
    * Optional for rows persisted before this field existed; absent reads as `0`.
    */
   lifecycleEpoch?: number;
+  /**
+   * Monotonic counter of the row's applied changes, bumped by the store on every
+   * write that really changes the row.
+   *
+   * `lifecycleEpoch` answers "is this the same process generation?" — it moves
+   * only when a lifecycle field does. An observation can also be stale while the
+   * generation is unchanged: two routine refreshes of the same live process can
+   * commit out of order, and the older one silently overwrites the newer one's
+   * model or status. This counter gives such a commit an ordering fact to present
+   * without conflating observation revision with process replacement: the store
+   * bumps it on every applied change, an observer reads it before probing, and
+   * `updateConversationIfCurrent` with `expectedObservationSeq` refuses a commit
+   * whose revision is already behind. `lifecycleEpoch` stays the process-generation
+   * authority.
+   *
+   * Optional for rows persisted before this field existed; absent reads as `0`.
+   */
+  observationSeq?: number;
   createdAt: string;
   updatedAt: string;
   lastActivityAt: string | null;
@@ -210,6 +228,15 @@ export interface Conversation {
  * with `undefined` on a legacy row and miss that a launch's `1` is a change.
  */
 export const epochOf = (conversation: Pick<Conversation, "lifecycleEpoch">): number => conversation.lifecycleEpoch ?? 0;
+
+/**
+ * The applied-change counter of a row, defaulting to `0` for records persisted
+ * before the field existed. Mirrors `epochOf`: an observer captures this before
+ * probing, and commits through `updateConversationIfCurrent` with
+ * `expectedObservationSeq` so an out-of-order observation of the *same* life is
+ * refused instead of overwriting a newer one.
+ */
+export const observationSeqOf = (conversation: Pick<Conversation, "observationSeq">): number => conversation.observationSeq ?? 0;
 
 export interface NativeSessionSummary {
   sessionId: string;

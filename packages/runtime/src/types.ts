@@ -38,11 +38,20 @@ export interface ConversationRuntimeStore {
    * Returns the row as it stands now plus whether the patch was applied: `false`
    * means the caller's observation was stale and was deliberately dropped, and
    * the caller must keep the returned (newer) row rather than its own result.
+   *
+   * `opts.observation` marks a write that is a routine observation of the running
+   * process rather than a lifecycle transition: while a launch reservation is held
+   * the row is mid-replacement and the launch owns the truth, so such a write is
+   * dropped. `opts.expectedObservationSeq` refuses a same-life commit that is
+   * already behind the stored row, so two observations cannot land out of order.
+   * Intent writes (`start`'s record/undo, `stop`'s commit, `waitForPublish`'s
+   * verdicts) leave both unset.
    */
   updateConversationIfCurrent(
     id: string,
     expectedEpoch: number,
     patch: Partial<Conversation>,
+    opts?: { observation?: boolean; expectedObservationSeq?: number },
   ): Promise<{ conversation: Conversation; applied: boolean } | null>;
   recordEvent(conversationId: string, type: string, payload: unknown): Promise<unknown>;
   /**

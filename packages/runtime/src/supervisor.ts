@@ -1,4 +1,4 @@
-import { epochOf, type Conversation } from "@caw/contracts";
+import { epochOf, observationSeqOf, type Conversation } from "@caw/contracts";
 import { evaluateState, hostState, launchVerdict } from "./state";
 import type {
   ConversationRuntimeStore,
@@ -335,6 +335,17 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
     // launch or stop that opened a new one while we probed makes this result
     // stale rather than authoritative.
     const observedEpoch = epochOf(conversation);
+    // The revision this refresh will speak for, read before the probes for the
+    // same reason but a narrower one: two refreshes of the *same* life can be in
+    // flight at once (the epoch does not move for a model-only change), and the
+    // one that started first can finish last. Presenting the revision it read
+    // makes the store drop the older result instead of letting it repaint the
+    // newer one.
+    const observedSeq = observationSeqOf(conversation);
+    // Every commit below is a routine observation, so it carries both markers; a
+    // launch reservation held meanwhile drops it outright (the launch owns the
+    // row in that window) and a newer applied change refuses it as stale.
+    const observationWrite = { observation: true as const, expectedObservationSeq: observedSeq };
     const observations = await observationsFor(conversation);
     const verdict: StateVerdict = evaluateState(observations);
     // A launch that was refused never started a process, so there is nothing to
@@ -345,7 +356,7 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
       // Refused launches leave the recorded failure standing; no probe may
       // resurrect it as a ghost launch. The read still goes through the epoch
       // gate so a newer life's row is what the caller sees.
-      return (await options.store.updateConversationIfCurrent(conversationId, observedEpoch, {}))?.conversation ?? null;
+      return (await options.store.updateConversationIfCurrent(conversationId, observedEpoch, {}, observationWrite))?.conversation ?? null;
     }
 
     // Compute the patch once and use those same values for the comparison and the
@@ -393,13 +404,20 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
     // Conditional commit: if a newer life began while we probed, this patch
     // describes a process that is already gone, so it is dropped and the newer
     // row is returned instead. A refresh that writes nothing is fine; a stale
-    // refresh overwriting a new host/model/state is not.
-    return (await options.store.updateConversationIfCurrent(conversationId, observedEpoch, patch))?.conversation ?? null;
+    // refresh overwriting a new host/model/state is not. The same conditional
+    // shape covers a *same-life* race — the revision read before probing refuses
+    // an older refresh landing after a newer one already committed.
+    return (await options.store.updateConversationIfCurrent(conversationId, observedEpoch, patch, observationWrite))?.conversation ?? null;
   }
 
   /** Record the runtime facts we can only learn from the machine. */
   async function adopt(conversation: Conversation, managed: RuntimeTmuxSession[], hosts: RuntimeHost[]): Promise<Conversation> {
     const patch: Partial<Conversation> = {};
+    // A routine observation like `refresh`: capture the revision the row stood at
+    // before the probe below, so a same-life write landing meanwhile is not
+    // overwritten by a header read for the older row, and a launch that claimed
+    // the row meanwhile drops this entirely.
+    const observedSeq = observationSeqOf(conversation);
 
     if (conversation.nativeSessionPath && !conversation.nativeSessionId) {
       const header = await options.adapters.findBySessionId(conversation.nativeSessionPath);
@@ -411,7 +429,7 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
     // A journal probe ran during this call, so a launch could have claimed the row
     // meanwhile. The header backfill is bound to the life it was read for; if that
     // life is over, the row as it now stands is the answer.
-    return (await options.store.updateConversationIfCurrent(conversation.id, epochOf(conversation), patch))?.conversation ?? conversation;
+    return (await options.store.updateConversationIfCurrent(conversation.id, epochOf(conversation), patch, { observation: true, expectedObservationSeq: observedSeq }))?.conversation ?? conversation;
   }
 
   /** Count visible sessions and recorded pane PIDs; state labels are not evidence. */
@@ -882,9 +900,18 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
      * on the epoch it was read at, so a reconciliation verdict about the previous
      * life cannot be stamped onto a newer one. `applied: false` means the row moved
      * on and this pass simply does not speak for it.
+     *
+     * The verdict is also a routine observation of one life, so it carries the
+     * revision the row was read at: a same-life write that committed while this
+     * pass probed the machine is newer news, and this older verdict is dropped.
+     * A launch that claimed the row meanwhile drops it too — the launch owns the
+     * row between its reserve and its publish.
      */
     const writeIfCurrent = (conversation: Conversation, patch: Partial<Conversation>) =>
-      options.store.updateConversationIfCurrent(conversation.id, epochOf(conversation), patch);
+      options.store.updateConversationIfCurrent(conversation.id, epochOf(conversation), patch, {
+        observation: true,
+        expectedObservationSeq: observationSeqOf(conversation),
+      });
 
     // A failed enumeration is not "nothing is running". Without the session list
     // no conversation's ownership can be confirmed, so every verdict here would

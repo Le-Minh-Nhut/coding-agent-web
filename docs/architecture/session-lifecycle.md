@@ -195,7 +195,8 @@ whenever a patch changes a lifecycle field (state, ownership, tmux identity,
 host identity), so the guarantee does not depend on callers remembering to stamp
 it. Observations are committed through `updateConversationIfCurrent`, which
 compares the caller's epoch against the stored row *inside the same queued
-section* as the write and drops the patch when a newer life took the row.
+section* as the write and drops the patch when a newer life took the row. Same-life
+ordering is a separate counter — see *Two freshness counters* below.
 
 A row whose launch is reserved but has not yet recorded its process reads exactly
 like a never-launched row (`starting`, no identity), so the re-read alone cannot
@@ -222,6 +223,40 @@ exception, below.
 own pre-check, `supervisor.isLaunching`). A stale answer there is harmless: it can
 only make the caller ask a question that the authoritative queued check — inside
 `deleteProject` — answers for real.
+
+### Two freshness counters, two questions
+
+The row carries two independent revision facts, and mixing them up is how the
+V18-01/V18-06 class of bug appears:
+
+| Counter | Answers | Advanced by |
+| --- | --- | --- |
+| `lifecycleEpoch` | "is this the same *process generation*?" | the store, only when a patch changes a lifecycle field (state, ownership, tmux identity, host identity) |
+| `observationSeq` | "is this the newest *applied change* to this life?" | the store, on **every** applied change |
+
+`lifecycleEpoch` is the process-generation authority: only a launch, a stop or a
+replacement moves it, so an observation about a life that is over is refused.
+Milliseconds cannot do this — two transitions can land inside one tick.
+
+`observationSeq` is the same-life observation revision. Two routine refreshes of
+one unchanged process can be in flight at once, and a model- or status-only change
+moves no lifecycle field, so the epoch cannot order them: the refresh that started
+first can finish last and repaint `older-model` over `newer-model`. Refresh,
+reconcile and adopt therefore read `observationSeq` before probing and pass it to
+`updateConversationIfCurrent` as `expectedObservationSeq`; a commit whose revision
+is already behind the stored row is dropped, not applied. `lifecycleEpoch` stays
+the process-generation authority, and a model change is never made a process
+replacement.
+
+Routine observation writes also carry `observation: true`. While a launch
+reservation is held the row is mid-replacement — before the record, the row has no
+pane (so an observation would call the launch's own host *external*), and before
+the publish the launch's own publish is bound to the epoch it recorded. The store
+drops any observation write outright while the reservation is held, so a refresh
+observed in that window can no longer discard the very launch it observed. Intent
+writes (`start`'s record/undo, `stop`'s commit/refuse, `waitForPublish`'s
+verdicts) leave both markers off: a real stop or replacement still beats a
+launch's publish, and a launch still beats an observation.
 
 ### A retained launch reservation
 
