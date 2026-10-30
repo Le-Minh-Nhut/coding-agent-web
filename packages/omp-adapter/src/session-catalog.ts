@@ -251,12 +251,30 @@ export class DefaultNativeSessionCatalog implements NativeSessionCatalog {
       .filter((name) => name.endsWith(".jsonl"))
       .sort((a, b) => b.localeCompare(a)); // ISO timestamps prefix sorts newest first
 
+    // The bucket name is a lossy encoding of the cwd (separators become `-`), so
+    // two directories like `a-b` and `a/b` share one bucket. The bucket alone is
+    // therefore not proof of the cwd: each journal must carry a header whose cwd is
+    // the same canonical directory as the one asked for. Comparison is realpath
+    // equality on both sides, so a symlinked alias of the same directory still
+    // matches, while a sibling prefix never does.
+    const canonicalCwd = resolveCanonical(cwd, realpathSync);
+
     const summaries: Array<Omit<NativeSessionSummary, "hasCollabHost">> = [];
 
     for (const file of jsonlFiles) {
       const fullPath = path.join(bucketDir, file);
       const parsed = await this.#readHeaderAndMeta(fullPath);
       if (!parsed) continue;
+      // A header cwd we cannot resolve is a directory we cannot prove: it is
+      // excluded, like `readHistory` treats an unresolvable journal cwd. One
+      // such journal must not fail the whole listing.
+      let headerCwd: string;
+      try {
+        headerCwd = resolveCanonical(parsed.header.cwd, realpathSync);
+      } catch {
+        continue;
+      }
+      if (headerCwd !== canonicalCwd) continue;
       summaries.push(await this.#summaryFor(fullPath, parsed));
     }
 
