@@ -18,6 +18,12 @@ import type { AttachInstructions, Conversation } from "@caw/contracts";
 export interface RefusedRecovery {
   id: number;
   text: string;
+  /**
+   * V20-02: the socket accepted this prompt but the host never acknowledged it when
+   * the view went away. Same strip, distinct label — it is not a refusal, and it is
+   * never auto-resent.
+   */
+  unconfirmed?: boolean;
 }
 
 interface ConversationViewProps {
@@ -67,7 +73,29 @@ const MAX_TRANSCRIPT_REQUESTS = 64;
 const TRANSCRIPT_REQUEST_TIMEOUT_MS = 15_000;
 const TRANSCRIPT_POLL_MS = 1200;
 const STARTUP_PROMPT_REFUSAL = "prompting is unavailable until the host finishes starting up";
+/**
+ * V20-09: the exact host messages that prove a prompt was NOT submitted. Each one
+ * is lifted verbatim from the pinned OMP host (collab/host.ts); an unrelated error
+ * ("agent control is disabled on a read-only link") must not consume the pending
+ * prompt, so this is a closed list, never a wildcard over every error frame.
+ */
+const NON_SUBMISSION_REFUSALS: ReadonlySet<string> = new Set([
+  STARTUP_PROMPT_REFUSAL,
+  "prompting is unavailable until the session transition completes",
+  "Prompt was not submitted. Please resend it when the host is ready.",
+]);
 
+
+/** The user text a live frame echoes, or null when the frame is not a user prompt echo. */
+function userEchoText(frame: HostFrame): string | null {
+  if (frame.t === "entry" && frame.entry.type === "message" && frame.entry.message.role === "user") {
+    return textFromContent(frame.entry.message.content);
+  }
+  if (frame.t === "event" && frame.event.type === "message_end" && frame.event.message.role === "user") {
+    return textFromContent(frame.event.message.content);
+  }
+  return null;
+}
 
 export function autosizeComposer(element: HTMLTextAreaElement | null): void {
   if (!element) return;
@@ -157,11 +185,11 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
   const refusedRecoveriesRef = useRef(refusedRecoveries);
   refusedRecoveriesRef.current = refusedRecoveries;
   const refusedIdRef = useRef(0);
-  const appendRefusedRecovery = (text: string): void => {
+  const appendRefusedRecovery = (text: string, unconfirmed = false): void => {
     const list = refusedRecoveriesRef.current;
     // Seed from the list so a caller-supplied list keeps unique ids across remounts.
     if (refusedIdRef.current === 0) refusedIdRef.current = list.reduce((max, item) => Math.max(max, item.id), 0);
-    const next = [...list, { id: ++refusedIdRef.current, text }];
+    const next = [...list, { id: ++refusedIdRef.current, text, ...(unconfirmed ? { unconfirmed: true } : {}) }];
     refusedRecoveriesRef.current = next;
     setRefusedRecoveries(next);
   };
@@ -170,6 +198,28 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     refusedRecoveriesRef.current = next;
     setRefusedRecoveries(next);
     setRefusedCopyState((previous) => (previous?.id === id ? null : previous));
+  };
+  /**
+   * V20-02: the socket accepted these prompts but the host never acknowledged them,
+   * and the view is going away. Without this they only exist in component state and
+   * Back/reopen loses them. Promote them to the App-owned per-conversation list so the
+   * refusal strip can still offer Copy/Recover. No auto-resend, ever.
+   */
+  const promoteUnconfirmedPending = (): void => {
+    if (!onRefusedRecoveriesChange) return;
+    const pending = pendingPromptRef.current.filter((prompt) => !prompt.refusalMessage);
+    for (const prompt of pending) appendRefusedRecovery(prompt.submitted, true);
+    if (pending.length > 0) pendingPromptRef.current = pendingPromptRef.current.filter((prompt) => prompt.refusalMessage);
+  };
+  /**
+   * A live echo for an unconfirmed prompt is a real host acknowledgement, so the
+   * strip item can go. The caller passes only genuine live frames: a snapshot row is
+   * history, and matching it by text would delete a strip item for a prompt the host
+   * may never have submitted (V20-02 forbids that guess).
+   */
+  const acknowledgeUnconfirmed = (text: string): void => {
+    const item = refusedRecoveriesRef.current.find((entry) => entry.unconfirmed && entry.text === text);
+    if (item) removeRefusedRecovery(item.id);
   };
 
   const inputValueRef = useRef(draft);
@@ -319,11 +369,8 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
   const rebasePendingAfterBootstrap = (liveFrames: readonly HostFrame[]): void => {
     const genuinelyEchoed = new Set<string>();
     for (const liveFrame of liveFrames) {
-      if (liveFrame.t === "entry" && liveFrame.entry.type === "message" && liveFrame.entry.message.role === "user") {
-        genuinelyEchoed.add(textFromContent(liveFrame.entry.message.content));
-      } else if (liveFrame.t === "event" && liveFrame.event.type === "message_end" && liveFrame.event.message.role === "user") {
-        genuinelyEchoed.add(textFromContent(liveFrame.event.message.content));
-      }
+      const text = userEchoText(liveFrame);
+      if (text !== null) genuinelyEchoed.add(text);
     }
     const hostCounts = new Map<string, number>();
     for (const message of transcriptRef.current.messages) {
@@ -336,11 +383,18 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
       dumpedEchoes.set(text, Math.max(dumpedEchoes.get(text) ?? 0, entry.message.timestamp));
     }
     const bumped = new Map<string, number>();
+    const ordinalByText = new Map<string, number>();
     for (const prompt of pendingPromptRef.current) {
       if (!prompt.preSnapshot) continue;
       if (genuinelyEchoed.has(prompt.submitted)) continue;
       if ((dumpedEchoes.get(prompt.submitted) ?? 0) >= prompt.sentAtMs) continue;
-      prompt.hostEchoCount = Math.max(prompt.hostEchoCount, hostCounts.get(prompt.submitted) ?? 0);
+      // V20-01: two same-text sends must not share one baseline. The dump raises the
+      // baseline for every pending of that text, so a single echo would settle both.
+      // Each pending keeps its own ordinal ABOVE the baseline — the same count of
+      // same-text local sends sendPrompt already used — so one echo settles exactly one.
+      const ordinal = ordinalByText.get(prompt.submitted) ?? 0;
+      ordinalByText.set(prompt.submitted, ordinal + 1);
+      prompt.hostEchoCount = Math.max(prompt.hostEchoCount, (hostCounts.get(prompt.submitted) ?? 0) + ordinal);
       if (prompt.optimisticId) bumped.set(prompt.optimisticId, prompt.hostEchoCount);
     }
     if (bumped.size === 0) return;
@@ -383,9 +437,15 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     const liveFrames = transcriptRef.current.pendingSnapshot?.live ?? [];
     updateTranscript(frame);
     if (hadPendingSnapshot && transcriptRef.current.pendingSnapshot === null) rebasePendingAfterBootstrap(liveFrames);
+    // V20-02: only genuine live user echoes acknowledge an unconfirmed strip item —
+    // never the snapshot rows above, which are history.
+    for (const echo of hadPendingSnapshot ? liveFrames : [frame]) {
+      const text = userEchoText(echo);
+      if (text !== null) acknowledgeUnconfirmed(text);
+    }
     if (frame.t === "entry" || frame.t === "snapshot-chunk" || (frame.t === "event" && frame.event.type === "message_end" && frame.event.message.role === "user")) removeAcknowledgedPrompts();
     if (frame.t === "error") {
-      if (frame.message === STARTUP_PROMPT_REFUSAL) {
+      if (NON_SUBMISSION_REFUSALS.has(frame.message)) {
         const prompt = pendingPromptRef.current.find((pending) => pending.physicalConnection === physicalConnectionRef.current && !pending.refusalMessage);
         if (prompt) {
           prompt.refusalMessage = frame.message;
@@ -455,6 +515,9 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     if (renderTimerRef.current !== null) clearTimeout(renderTimerRef.current);
     for (const request of transcriptRequestsRef.current.values()) clearTimeout(request.timer);
     transcriptRequestsRef.current.clear();
+    // V20-02: promote BEFORE the socket closes so an unacknowledged prompt survives
+    // Back/reopen in the App-owned list instead of dying with this component.
+    promoteUnconfirmedPending();
     socketRef.current?.close();
     socketRef.current = null;
   }, []);
@@ -678,6 +741,9 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     void connectToCollab(true);
     return () => {
       connectionGenerationRef.current++;
+      // V20-02: a pending prompt whose socket was accepted but never acknowledged
+      // must not vanish when this conversation's live link is torn down.
+      promoteUnconfirmedPending();
       socketRef.current?.close();
       socketRef.current = null;
       rawUrlRef.current = null;
@@ -1225,16 +1291,21 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
           <button type="button" className="ghost" onClick={() => setInterceptedCommand(null)}>Cancel</button>
         </div>
       )}
-      {canWriteToHost && refusedRecoveries.map((item) => (
+      {/* V20-07: the strip is a LOCAL affordance — Copy writes the clipboard, Recover
+          writes the composer draft. Neither touches the network, so a lost link, a
+          saved transcript or a read-only link must not hide it. Sending stays gated by
+          the composer's own disabled state. */}
+      {refusedRecoveries.map((item) => (
         <div key={item.id} className="banner warning refused-prompt" role="status">
           <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={item.text}>
-            Refused — {item.text}
+            {item.unconfirmed ? "Unconfirmed — not yet received by the host — " : "Refused — "}{item.text}
           </span>
           <span style={{ display: "flex", gap: "8px", flexShrink: 0 }}>
             <button type="button" className="ghost" onClick={() => recoverRefusedPromptText(item)}>Recover</button>
             <button type="button" className="ghost" onClick={() => void copyRefusedPromptText(item)}>
               {refusedCopyState?.id === item.id ? (refusedCopyState.state === "copied" ? "Copied" : "Copy failed") : "Copy"}
             </button>
+            {item.unconfirmed && <button type="button" className="ghost" onClick={() => removeRefusedRecovery(item.id)}>Dismiss</button>}
           </span>
         </div>
       ))}
