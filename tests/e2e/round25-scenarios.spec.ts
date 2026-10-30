@@ -185,6 +185,9 @@ test("V25-02 a model save pending across Back/reopen settles on the model saved 
   });
 
   await page.getByText("Conversation model settings").click();
+  // The async hydration commit lands between fill()'s selectText and insertText
+  // halves and clobbers the typed value; wait for it before filling.
+  await expect(page.locator("#custom-model")).toHaveValue("preferred/model");
   await page.locator("#custom-model").fill(firstModel);
   await page.getByRole("button", { name: "Save model" }).click();
   await expect.poll(() => bodies.length).toBe(1);
@@ -197,6 +200,8 @@ test("V25-02 a model save pending across Back/reopen settles on the model saved 
   await expect(page.getByRole("heading", { name: "Seeded conversation", exact: true })).toBeVisible();
 
   await page.getByText("Conversation model settings").click();
+  // First PATCH still route-gated, so the server still holds the seeded value.
+  await expect(page.locator("#custom-model")).toHaveValue("preferred/model");
   await page.locator("#custom-model").fill(finalModel);
   await page.getByRole("button", { name: "Save model" }).click();
 
@@ -217,6 +222,7 @@ test("V25-02 a model save pending across Back/reopen settles on the model saved 
   // screen-inventory spec expects it, through the same UI path a user would take
   // (a request from the test context is refused by the Origin/CSRF guards).
   await page.getByText("Conversation model settings").click();
+  await expect(page.locator("#custom-model")).toHaveValue(finalModel);
   await page.locator("#custom-model").fill("preferred/model");
   await page.getByRole("button", { name: "Save model" }).click();
   await expect(preferenceLine(page)).toContainText("preferred/model");
