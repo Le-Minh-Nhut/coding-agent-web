@@ -37,6 +37,8 @@ export function ProjectsView({ onSelectProject, onOpenSettings }: ProjectsViewPr
   // a late response may refresh the list, but only closes the dialog it belongs to.
   const [editingProject, setEditingProject] = useState<ProjectWithStats | null>(null);
   const [editLabel, setEditLabel] = useState("");
+  const editLabelRef = useRef(editLabel);
+  editLabelRef.current = editLabel;
   const renameOperationRef = useRef<object | null>(null);
   /**
    * One rename write per project, coalescing like the favorite flight: two Saves in
@@ -44,8 +46,11 @@ export function ProjectsView({ onSelectProject, onOpenSettings }: ProjectsViewPr
    * decides, so a late "First" could overwrite the "Final" the user asked for last.
    * A Save while a write is open records the newest label; the write chains exactly
    * one follow-up so the server converges on the last intent regardless of order.
+   * A recorded intent carries the dialog token that submitted it, so a coalesced
+   * Save from a reopened dialog owns its own success/failure feedback instead of
+   * inheriting the token of the write it is queued behind.
    */
-  const renameFlightRef = useRef<Map<string, { desired: string; pending: string | null }>>(new Map());
+  const renameFlightRef = useRef<Map<string, { desired: string; pending: { label: string; token: object | null } | null }>>(new Map());
   const createOperationRef = useRef<object | null>(null);
   const [deletingProject, setDeletingProject] = useState<ProjectWithStats | null>(null);
   const deleteOperationRef = useRef<object | null>(null);
@@ -149,21 +154,29 @@ export function ProjectsView({ onSelectProject, onOpenSettings }: ProjectsViewPr
    * The dialog token is captured at Save, so both this write and its follow-up can
    * only close the dialog they belong to, never a newer one opened meanwhile.
    */
-  const writeRename = async (projectId: string, record: { desired: string; pending: string | null }, token: object | null): Promise<void> => {
+  const writeRename = async (projectId: string, record: { desired: string; pending: { label: string; token: object | null } | null }, token: object | null): Promise<void> => {
     const res = await api.updateProject(projectId, { label: record.desired });
+    // A response acts only on the dialog that submitted it: the token captured at
+    // that Save must still be the open dialog's token. Success additionally needs the
+    // input to still hold exactly what this write sent — a newer unsaved draft must
+    // survive an older success (V18-03), and a stale response must never blame a
+    // dialog that submitted nothing (V18-04).
+    const owned = renameOperationRef.current === token;
     if (res.ok) {
-      if (renameOperationRef.current === token) setEditingProject(null);
+      if (owned && editLabelRef.current === record.desired) setEditingProject(null);
       loadProjects();
-    } else if (renameOperationRef.current === token) {
+    } else if (owned) {
       setError(res.error.message);
     }
     // The newest label differs from what this write asked for: send exactly one
     // follow-up. Chained even after a failure, so a rejected write never swallows
-    // the label the user expressed while it was open.
-    if (record.pending !== null && record.pending !== record.desired) {
-      const next = { desired: record.pending, pending: null as string | null };
+    // the label the user expressed while it was open. The follow-up reuses the token
+    // recorded with that intent — never this write's token — so feedback lands on the
+    // dialog that actually submitted the label.
+    if (record.pending !== null && record.pending.label !== record.desired) {
+      const next = { desired: record.pending.label, pending: null as { label: string; token: object | null } | null };
       renameFlightRef.current.set(projectId, next);
-      await writeRename(projectId, next, token);
+      await writeRename(projectId, next, record.pending.token);
       return;
     }
     renameFlightRef.current.delete(projectId);
@@ -180,15 +193,16 @@ export function ProjectsView({ onSelectProject, onOpenSettings }: ProjectsViewPr
     const flight = renameFlightRef.current.get(projectId);
     if (flight) {
       // A write is already open for this project: record the newest label instead
-      // of racing a second PATCH whose arrival order the server decides. The open
-      // write chains exactly one follow-up when it settles.
-      flight.pending = label;
+      // of racing a second PATCH whose arrival order the server decides. The token of
+      // the dialog that submitted this Save is recorded with it, so a reopened
+      // dialog owns its own feedback rather than inheriting the open write's.
+      flight.pending = { label, token };
       return;
     }
-    const record = { desired: label, pending: null as string | null };
+    const record: { desired: string; pending: { label: string; token: object | null } | null } = { desired: label, pending: null };
     renameFlightRef.current.set(projectId, record);
-    // The token is captured at Save: the follow-up reuses it, so it can only close
-    // the dialog this rename belongs to — never a newer one opened meanwhile.
+    // The token is captured at Save: this write can only close the dialog it belongs
+    // to — never a newer one opened meanwhile.
     void writeRename(projectId, record, token);
   };
 

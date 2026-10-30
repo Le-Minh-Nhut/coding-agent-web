@@ -21,6 +21,14 @@ export function FolderBrowser({ onSelect, onCancel }: FolderBrowserProps) {
   const [loadingMoreFor, setLoadingMoreFor] = useState<number | null>(null);
   const createdPathRef = useRef<{ directory: string; path: string } | null>(null);
   const navigationGenerationRef = useRef(0);
+  /**
+   * Owns the new-folder dialog's create request. The listing/navigation generation
+   * guards a stale create against selecting a path outside the directory now shown,
+   * but it cannot tell that the dialog was cancelled and reopened: the token minted
+   * at submit does. Cancel replaces it, so a cancelled request's completion returns
+   * without touching — or blaming — the form on screen now.
+   */
+  const createFolderOpRef = useRef<object | null>(null);
   useEffect(() => {
     // A same-path reload (refreshVersion) is a new generation too, so a stray
     // load-more or a late list response from the previous load cannot write into
@@ -121,8 +129,17 @@ export function FolderBrowser({ onSelect, onCancel }: FolderBrowserProps) {
     setCreatingFolder(true);
     setNewFolderError(null);
     const generation = navigationGenerationRef.current;
+    const token = {};
+    createFolderOpRef.current = token;
     const directory = listing.path;
     const result = await api.createDirectory(directory, newFolderName);
+    // A completion acts only on the dialog that submitted it. Cancel (or a form
+    // opened since) replaced the token, so this stale response is invisible to the
+    // UI: it must not clear a pending flag, an error, a name, a selection, or reload
+    // the listing — a reload would null `listing` and unmount the new form with its
+    // unsaved draft. The folder exists on disk and appears on the next real
+    // navigation.
+    if (createFolderOpRef.current !== token) return;
     setCreatingFolder(false);
     if (generation !== navigationGenerationRef.current) return;
     if (!result.ok) {
@@ -196,11 +213,13 @@ export function FolderBrowser({ onSelect, onCancel }: FolderBrowserProps) {
                   <button type="submit" className="primary" disabled={creatingFolder || !newFolderName.trim()}>
                     {creatingFolder ? "Creating…" : "Create folder"}
                   </button>
-                  {/* Cancel invalidates only this dialog: the create POST is guarded by
-                      its own generation capture, and the listing loader owns its own
-                      request. Bumping the navigation generation here would drop the
+                  {/* Cancel invalidates only this dialog: it replaces the operation
+                      token so the request already in flight can no longer touch — or
+                      blame — the form that opens next, and it clears the pending flag so
+                      the next form is immediately operable. The listing loader owns its
+                      own request; bumping the navigation generation here would drop the
                       in-flight listing completion with no replacement to clear it. */}
-                  <button type="button" onClick={() => { setShowNewFolder(false); setNewFolderError(null); }}>Cancel</button>
+                  <button type="button" onClick={() => { setShowNewFolder(false); setNewFolderError(null); setCreatingFolder(false); createFolderOpRef.current = {}; }}>Cancel</button>
                 </div>
                 {newFolderError && <div role="alert" style={{ color: "var(--danger)", marginTop: "6px" }}>{newFolderError}</div>}
               </form>
