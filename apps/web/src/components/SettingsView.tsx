@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { api } from "../api.js";
 import type { RuntimeSnapshot } from "@caw/contracts";
 
@@ -10,6 +10,15 @@ interface SettingsViewProps {
 export function SettingsView({ onBack, onLogout }: SettingsViewProps) {
   const [runtime, setRuntime] = useState<RuntimeSnapshot | null>(null);
   const [loading, setLoading] = useState(true);
+  /**
+   * V25-06: a failed runtime read must not be rendered as an absence of engines.
+   * `runtime === null` after the read says only that the read failed — the engine
+   * cards must not turn that into "Missing", which claims the host has no OMP/tmux.
+   * The error is surfaced instead, with a Retry that re-runs the same read.
+   */
+  const [runtimeError, setRuntimeError] = useState<string | null>(null);
+  /** V25-06: newest-wins ordering for `loadRuntime` reads (see the guard there). */
+  const runtimeReadSeqRef = useRef(0);
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [passwordBusy, setPasswordBusy] = useState(false);
@@ -58,11 +67,23 @@ export function SettingsView({ onBack, onLogout }: SettingsViewProps) {
     }
   };
 
+  const loadRuntime = async (): Promise<void> => {
+    // Only the newest read may publish. Retry is disabled while loading so a
+    // human cannot overlap runs, but a programmatic overlap (mount + retry) could
+    // otherwise let a slower earlier run land its stale error on top of a newer
+    // snapshot, or vice versa.
+    const readSeq = ++runtimeReadSeqRef.current;
+    setLoading(true);
+    setRuntimeError(null);
+    const res = await api.getRuntime();
+    if (runtimeReadSeqRef.current !== readSeq) return;
+    setLoading(false);
+    if (res.ok) setRuntime(res.data);
+    else setRuntimeError(res.error.message || "Could not read runtime status.");
+  };
+
   useEffect(() => {
-    api.getRuntime().then((res) => {
-      setLoading(false);
-      if (res.ok) setRuntime(res.data);
-    });
+    void loadRuntime();
   }, []);
 
   return (
@@ -78,12 +99,26 @@ export function SettingsView({ onBack, onLogout }: SettingsViewProps) {
         <div style={{ padding: "24px", textAlign: "center", color: "var(--text-muted)" }}>Loading…</div>
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
+          {runtimeError && (
+            /* Not role="alert": this banner is not an error the user must act on
+               before anything else; the message and the Retry button carry the
+               failure. Failed-password and sign-out errors keep their own alert
+               regions. */
+            <div className="card" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px", borderColor: "var(--danger)" }}>
+              <span>Runtime status unavailable: {runtimeError}</span>
+              <button type="button" onClick={() => void loadRuntime()} disabled={loading}>Retry</button>
+            </div>
+          )}
           <form className="card" onSubmit={changePassword} style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
             <h3 style={{ fontSize: "1rem" }}>Change password</h3>
             <label htmlFor="current-password">Current password</label>
-            <input id="current-password" type="password" autoComplete="current-password" value={currentPassword} onChange={(event) => setCurrentPassword(event.target.value)} required maxLength={1024} />
+            <input id="current-password" type="password" autoComplete="current-password" value={currentPassword} onChange={(event) => setCurrentPassword(event.target.value)} required maxLength={1024} disabled={passwordBusy} />
             <label htmlFor="new-password">New password (12 characters minimum)</label>
-            <input id="new-password" type="password" autoComplete="new-password" value={newPassword} onChange={(event) => setNewPassword(event.target.value)} required minLength={12} maxLength={1024} />
+            {/* V25-03: both inputs lock while the change is pending. The response
+                clears them on success, so leaving them editable would let a user
+                type a draft here that the success then silently wipes. Disabled
+                (matching the button) keeps that draft from ever being typed. */}
+            <input id="new-password" type="password" autoComplete="new-password" value={newPassword} onChange={(event) => setNewPassword(event.target.value)} required minLength={12} maxLength={1024} disabled={passwordBusy} />
             {passwordMessage && <p role={passwordMessage.startsWith("Password changed") ? "status" : "alert"}>{passwordMessage}</p>}
             <button type="submit" className="primary" disabled={passwordBusy || !currentPassword || newPassword.length < 12}>{passwordBusy ? "Changing…" : "Change password"}</button>
           </form>
@@ -109,7 +144,12 @@ export function SettingsView({ onBack, onLogout }: SettingsViewProps) {
               <div style={{ display: "flex", justifyContent: "space-between" }}>
                 <span>OMP Engine:</span>
                 <span>
-                  {runtime?.capabilities.omp.available ? (
+                  {/* V25-06: no snapshot at all (still loading, or the read failed —
+                      the alert above says which) is not evidence that the engine is
+                      absent. "Unknown" keeps the failed read from becoming a claim. */}
+                  {runtime === null ? (
+                    <span style={{ color: "var(--text-muted)" }}>Unknown</span>
+                  ) : runtime.capabilities.omp.available ? (
                     <span style={{ color: "var(--success)" }}>Available ({runtime.capabilities.omp.version ?? "installed"})</span>
                   ) : (
                     <span style={{ color: "var(--danger)" }}>Missing</span>
@@ -119,7 +159,9 @@ export function SettingsView({ onBack, onLogout }: SettingsViewProps) {
               <div style={{ display: "flex", justifyContent: "space-between" }}>
                 <span>tmux Runner:</span>
                 <span>
-                  {runtime?.capabilities.tmux.available ? (
+                  {runtime === null ? (
+                    <span style={{ color: "var(--text-muted)" }}>Unknown</span>
+                  ) : runtime.capabilities.tmux.available ? (
                     <span style={{ color: "var(--success)" }}>Available ({runtime.capabilities.tmux.version ?? "installed"})</span>
                   ) : (
                     <span style={{ color: "var(--danger)" }}>Missing</span>
@@ -129,7 +171,9 @@ export function SettingsView({ onBack, onLogout }: SettingsViewProps) {
               <div style={{ display: "flex", justifyContent: "space-between" }}>
                 <span>Relay Service:</span>
                 <span>
-                  {runtime?.capabilities.relay.configured ? (
+                  {runtime === null ? (
+                    <span style={{ color: "var(--text-muted)" }}>Unknown</span>
+                  ) : runtime.capabilities.relay.configured ? (
                     <span style={{ color: "var(--success)" }}>Configured</span>
                   ) : (
                     <span style={{ color: "var(--text-muted)" }}>Loopback default</span>
