@@ -12,6 +12,8 @@ vi.mock("../../apps/web/src/components/LoginView.js", () => ({
 }));
 vi.mock("../../apps/web/src/components/ProjectsView.js", () => ({
   ProjectsView: ({ onSelectProject }: { onSelectProject: (id: string) => void }) => React.createElement("button", { onClick: () => onSelectProject("p1") }, "Open project"),
+  // App's auth-boundary reset now imports this from the mocked module.
+  resetProjectMutationState: () => {},
 }));
 vi.mock("../../apps/web/src/components/ProjectDetailView.js", () => ({
   ProjectDetailView: ({ onSelectConversation, onBack }: { onSelectConversation: (id: string) => void; onBack: () => void }) => React.createElement(React.Fragment, null,

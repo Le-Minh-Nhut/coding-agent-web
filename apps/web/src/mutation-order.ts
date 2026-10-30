@@ -36,3 +36,22 @@ export function chainMutation<T>(key: string, run: () => Promise<T>): Promise<T>
   });
   return next;
 }
+
+/**
+ * Auth-boundary hook: drops every chained tail.
+ *
+ * The map is page-lifetime, but intents are session-scoped. A chain (or a write
+ * still hung on a dead session) that survived a logout would otherwise make the
+ * *next* session's first write for that key queue behind the old intent — and be
+ * sent under the new session's credentials, replaying a mutation the user asked
+ * for as someone else. Clearing at the boundary means the next session submits
+ * into an empty queue.
+ *
+ * Only prevents NEW submissions from chaining behind old writes: a continuation
+ * already attached to a predecessor's promise still runs when that promise
+ * settles. That is safe because this is called on logout, before the app can
+ * submit anything under the next session.
+ */
+export function resetMutationQueues(): void {
+  tails.clear();
+}

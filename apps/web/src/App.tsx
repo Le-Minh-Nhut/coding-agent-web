@@ -5,8 +5,22 @@ import { ProjectsView } from "./components/ProjectsView.js";
 import { ProjectDetailView } from "./components/ProjectDetailView.js";
 import { ConversationView, type RefusedRecovery } from "./components/ConversationView.js";
 import { SettingsView } from "./components/SettingsView.js";
+import { resetMutationQueues } from "./mutation-order.js";
+import { resetProjectMutationState } from "./components/ProjectsView.js";
 
 type View = "projects" | "project-detail" | "conversation" | "settings";
+
+/**
+ * Every place the app transitions to unauthenticated goes through here: the
+ * module-scope mutation queues outlive the session that filled them, and an
+ * intent chained under one session must not be replayed under the next (nor may
+ * a hung chain block the next session's keys). Collected in one function so a
+ * new auth-loss path cannot forget one of the two resets.
+ */
+function clearSessionScopedMutations(): void {
+  resetMutationQueues();
+  resetProjectMutationState();
+}
 
 export function App() {
   const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(null);
@@ -31,12 +45,17 @@ export function App() {
           const refreshed = await api.getMe();
           if (refreshed.ok) {
             setSetupRequired(true);
+            clearSessionScopedMutations();
             setIsAuthenticated(false);
           } else {
             setSetupUnavailable(true);
+            clearSessionScopedMutations();
             setIsAuthenticated(false);
           }
-        } else setIsAuthenticated(false);
+        } else {
+          clearSessionScopedMutations();
+          setIsAuthenticated(false);
+        }
         return;
       }
 
@@ -48,6 +67,7 @@ export function App() {
           else setSetupUnavailable(true);
         }
       }
+      clearSessionScopedMutations();
       setIsAuthenticated(false);
     })();
   }, []);
@@ -123,6 +143,7 @@ export function App() {
         <SettingsView
           onBack={() => setCurrentView("projects")}
           onLogout={() => {
+            clearSessionScopedMutations();
             setIsAuthenticated(false);
           }}
         />

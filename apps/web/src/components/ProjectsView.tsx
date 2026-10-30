@@ -23,6 +23,33 @@ interface ProjectsViewProps {
 const renameFlights = new Map<string, { desired: string; pending: { label: string; token: object | null; revision: number } | null }>();
 
 /**
+ * One favorite flight per project, keyed by project id.
+ *
+ * Module scope for the same reason as renameFlights (V25-01): a star PATCH that
+ * outlived this view — the user starred, left for Settings, came back and starred
+ * again — would otherwise be raced by a second PATCH from the new mount, and the
+ * server applies writes in arrival order, so the older star could land last and
+ * rewind the value the user asked for. Sharing the flight keeps the follow-up
+ * (the write that makes the last click win) attached to the write in flight
+ * instead of a new mount firing a competing PATCH. Only wire bookkeeping lives
+ * here; the star column on screen is view state and stays with the mount.
+ */
+const favoriteFlights = new Map<string, { desired: boolean; base: boolean; pending: boolean | null }>();
+
+/**
+ * Drops every module-scope flight recorded for projects: called at the auth
+ * boundary (logout, or the probe finding no session) so intents submitted under
+ * one session are never replayed under the next one, and so a flight left hung
+ * by a dead session cannot block the same project's key for the new session.
+ * View-scoped state (the displayed star column, feedback registration) is owned
+ * by the mounted view's lifecycle and is deliberately not touched here.
+ */
+export function resetProjectMutationState(): void {
+  renameFlights.clear();
+  favoriteFlights.clear();
+}
+
+/**
  * The feedback surface of the ProjectsView that is mounted right now.
  *
  * A rename write — and the coalesced follow-up it chains — can be issued from the
@@ -63,8 +90,11 @@ export function ProjectsView({ onSelectProject, onOpenSettings }: ProjectsViewPr
    * instead of racing a second PATCH that could arrive late and win. When the
    * write settles, a recorded value that still differs from what the server
    * applied is sent once — last intent wins regardless of arrival order.
+   *
+   * The map lives at module scope (favoriteFlights) so a remount inherits the
+   * flight still in flight rather than racing a second PATCH at it (V25-01).
    */
-  const favoriteFlightRef = useRef<Map<string, { desired: boolean; base: boolean; pending: boolean | null }>>(new Map());
+  const favoriteFlightRef = { current: favoriteFlights };
   /** Bumped whenever a favorite response is applied; a list request started before that carries a stale star column. */
   const favoriteEpochRef = useRef(0);
   /** Star values actually applied per project, so a stale list snapshot keeps the fresh star column. */
@@ -176,7 +206,10 @@ export function ProjectsView({ onSelectProject, onOpenSettings }: ProjectsViewPr
    * unsent just because this one settled first.
    */
   const writeFavorite = async (projectId: string, record: { desired: boolean; base: boolean; pending: boolean | null }): Promise<void> => {
-    const res = await api.updateProject(projectId, { favorite: record.desired });
+    // Chained on the project key like the rename path (V25-01): submission order
+    // becomes arrival order, so a star PATCH that outlived its view cannot land
+    // after a newer one from the reopened view and rewind the stored flag.
+    const res = await chainMutation(`project-favorite:${projectId}`, () => api.updateProject(projectId, { favorite: record.desired }));
     if (res.ok) {
       favoriteEpochRef.current++;
       favoriteValueRef.current.set(projectId, res.data.favorite);

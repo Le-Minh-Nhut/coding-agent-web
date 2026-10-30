@@ -11,7 +11,8 @@ import type { ApiResult, ProjectWithStats } from "@caw/contracts";
 import { api } from "../../apps/web/src/api.js";
 import { ConversationView } from "../../apps/web/src/components/ConversationView.js";
 import { FolderBrowser } from "../../apps/web/src/components/FolderBrowser.js";
-import { ProjectsView } from "../../apps/web/src/components/ProjectsView.js";
+import { ProjectsView, resetProjectMutationState } from "../../apps/web/src/components/ProjectsView.js";
+import { resetMutationQueues } from "../../apps/web/src/mutation-order.js";
 
 vi.mock("../../apps/web/src/api.js", () => ({
   api: {
@@ -34,7 +35,10 @@ const child = (path: string) => ({ name: path.split("/").at(-1)!, path, isDirect
 const listing = (path: string, children: string[], cursor: string | null = null) => ({ ok: true as const, data: { path, parent: null, roots: ["/work"], entries: children.map(child), hasMore: cursor !== null, nextCursor: cursor } });
 
 let socket: CollabSocket | null = null;
-afterEach(() => { cleanup(); vi.restoreAllMocks(); socket = null; });
+// These cases render ProjectsView directly, so they bypass the App-level reset the
+// auth boundary performs. Chains left deliberately open (a favorite PATCH the case
+// never settles) would otherwise queue the next case's write behind them.
+afterEach(() => { cleanup(); vi.restoreAllMocks(); resetMutationQueues(); resetProjectMutationState(); socket = null; });
 
 describe("round14/15 web regressions", () => {
   it("V14 refusal: an unacked pre-reconnect prompt keeps its row and the new prompt is restored", async () => {

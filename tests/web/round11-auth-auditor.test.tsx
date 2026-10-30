@@ -5,7 +5,7 @@ import {act,cleanup,render,waitFor} from "@testing-library/react";
 import {api} from "../../apps/web/src/api.js";
 import {App} from "../../apps/web/src/App.js";
 vi.mock("../../apps/web/src/api.js",()=>({api:{getMe:vi.fn(),getCapabilities:vi.fn()}}));
-vi.mock("../../apps/web/src/components/ProjectsView.js",()=>({ProjectsView:()=> <div>Project screen</div>}));
+vi.mock("../../apps/web/src/components/ProjectsView.js",()=>({ProjectsView:()=> <div>Project screen</div>,resetProjectMutationState:vi.fn()}));
 afterEach(()=>{cleanup();vi.restoreAllMocks();});
 beforeEach(()=>vi.clearAllMocks());
 it("audit11 control: unauthenticated startup offers sign-in",async()=>{

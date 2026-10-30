@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { chainMutation } from "../../apps/web/src/mutation-order.js";
+import { chainMutation, resetMutationQueues } from "../../apps/web/src/mutation-order.js";
 
 // Node 20.19 here has no Promise.withResolvers, so the executor form is required.
 const gate = () => {
@@ -62,5 +62,47 @@ describe("chainMutation", () => {
     });
     expect(order).toEqual(["fast"]);
     g.release();
+  });
+
+  it("resetMutationQueues drops the tails: a fresh submission for a gated key starts immediately", async () => {
+    const g = gate();
+    const order: string[] = [];
+    void chainMutation("reset-key", async () => {
+      order.push("old:start");
+      await g.released;
+      order.push("old:end");
+    });
+    // The old write for the key is still open — without the reset, the next
+    // submission would queue behind it instead of going out now.
+    resetMutationQueues();
+    void chainMutation("reset-key", async () => {
+      order.push("new:start");
+    });
+    // No microtask flush: a chained tail would defer this start.
+    expect(order).toEqual(["old:start", "new:start"]);
+    g.release();
+    await Promise.resolve();
+    expect(order).toEqual(["old:start", "new:start", "old:end"]);
+  });
+
+  it("resetMutationQueues cannot unsend a continuation already attached to its predecessor", async () => {
+    const g = gate();
+    const order: string[] = [];
+    const first = chainMutation("reset-key", async () => {
+      order.push("first:start");
+      await g.released;
+      order.push("first:end");
+    });
+    // Submitted before the reset, so already chained onto `first`: it runs when the
+    // gate resolves whatever the map says. The auth boundary calls the reset before
+    // the app can submit anything under the next session, so nothing user-driven
+    // can land behind it in the meantime.
+    const successor = chainMutation("reset-key", async () => {
+      order.push("successor");
+    });
+    resetMutationQueues();
+    g.release();
+    await Promise.all([first, successor]);
+    expect(order).toEqual(["first:start", "first:end", "successor"]);
   });
 });
