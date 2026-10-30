@@ -15,6 +15,13 @@ export function FolderBrowser({ onSelect, onCancel }: FolderBrowserProps) {
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [showNewFolder, setShowNewFolder] = useState(false);
   const [newFolderName, setNewFolderName] = useState("");
+  /**
+   * Draft revision of the new-folder input, bumped on every keystroke. A create
+   * response may clear/close the form only when the revision is the one captured at
+   * that submit; an edit made while the request was pending keeps the name and the
+   * form on screen (V20-05).
+   */
+  const folderNameRevisionRef = useRef(0);
   const [newFolderError, setNewFolderError] = useState<string | null>(null);
   const [creatingFolder, setCreatingFolder] = useState(false);
   const [refreshVersion, setRefreshVersion] = useState(0);
@@ -132,6 +139,10 @@ export function FolderBrowser({ onSelect, onCancel }: FolderBrowserProps) {
     const token = {};
     createFolderOpRef.current = token;
     const directory = listing.path;
+    // The draft revision at this submit. A keystroke while the request is open makes
+    // the name on screen a different, unsaved folder: its success must not clear or
+    // unmount the form the user is still typing in (V20-05).
+    const revision = folderNameRevisionRef.current;
     const result = await api.createDirectory(directory, newFolderName);
     // A completion acts only on the dialog that submitted it. Cancel (or a form
     // opened since) replaced the token, so this stale response is invisible to the
@@ -144,6 +155,15 @@ export function FolderBrowser({ onSelect, onCancel }: FolderBrowserProps) {
     if (generation !== navigationGenerationRef.current) return;
     if (!result.ok) {
       setNewFolderError(result.error.message);
+      return;
+    }
+    // The user edited the name while the request was pending: keep their draft and
+    // the form. Selecting the created folder and reloading the listing would drop
+    // that draft (a reload nulls `listing`, which unmounts the form). The folder
+    // exists and shows on the next navigation. The submitted name still won its
+    // create, so the idempotence hint is remembered for when the user does come back.
+    if (folderNameRevisionRef.current !== revision) {
+      createdPathRef.current = { directory, path: result.data.path };
       return;
     }
     setSelectedPath(result.data.path);
@@ -209,7 +229,7 @@ export function FolderBrowser({ onSelect, onCancel }: FolderBrowserProps) {
               <form onSubmit={handleCreateFolder}>
                 <label htmlFor="new-folder-name">New folder in {listing.path}</label>
                 <div style={{ display: "flex", gap: "8px", marginTop: "6px" }}>
-                  <input id="new-folder-name" value={newFolderName} maxLength={64} onChange={(event) => setNewFolderName(event.target.value)} autoFocus />
+                  <input id="new-folder-name" value={newFolderName} maxLength={64} onChange={(event) => { folderNameRevisionRef.current++; setNewFolderName(event.target.value); }} autoFocus />
                   <button type="submit" className="primary" disabled={creatingFolder || !newFolderName.trim()}>
                     {creatingFolder ? "Creating…" : "Create folder"}
                   </button>
