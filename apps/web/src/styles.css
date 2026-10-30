@@ -8,8 +8,21 @@
   --text-muted: #8b949e;
   --primary: #2f81f7;
   --primary-hover: #388bfd;
+  /* Filled primary buttons carry white text, and white on #2f81f7 is only 3.75:1 —
+     below AA, so an enabled Send/New Project reads as disabled. #1f6feb is the
+     nearest tone on the same blue with white ≥ 4.5:1 (4.63), and its hover is a
+     shade darker rather than lighter so the label stays legible in both states.
+     `--primary` itself is still the text/border accent on dark surfaces, where it
+     measures 4.6:1 and #1f6feb would not. */
+  --primary-action: #1f6feb;
+  --primary-action-hover: #1a6ce0;
   --success: #238636;
   --danger: #da3633;
+  /* `--danger` is a FILL (white on it is 4.61:1). As TEXT on a dark card it is only
+     3.74:1, and as text on its own 10%-tint panel 3.82:1 — both below AA for the
+     Delete/error labels that use it. #f85149 is the same red family at 5.14:1 on
+     the card and 5.26:1 on the tinted panel. */
+  --danger-text: #f85149;
   --warning: #d29922;
   --radius: 8px;
   --safe-top: env(safe-area-inset-top, 0px);
@@ -106,9 +119,23 @@ body {
 
 .header-action-icon {
   display: none;
-  width: 18px;
-  height: 18px;
+  width: 20px;
+  height: 20px;
+  font-size: 20px;
+  line-height: 1;
   flex: none;
+  text-align: center;
+}
+
+/* Header glyphs render at the inherited 15.2px text size — a hairline arrow/symbol
+   with no icon box. Give them a real glyph size and a square hit area; the row is
+   already 44px tall, so this only widens the glyph. */
+.header-icon-button,
+.header-action-glyph {
+  font-size: 20px;
+  line-height: 1;
+  min-width: var(--touch-min);
+  min-height: var(--touch-min);
 }
 
 .app-title {
@@ -163,14 +190,14 @@ button:disabled {
 }
 
 button.primary {
-  background-color: var(--primary);
-  border-color: var(--primary);
+  background-color: var(--primary-action);
+  border-color: var(--primary-action);
   color: #ffffff;
   font-weight: 500;
 }
 
 button.primary:hover:not(:disabled) {
-  background-color: var(--primary-hover);
+  background-color: var(--primary-action-hover);
 }
 button.approval-deny {
   min-height: var(--touch-min);
@@ -217,12 +244,35 @@ input:focus, textarea:focus, select:focus {
   border-color: var(--primary);
 }
 
+/* Placeholder is text, so AA applies to it: the UA default (#757575) measures
+   3.74:1 on the surface. --text-muted is 5.6:1 and still reads as a hint. */
+input::placeholder,
+textarea::placeholder {
+  color: var(--text-muted);
+  opacity: 1;
+}
+
+/* A filesystem path is one token that reads wrong when it breaks mid-segment
+   ("root" / "s/seeded"). Truncating with an ellipsis keeps the readable tail of
+   the string and never orphans a fragment; `title` carries the full value. */
+.path-text {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .card {
   background-color: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 16px;
   margin-bottom: 12px;
+}
+
+/* Error/danger copy on a dark surface (card or its own 10% tint). */
+.error-text {
+  color: var(--danger-text);
 }
 
 /* Chips & Badges */
@@ -373,8 +423,11 @@ input:focus, textarea:focus, select:focus {
 .markdown-table-scroll {
   max-width: 100%;
   overflow-x: auto;
+  /* A wide table scrolls but nothing else says so. Same right-edge fade the code
+     block already uses, so both scrollers advertise the clipped content. */
+  -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 20px), transparent);
+  mask-image: linear-gradient(to right, #000 calc(100% - 20px), transparent);
 }
-
 .markdown-table-scroll table {
   border-collapse: collapse;
   min-width: max-content;
@@ -508,9 +561,19 @@ input:focus, textarea:focus, select:focus {
   border-top: 1px solid var(--border);
   padding: 12px calc(var(--safe-right) + 16px) calc(var(--safe-bottom) + 12px) calc(var(--safe-left) + 16px);
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
   align-items: flex-end;
   z-index: 10;
+}
+
+/* The send-status banner is a THIRD child of this flex row. Without an explicit
+   full-width basis it is laid out as another column, and because it never shrinks
+   below its text it steals the textarea's width — measured at 375px: textarea 271px
+   → 26px (one glyph per line) while the banner took 237px. Forcing it onto its own
+   wrapped line keeps the input and Send on the first row at every width. */
+.composer-container > .banner {
+  flex: 1 0 100%;
 }
 
 .composer-input {

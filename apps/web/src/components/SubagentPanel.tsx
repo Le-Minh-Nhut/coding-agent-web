@@ -86,7 +86,7 @@ export function SubagentPanel({
                   {loadingAgentIds.includes(selectedAgent.id) ? "Loading…" : "Refresh"}
                 </button>
               </div>
-              {transcriptError && <p role="alert" style={{ color: "var(--danger)", marginBottom: "8px" }}>{transcriptError}</p>}
+              {transcriptError && <p role="alert" style={{ color: "var(--danger-text)", marginBottom: "8px" }}>{transcriptError}</p>}
               {selectedTranscript ? (
                 <pre style={{ maxHeight: "300px", overflowY: "auto" }}><code>{selectedTranscript.text}{selectedTranscript.carry}</code></pre>
               ) : (

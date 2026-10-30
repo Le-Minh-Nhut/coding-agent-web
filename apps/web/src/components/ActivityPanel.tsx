@@ -163,7 +163,7 @@ export function ActivityPanel({
         </div>
 
         <div style={{ overflowY: "auto", flex: 1, paddingRight: "4px" }}>
-          {error && <div role="alert" style={{ padding: "10px", color: "var(--danger)" }}>{error} <button type="button" onClick={() => void loadEvents()} disabled={loading}>Retry</button></div>}
+          {error && <div role="alert" style={{ padding: "10px", color: "var(--danger-text)" }}>{error} <button type="button" onClick={() => void loadEvents()} disabled={loading}>Retry</button></div>}
           {loading && events.length === 0 && (
             <div role="status" style={{ padding: "20px 0", textAlign: "center", color: "var(--text-muted)" }}>
               Loading activity…
@@ -199,7 +199,7 @@ export function ActivityPanel({
               <div style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>
                 {new Date(event.ts).toLocaleString()}
               </div>
-              {event.payload !== null && event.payload !== undefined && (
+              {event.payload !== null && event.payload !== undefined && (typeof event.payload !== "object" || Object.keys(event.payload as object).length > 0) && (
                 <div style={{ marginTop: "4px" }}>
                   {typeof event.payload === "object" ? (
                     <pre

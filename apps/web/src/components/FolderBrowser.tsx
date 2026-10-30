@@ -179,8 +179,16 @@ export function FolderBrowser({ onSelect, onCancel }: FolderBrowserProps) {
         <h3 style={{ marginBottom: "12px" }}>Browse Folders</h3>
 
         {errorText && (
-          <div role="alert" style={{ color: "var(--danger)", fontSize: "0.9rem", padding: "8px", backgroundColor: "rgba(218,54,51,0.1)", borderRadius: "var(--radius)", marginBottom: "12px" }}>
-            {errorText}
+          <div style={{ marginBottom: "12px" }}>
+            <div role="alert" style={{ color: "var(--danger-text)", fontSize: "0.9rem", padding: "8px", backgroundColor: "rgba(218,54,51,0.1)", borderRadius: "var(--radius)" }}>
+              {errorText}
+            </div>
+            {/* A failed listing leaves nothing to pick from, so the retry reuses the
+                same reload path the create-folder refresh already uses. Kept outside
+                the alert so the alert text stays exactly the error message. */}
+            <button type="button" className="ghost" style={{ color: "var(--danger-text)", marginTop: "4px" }} onClick={() => setRefreshVersion((version) => version + 1)}>
+              Retry
+            </button>
           </div>
         )}
 
@@ -227,7 +235,7 @@ export function FolderBrowser({ onSelect, onCancel }: FolderBrowserProps) {
               </button>
             ) : (
               <form onSubmit={handleCreateFolder}>
-                <label htmlFor="new-folder-name">New folder in {listing.path}</label>
+                <label htmlFor="new-folder-name" className="path-text">New folder in {listing.path}</label>
                 <div style={{ display: "flex", gap: "8px", marginTop: "6px" }}>
                   <input id="new-folder-name" value={newFolderName} maxLength={64} onChange={(event) => { folderNameRevisionRef.current++; setNewFolderName(event.target.value); }} autoFocus />
                   <button type="submit" className="primary" disabled={creatingFolder || !newFolderName.trim()}>
@@ -241,7 +249,7 @@ export function FolderBrowser({ onSelect, onCancel }: FolderBrowserProps) {
                       in-flight listing completion with no replacement to clear it. */}
                   <button type="button" onClick={() => { setShowNewFolder(false); setNewFolderError(null); setCreatingFolder(false); createFolderOpRef.current = {}; }}>Cancel</button>
                 </div>
-                {newFolderError && <div role="alert" style={{ color: "var(--danger)", marginTop: "6px" }}>{newFolderError}</div>}
+                {newFolderError && <div role="alert" style={{ color: "var(--danger-text)", marginTop: "6px" }}>{newFolderError}</div>}
               </form>
             )}
           </div>
@@ -286,6 +294,16 @@ export function FolderBrowser({ onSelect, onCancel }: FolderBrowserProps) {
             {listing?.entries.filter((e) => e.isDirectory).length === 0 && (
               <div style={{ padding: "16px", textAlign: "center", color: "var(--text-muted)", fontSize: "0.9rem" }}>
                 No subdirectories
+              </div>
+            )}
+            {!listing && !errorText && (
+              <div style={{ padding: "16px", textAlign: "center", color: "var(--text-muted)", fontSize: "0.9rem" }}>
+                Loading folders…
+              </div>
+            )}
+            {!listing && errorText && (
+              <div style={{ padding: "16px", textAlign: "center", color: "var(--text-muted)", fontSize: "0.9rem" }}>
+                No folders to show until this directory loads.
               </div>
             )}
             {listing?.hasMore && (

@@ -85,7 +85,7 @@ export function LoginView({ onSuccess, setupRequired = false, setupUnavailable =
                 <input id="password-confirmation" type="password" value={confirmation} onChange={(event) => setConfirmation(event.target.value)} disabled={loading} required minLength={12} />
               </div>
             )}
-            {error && <div role="alert" style={{ color: "var(--danger)", fontSize: "0.9rem", padding: "8px", backgroundColor: "rgba(218,54,51,0.1)", borderRadius: "var(--radius)" }}>{error}</div>}
+            {error && <div role="alert" style={{ color: "var(--danger-text)", fontSize: "0.9rem", padding: "8px", backgroundColor: "rgba(218,54,51,0.1)", borderRadius: "var(--radius)" }}>{error}</div>}
             <button type="submit" className="primary" disabled={loading || (setup && password !== confirmation)} style={{ marginTop: "8px" }}>{loading ? "Please wait…" : setup ? "Set password" : "Sign in"}</button>
           </form>
         )}

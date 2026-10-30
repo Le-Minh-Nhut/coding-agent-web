@@ -152,7 +152,7 @@ export function SettingsView({ onBack, onLogout }: SettingsViewProps) {
                   ) : runtime.capabilities.omp.available ? (
                     <span style={{ color: "var(--success)" }}>Available ({runtime.capabilities.omp.version ?? "installed"})</span>
                   ) : (
-                    <span style={{ color: "var(--danger)" }}>Missing</span>
+                    <span style={{ color: "var(--danger-text)" }}>Missing</span>
                   )}
                 </span>
               </div>
@@ -164,7 +164,7 @@ export function SettingsView({ onBack, onLogout }: SettingsViewProps) {
                   ) : runtime.capabilities.tmux.available ? (
                     <span style={{ color: "var(--success)" }}>Available ({runtime.capabilities.tmux.version ?? "installed"})</span>
                   ) : (
-                    <span style={{ color: "var(--danger)" }}>Missing</span>
+                    <span style={{ color: "var(--danger-text)" }}>Missing</span>
                   )}
                 </span>
               </div>
@@ -202,7 +202,7 @@ export function SettingsView({ onBack, onLogout }: SettingsViewProps) {
           {/* Logout */}
           <div style={{ marginTop: "16px" }}>
             {signOutError && (
-              <p role="alert" style={{ color: "var(--danger)", marginBottom: "8px" }}>{signOutError}</p>
+              <p role="alert" style={{ color: "var(--danger-text)", marginBottom: "8px" }}>{signOutError}</p>
             )}
             <button
               type="button"

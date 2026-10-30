@@ -123,7 +123,7 @@ export function shouldSubmitOnEnter(
 const MessageRow = memo(function MessageRow({ message }: { message: DisplayMessage }) {
   return (
     <div className={`message-card ${message.role}${message.isError ? " error" : ""}`}>
-      <div style={{ fontSize: "0.75rem", color: message.isError ? "var(--danger)" : "var(--text-muted)", marginBottom: "4px", textTransform: "capitalize" }}>
+      <div style={{ fontSize: "0.75rem", color: message.isError ? "var(--danger-text)" : "var(--text-muted)", marginBottom: "4px", textTransform: "capitalize" }}>
         {message.role} {message.toolName ? `(${message.toolName})` : ""}{message.isError ? " · error" : ""}
         {message.awaitingHost ? " · sent while active; awaiting host" : ""}
       </div>
@@ -1248,7 +1248,7 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
       {/* Header */}
       <div className="app-header">
         <div className="conversation-header-title">
-          <button type="button" className="ghost" onClick={onBack} title="Back">
+          <button type="button" className="ghost header-icon-button" onClick={onBack} title="Back">
             ←
           </button>
           <div className="conversation-header-copy">
@@ -1302,8 +1302,8 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
           <input id="custom-model" ref={modelInputRef} value={modelDraft} maxLength={128} onChange={(event) => { modelDraftTouchedRef.current = true; setModelDraft(event.target.value); }} placeholder="Enter any OMP model ID" aria-describedby="model-launch-note" />
           {modelCatalogState.status === "loading" && <p role="status">Loading model catalog…</p>}
           {modelCatalogState.status === "empty" && <p role="status">No models reported by OMP. Saved preference is unchanged.</p>}
-          {modelCatalogState.status === "unavailable" && <p role="status">Model catalog unavailable: {modelCatalogState.reason} Saved preference is unchanged.</p>}
-          {modelCatalogState.status === "error" && <p role="alert">Could not load models: {modelCatalogState.message} Saved preference is unchanged.</p>}
+          {modelCatalogState.status === "unavailable" && <p role="status">Model catalog unavailable: {modelCatalogState.reason}. Saved preference is unchanged.</p>}
+          {modelCatalogState.status === "error" && <p role="alert">Could not load models: {modelCatalogState.message}. Saved preference is unchanged.</p>}
           <p>{conversation?.ownership === "external" ? "Saved preference for app-launched chats:" : "Preferred for next launch:"} <strong>{conversation?.modelPreference || "not set"}</strong></p>
           <p>Effective model reported now: <strong>{effectiveModel?.conversationId === conversationId ? effectiveModel.model ?? "not reported" : "not reported"}</strong></p>
           {canManageConversation && <button type="button" onClick={handleSaveModel} disabled={modelBusy || !modelDraft.trim()}>Save model</button>}
@@ -1347,7 +1347,12 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
           <span>State: unknown — Agent status cannot be determined</span>
         </div>
       )}
-      {status === "idle" && (
+      {/* A conversation whose record still says `starting` reports the collab link
+          as idle, so this row used to sit directly above "Host is starting up;
+          prompting may be refused." — two live regions claiming opposite things.
+          The startup warning is the stronger state: it owns the status row while
+          it applies, rather than both being printed. */}
+      {conversation?.state !== "starting" && status === "idle" && (
         <div className="banner idle" role="status">
           <span>Connected — no turn in flight</span>
         </div>
@@ -1435,12 +1440,15 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
             state makes assistive tech (and any test filtering by role) ambiguous. */}
         {messages.length === 0 && !streamingText && !linkUnavailable && (
           <div className="empty-transcript">
-            {status === "idle" && (
+            {/* Same contradiction as the status row: while the record says
+                `starting`, "Connected to this conversation's agent" is not true yet. */}
+            {conversation?.state !== "starting" && status === "idle" && (
               <>
                 <p>Connected to this conversation&apos;s agent.</p>
                 <p>No prompts yet. Send one below to start the turn.</p>
               </>
             )}
+            {conversation?.state === "starting" && <p>The host is starting up. Prompting may be refused until it finishes.</p>}
             {status === "running" && <p>The agent is working. Output appears here as it streams.</p>}
             {status === "connecting" && <p>Contacting the agent…</p>}
             {(status === "reconnecting" || status === "disconnected") && (
@@ -1547,8 +1555,11 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
           App-owned draft, the only copy of the user's newer text. Sending stays gated by
           the composer's own disabled state. */}
       {refusedRecoveries.map((item) => (
-        <div key={item.id} className="banner warning refused-prompt" role="status">
-          <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={item.text}>
+        <div key={item.id} className="banner warning refused-prompt" role="status" style={{ gap: "8px" }}>
+          {/* The strip is the only way back to a refused prompt, so it cannot hide
+              the text behind a one-line ellipsis (measured: 201px shown of 821px).
+              Wrapping keeps the whole prompt readable; the row grows instead. */}
+          <span style={{ minWidth: 0, wordBreak: "break-word", flex: 1 }}>
             {item.unconfirmed ? "Unconfirmed — not yet received by the host — " : "Refused — "}{item.text}
           </span>
           <span style={{ display: "flex", gap: "8px", flexShrink: 0 }}>

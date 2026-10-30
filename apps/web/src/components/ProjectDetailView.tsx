@@ -101,10 +101,10 @@ export function ProjectDetailView({
         <button type="button" className="ghost" onClick={onBack} title="Back to projects">
           ← Back
         </button>
-        <div>
+        <div style={{ minWidth: 0 }}>
           <h2>{project ? project.label : "Project"}</h2>
           {project && (
-            <p style={{ fontSize: "0.8rem", color: "var(--text-muted)", wordBreak: "break-all" }}>
+            <p className="path-text" style={{ fontSize: "0.8rem", color: "var(--text-muted)" }} title={project.path}>
               {project.path}
             </p>
           )}
@@ -112,7 +112,7 @@ export function ProjectDetailView({
       </div>
 
       {error && (
-        <div role="alert" style={{ color: "var(--danger)", padding: "10px", backgroundColor: "rgba(218,54,51,0.1)", borderRadius: "var(--radius)", marginBottom: "12px" }}>
+        <div role="alert" style={{ color: "var(--danger-text)", padding: "10px", backgroundColor: "rgba(218,54,51,0.1)", borderRadius: "var(--radius)", marginBottom: "12px" }}>
           {error} <button type="button" onClick={() => void loadData()} disabled={loading}>Retry</button>
         </div>
       )}
@@ -127,7 +127,7 @@ export function ProjectDetailView({
       {loading ? (
         <div style={{ padding: "24px", textAlign: "center", color: "var(--text-muted)" }}>Loading…</div>
       ) : !conversationsLoaded ? (
-        <div style={{ color: "var(--danger)" }}>Conversation list unavailable. <button type="button" onClick={() => void loadData()} disabled={loading}>Retry</button></div>
+        <div style={{ color: "var(--danger-text)" }}>Conversation list unavailable. <button type="button" onClick={() => void loadData()} disabled={loading}>Retry</button></div>
       ) : conversations.length === 0 ? (
         <div className="card" style={{ textAlign: "center", padding: "30px 16px" }}>
           <p style={{ color: "var(--text-muted)", marginBottom: "12px" }}>No conversations yet.</p>
@@ -182,7 +182,7 @@ export function ProjectDetailView({
                     {sess.tracked && <span className="badge tracked">tracked</span>}
                   </div>
                 </div>
-                <p style={{ fontSize: "0.75rem", color: "var(--text-muted)", wordBreak: "break-all" }}>
+                <p className="path-text" style={{ fontSize: "0.75rem", color: "var(--text-muted)" }} title={sess.path}>
                   {sess.path}
                 </p>
                 {!sess.tracked && sess.live === true && !hasLiveCollabHost(sess) && (

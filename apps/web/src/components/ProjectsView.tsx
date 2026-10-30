@@ -456,8 +456,15 @@ export function ProjectsView({ onSelectProject, onOpenSettings }: ProjectsViewPr
       </div>
 
       {error && (
-        <div role="alert" style={{ color: "var(--danger)", padding: "10px", backgroundColor: "rgba(218,54,51,0.1)", borderRadius: "var(--radius)", marginBottom: "12px" }}>
-          {error}
+        <div style={{ marginBottom: "12px" }}>
+          <div role="alert" style={{ color: "var(--danger-text)", padding: "10px", backgroundColor: "rgba(218,54,51,0.1)", borderRadius: "var(--radius)" }}>
+            {error}
+          </div>
+          {/* A failed list read proves nothing, so unlike a mutation failure it has
+              no other affordance to recover from — offer the same reload. */}
+          <button type="button" className="ghost" style={{ marginTop: "4px", color: "var(--danger-text)" }} onClick={() => void loadProjects()}>
+            Retry
+          </button>
         </div>
       )}
 
@@ -465,7 +472,7 @@ export function ProjectsView({ onSelectProject, onOpenSettings }: ProjectsViewPr
       {selectedPath && (
         <div className="card" style={{ borderColor: "var(--primary)" }}>
           <h4 style={{ marginBottom: "8px" }}>Create Project</h4>
-          <p style={{ fontSize: "0.85rem", color: "var(--text-muted)", marginBottom: "10px", wordBreak: "break-all" }}>
+          <p className="path-text" style={{ fontSize: "0.85rem", color: "var(--text-muted)", marginBottom: "10px" }} title={selectedPath}>
             Folder: {selectedPath}
           </p>
           <form onSubmit={handleCreateProject} style={{ display: "flex", gap: "8px" }}>
@@ -545,7 +552,7 @@ export function ProjectsView({ onSelectProject, onOpenSettings }: ProjectsViewPr
                     <button
                       type="button"
                       className="ghost"
-                      style={{ padding: "4px 8px", fontSize: "0.85rem", color: "var(--danger)" }}
+                      style={{ padding: "4px 8px", fontSize: "0.85rem", color: "var(--danger-text)" }}
                       onClick={() => { deleteOperationRef.current = {}; setDeletingProject(project); }}
                     >
                       Delete
@@ -553,7 +560,7 @@ export function ProjectsView({ onSelectProject, onOpenSettings }: ProjectsViewPr
                   </div>
                 </div>
 
-                <p style={{ fontSize: "0.85rem", color: "var(--text-muted)", wordBreak: "break-all", marginBottom: "8px" }}>
+                <p className="path-text" style={{ fontSize: "0.85rem", color: "var(--text-muted)", marginBottom: "8px" }} title={project.path}>
                   {project.path}
                 </p>
 
@@ -615,7 +622,7 @@ export function ProjectsView({ onSelectProject, onOpenSettings }: ProjectsViewPr
       {deletingProject && (
         <div className="modal-overlay">
           <div className="modal-content">
-            <h3 style={{ marginBottom: "12px", color: "var(--danger)" }}>Delete Project</h3>
+            <h3 style={{ marginBottom: "12px", color: "var(--danger-text)" }}>Delete Project</h3>
             <p style={{ marginBottom: "16px", fontSize: "0.95rem" }}>
               Are you sure you want to delete <strong>{deletingProject.label}</strong>?
             </p>
