@@ -6,6 +6,7 @@ import { epochOf, observationSeqOf, type Conversation } from "@caw/contracts";
 import { createSupervisor, type RuntimeAdapters, type RuntimeHost, type RuntimeTmuxSession } from "@caw/runtime";
 import { createAuthenticationService } from "../../apps/server/src/auth.js";
 import { buildApp } from "../../apps/server/src/app.js";
+import type { ServerConfig } from "../../apps/server/src/config.js";
 import { createMetadataStore } from "../../apps/server/src/store.js";
 
 /**
@@ -74,7 +75,7 @@ it("V18 the refused-launch stamp cannot stamp a row a launch is recording", asyn
     });
     const auth = createAuthenticationService({ stateDir: dir, setupOutput: () => {} });
     await auth.initAuth();
-    const config = { host: "127.0.0.1", port: 8791, stateDir: dir, allowedRoots: [dir], relayPort: 8792, relayAllowedOrigins: [], maxActiveAgents: 3, authTokenTtlHours: 720, trustTailscaleOrigin: false, logLevel: "silent", insecureCookies: false };
+    const config: ServerConfig = { host: "127.0.0.1", port: 8791, stateDir: dir, allowedRoots: [dir], relayPort: 8792, relayAllowedOrigins: [], maxActiveAgents: 3, authTokenTtlHours: 720, trustTailscaleOrigin: false, logLevel: "silent", insecureCookies: false };
     const app = buildApp({
       config, auth, store, supervisor: routeSupervisor, originAllowlist: ["https://workspace.test"],
       runtimeSpec: (conversation) => ({ conversationId: conversation.id, name: "pane", cwd: dir }),

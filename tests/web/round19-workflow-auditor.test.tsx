@@ -16,7 +16,7 @@ async function fixture(entryCount=0){
  vi.mocked(api.getConversationLink).mockResolvedValue({ok:true,data:{url:"ws://127.0.0.1:7466/r/0123456789abcdef.AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE",access:"full",instanceId:"host-A",generation:1}});
  vi.mocked(api.getConversationHistory).mockResolvedValue({ok:false,error:{code:"not_found",message:"No saved history"}});
  let socket:CollabSocket|null=null;
- vi.spyOn(CollabSocket.prototype,"connect").mockImplementation(function(){socket=this;this.onOpen?.();});
+ vi.spyOn(CollabSocket.prototype,"connect").mockImplementation(function(this:CollabSocket){socket=this;this.onOpen?.();});
  vi.spyOn(CollabSocket.prototype,"send").mockResolvedValue(true);
  const view=render(<ConversationView conversationId="c" onBack={()=>{}}/>);
  await waitFor(()=>expect(socket).not.toBeNull());await act(async()=>socket!.onFrame?.(welcome(entryCount),0));
@@ -86,7 +86,7 @@ it("V19 a post-snapshot send is acknowledged by its own echo as before",async()=
  const composer=f.view.container.querySelector("textarea")!;
  fireEvent.change(composer,{target:{value:"hi"}});
  await act(async()=>fireEvent.click(f.view.getByRole("button",{name:"Send"})));
- await f.emit({t:"event",event:{type:"message_end",message:{role:"user",content:"hi"}}});
+ await f.emit({t:"event",event:{type:"message_end",message:{role:"user",content:"hi",timestamp:1}}});
  await f.emit({t:"error",message:"prompting is unavailable until the host finishes starting up"});
  const recovery=f.view.container.querySelector(".refused-prompt")?.textContent??"";
  console.log("AUDIT19 post snapshot refusal",JSON.stringify({draft:composer.value,recovery,userRows:f.view.container.querySelectorAll(".message-card.user").length}));
