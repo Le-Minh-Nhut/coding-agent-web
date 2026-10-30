@@ -1,5 +1,6 @@
 import React, { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { api, type SavedConversationHistory } from "../api.js";
+import { chainMutation } from "../mutation-order.js";
 import { MarkdownCodeBlock, renderMarkdown } from "../sanitize.js";
 import { ActivityPanel } from "./ActivityPanel.js";
 import { SubagentPanel } from "./SubagentPanel.js";
@@ -301,10 +302,35 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
    * completes takes the new generation and is applied normally.
    */
   const metadataGenerationRef = useRef(0);
+  /**
+   * V25-04: conversation-metadata read ordering, independent of the mutation
+   * generation above. Every read of the conversation metadata takes the next number
+   * and applies its snapshot only while it still holds the newest number, so two
+   * overlapping reads (double Retry) cannot let the older response repaint the newer
+   * one. The initial effect read and retryUnavailableConversation's read share it.
+   */
+  const metadataReadSeqRef = useRef(0);
+  /**
+   * V25-05: attach-instructions read ordering, same shape as the metadata read seq.
+   * A successful restart re-reads the instructions (the tmux session changed); this
+   * makes sure the pre-restart read — still in flight — cannot land after it and put
+   * the dead session's command back on screen.
+   */
+  const attachReadSeqRef = useRef(0);
   const watchedTranscriptAgentRef = useRef<string | null>(null);
   const reqIdCounterRef = useRef(1);
   const transcriptRequestsRef = useRef(new Map<number, { agentId: string; fromByte: number; timer: ReturnType<typeof setTimeout> }>());
   const olderHistoryLoadingRef = useRef(false);
+  /**
+   * V24-01: mirrors `historyLoading` for the Load older guard, because the button's
+   * click closure cannot see the state value set by the tail effect in the same tick.
+   * A page requested during a tail read captured the pre-refresh cursor and merges
+   * into the pre-refresh snapshot, so its completion would resurrect the tail the
+   * fresh read just replaced. The tail read is this mode's authoritative snapshot,
+   * so paging waits for it. Set alongside every `setHistoryLoading` — and only after
+   * the generation check, so a superseded read never clears a newer read's flag.
+   */
+  const historyLoadingRef = useRef(false);
   const historyScrollAnchorRef = useRef<{ top: number; height: number } | null>(null);
   const fetchTranscriptRef = useRef<(agentId: string, fromByte: number) => void>(() => {});
   const rawUrlRef = useRef<string | null>(null);
@@ -621,6 +647,7 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     setSavedHistory(null);
     setHistoryVerdict("unverified");
     setHistoryLoading(false);
+    historyLoadingRef.current = false;
     setOlderHistoryLoading(false);
     olderHistoryLoadingRef.current = false;
     setHistoryError(null);
@@ -647,6 +674,15 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     // V23-04: a new conversation is a new metadata generation, so a read still in
     // flight for the previous one can never repaint this one's metadata.
     metadataGenerationRef.current += 1;
+    // V25-04: read/read has no ordering. Two metadata reads can overlap (a Retry
+    // started, then another — the first is slow), and both pass the generation guard
+    // because nothing mutated in between, so the older response repaints the newer
+    // result. A monotonic read sequence fixes that: each read takes the next number
+    // and only the newest read may apply. Mutations still use metadataGenerationRef;
+    // the two guards are independent (a mutation must invalidate an in-flight read,
+    // a newer read must supersede an older one).
+    const metadataRead = ++metadataReadSeqRef.current;
+    const attachRead = ++attachReadSeqRef.current;
     const currentId = conversationId;
     const metadataGeneration = metadataGenerationRef.current;
     api.getConversation(conversationId).then((res) => {
@@ -654,13 +690,15 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
       // that choice with the stale saved preference. V23-04: it must also not repaint
       // metadata a successful mutation already replaced — the generation is captured
       // here and a mutation that lands mid-fetch invalidates this snapshot.
-      if (conversationIdRef.current === currentId && metadataGenerationRef.current === metadataGeneration && res.ok) {
+      if (conversationIdRef.current === currentId && metadataGenerationRef.current === metadataGeneration && metadataReadSeqRef.current === metadataRead && res.ok) {
         setConversation(res.data);
         if (!modelDraftTouchedRef.current) setModelDraft(res.data.modelPreference ?? res.data.model ?? "");
       }
     });
     api.getAttachInstructions(conversationId).then((res) => {
-      if (conversationIdRef.current === currentId && res.ok) setAttachInfo(res.data);
+      // V25-05: only the newest attach read may publish, so the pre-restart fetch
+      // (or a previous conversation's) cannot overwrite a post-restart command.
+      if (conversationIdRef.current === currentId && attachReadSeqRef.current === attachRead && res.ok) setAttachInfo(res.data);
     });
   }, [conversationId]);
   useEffect(() => {
@@ -671,6 +709,7 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     // verdict can no longer re-enter saved mode or clear a newer live verdict.
     const generation = ++historyModeGenerationRef.current;
     setHistoryLoading(true);
+    historyLoadingRef.current = true;
     setHistoryError(null);
     // A new mode read supersedes any page from the previous one: its completion is
     // dropped by the generation check, so this mode must not inherit its in-flight
@@ -681,6 +720,7 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     void api.getConversationHistory(conversationId).then((result) => {
       if (!active || historyModeGenerationRef.current !== generation) return;
       setHistoryLoading(false);
+      historyLoadingRef.current = false;
       if (result.ok) {
         setHistoryError(null);
         // F1: ok and conflict_owner are mutually exclusive verdicts of the same read,
@@ -702,6 +742,7 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     }).catch((error: unknown) => {
       if (!active || historyModeGenerationRef.current !== generation) return;
       setHistoryLoading(false);
+      historyLoadingRef.current = false;
       setHistoryVerdict("unverified");
       setHistoryError(error instanceof Error ? error.message : "Could not load saved transcript.");
     });
@@ -709,7 +750,8 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
   }, [conversationId, linkUnavailable, historyRetryEpoch]);
   const loadOlderHistory = async () => {
     const current = savedHistory;
-    if (!current?.hasOlder || !current.nextCursor || olderHistoryLoadingRef.current) return;
+    // V24-01: refuse while a tail read is pending (see historyLoadingRef).
+    if (!current?.hasOlder || !current.nextCursor || olderHistoryLoadingRef.current || historyLoadingRef.current) return;
     olderHistoryLoadingRef.current = true;
     setOlderHistoryLoading(true);
     setOlderHistoryError(null);
@@ -733,6 +775,14 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     if (!result.ok) {
       historyScrollAnchorRef.current = null;
       setOlderHistoryError(result.error.message || "Could not load older history.");
+      // V24-03: a page read that reports conflict_owner proves a live-or-unverifiable
+      // writer for this generation, so it supersedes the archived "not running" claim
+      // even though the tail read (the newer snapshot) never ran. `unverified`, not
+      // `live`: the hedged banner is the same honest copy, and unlike `live` it keeps
+      // the cached rows readable beside the page error (a `live` verdict hides them).
+      // Other page errors (not_found/internal/network) prove nothing about the host,
+      // so they must not touch the verdict.
+      if (result.error.code === "conflict_owner") setHistoryVerdict("unverified");
       return;
     }
     const seenMessages = new Set<string>();
@@ -880,12 +930,21 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     // restart succeeds while this is in flight, that mutation bumps the generation
     // and this stale snapshot is dropped instead of rewinding the saved model.
     const metadataGeneration = metadataGenerationRef.current;
+    // V25-04: this read is ordered against every other conversation-metadata read.
+    // Two Retry clicks overlap; the second is newer and must win, so the first
+    // captures a lower number and its late response is dropped by the check below.
+    const metadataRead = ++metadataReadSeqRef.current;
     const result = await api.getConversation(currentId);
     if (conversationIdRef.current !== currentId) return;
-    if (result.ok && metadataGenerationRef.current === metadataGeneration) {
+    if (result.ok && metadataGenerationRef.current === metadataGeneration && metadataReadSeqRef.current === metadataRead) {
       setConversation(result.data);
       if (!modelDraftTouchedRef.current) setModelDraft(result.data.modelPreference ?? result.data.model ?? "");
     }
+    // V25-04: a superseded Retry must not re-establish the connection either — the
+    // newer Retry does that itself, and this call would race it with a link minted
+    // from a stale read. Only the newest read proceeds to connect and to re-run the
+    // saved-history read.
+    if (metadataReadSeqRef.current !== metadataRead) return;
     await connectToCollab(true);
     // The live link may still be down; re-run the saved-history read so a
     // recovered endpoint is picked up without waiting for linkUnavailable to flip.
@@ -1041,7 +1100,12 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     const conversationAtSave = conversationIdRef.current;
     setModelBusy(true);
     setModelMessage("");
-    const result = await api.setConversationModel(conversationId, modelDraft);
+    // The save is chained on the conversation's lifecycle key: a save whose view
+    // unmounted (Back, reopen) still outlives this mount, and the server applies
+    // writes in arrival order — unchained, that older "MODEL_FIRST" would land
+    // after the "MODEL_FINAL" the reopened view sent and rewind the stored
+    // preference. Submission order becomes arrival order. (V25-02)
+    const result = await chainMutation(`conversation-lifecycle:${conversationId}`, () => api.setConversationModel(conversationId, modelDraft));
     if (!viewActiveRef.current || operationGenerationRef.current !== operationGeneration || conversationIdRef.current !== conversationAtSave) return;
     setModelBusy(false);
     setModelMessage(result.ok ? "Model saved for next launch." : result.error.message);
@@ -1060,7 +1124,11 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     const submittedDraft = modelDraft;
     setModelBusy(true);
     setModelMessage("");
-    const saved = await api.setConversationModel(conversationId, submittedDraft);
+    // Both the save and the restart are chained on the same key, in submission
+    // order: an older save that arrives late cannot slip between (or after) this
+    // pair, so the preference the restart launched with is the one that stays
+    // stored. (V25-02)
+    const saved = await chainMutation(`conversation-lifecycle:${conversationId}`, () => api.setConversationModel(conversationId, submittedDraft));
     if (!viewActiveRef.current || operationGenerationRef.current !== operationGeneration || conversationIdRef.current !== conversationAtRestart) return;
     if (!saved.ok) {
       setModelBusy(false);
@@ -1069,7 +1137,7 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     }
     metadataGenerationRef.current += 1;
     setConversation(saved.data);
-    const result = await api.restartConversation(conversationId);
+    const result = await chainMutation(`conversation-lifecycle:${conversationId}`, () => api.restartConversation(conversationId));
     if (!viewActiveRef.current || operationGenerationRef.current !== operationGeneration || conversationIdRef.current !== conversationAtRestart) return;
     setModelBusy(false);
     if (result.ok) {
@@ -1079,6 +1147,21 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
       // the restart was pending; a newer unsaved choice must not be clobbered.
       if (modelDraftRef.current === submittedDraft) setModelDraft(result.data.modelPreference ?? result.data.model ?? "");
       setModelMessage("Agent restarted.");
+      // V25-05: the restart replaced the tmux session, so the terminal attach
+      // command on screen (from the pre-restart read) now points at a dead session.
+      // Re-read the instructions and publish only while this is still the newest
+      // attach read, so the pre-restart fetch cannot land after it. The server's
+      // answer decides the render — `available:false` falls back to the "run
+      // omp session list" hint. The bump above already retired the pre-restart
+      // read, so a failed refetch must publish the unavailable shape too: leaving
+      // the old value would keep the dead session's command on screen with
+      // nothing scheduled to replace it.
+      const attachRead = ++attachReadSeqRef.current;
+      void api.getAttachInstructions(conversationAtRestart).then((attach) => {
+        if (conversationIdRef.current !== conversationAtRestart || attachReadSeqRef.current !== attachRead) return;
+        if (attach.ok) setAttachInfo(attach.data);
+        else setAttachInfo({ conversationId: conversationAtRestart, available: false, command: null, tmuxSessionName: null, reason: attach.error?.message ?? "The attach command cannot be verified after the restart." });
+      });
       socketRef.current?.close();
       socketRef.current = null;
       if (viewActiveRef.current && operationGenerationRef.current === operationGeneration && conversationIdRef.current === conversationAtRestart) await connectToCollab(true);
@@ -1302,7 +1385,7 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
             <button type="button" className="primary" onClick={() => void retryUnavailableConversation()}>{historyVerdict === "archived" ? "Open live view" : "Retry"}</button>
             {savedHistory.skippedOversized && <div className="banner unknown" role="alert">History is incomplete: a record too large to display was skipped; journal intact on disk.</div>}
             {savedHistory.truncated && (savedHistory.hasOlder || savedHistory.skippedOversized) && <div className="banner unknown" role="status">Saved transcript truncated; some history is omitted.</div>}
-            {savedHistory.hasOlder && savedHistory.nextCursor !== null && <button type="button" className="ghost" disabled={olderHistoryLoading} onClick={() => void loadOlderHistory()}>{olderHistoryLoading ? "Loading older…" : "Load older"}</button>}
+            {savedHistory.hasOlder && savedHistory.nextCursor !== null && <button type="button" className="ghost" disabled={olderHistoryLoading || historyLoading} onClick={() => void loadOlderHistory()}>{olderHistoryLoading ? "Loading older…" : "Load older"}</button>}
             {olderHistoryLoading && <p role="status">Loading older history…</p>}
             {olderHistoryError && <p role="alert">{olderHistoryError}</p>}
             {!savedHistory.hasOlder && !savedHistory.skippedOversized && <p role="status">Beginning of history.</p>}

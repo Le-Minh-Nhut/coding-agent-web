@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import { api } from "../api.js";
+import { chainMutation } from "../mutation-order.js";
 import { FolderBrowser } from "./FolderBrowser.js";
 import type { ProjectWithStats } from "@caw/contracts";
 
@@ -7,6 +8,19 @@ interface ProjectsViewProps {
   onSelectProject: (projectId: string) => void;
   onOpenSettings: () => void;
 }
+
+/**
+ * One rename flight per project, keyed by project id.
+ *
+ * Deliberately at module scope rather than in a component ref: a pending "First"
+ * PATCH outlives this view when the user leaves for Settings and back, and the
+ * server applies writes in arrival order — it would land after the "Final" the
+ * reopened dialog sent. Sharing the flight across mounts keeps the follow-up (the
+ * write that makes the last intent win) attached to the write still in flight,
+ * instead of a new mount firing a competing PATCH. Component-local dialog state
+ * (token, revision) stays with the view; only the wire writes live here. (V25-01)
+ */
+const renameFlights = new Map<string, { desired: string; pending: { label: string; token: object | null; revision: number } | null }>();
 
 export function ProjectsView({ onSelectProject, onOpenSettings }: ProjectsViewProps) {
   const [projects, setProjects] = useState<ProjectWithStats[]>([]);
@@ -32,6 +46,13 @@ export function ProjectsView({ onSelectProject, onOpenSettings }: ProjectsViewPr
   const listSeqRef = useRef(0);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /**
+   * N25-01: whether the current list state came from a read that actually
+   * succeeded. "No projects added yet." is a factual claim about the workspace, so
+   * it may only be made after an ok read — a failed read says nothing about the
+   * list and must show its error instead of an empty-workspace claim.
+   */
+  const [listReadOk, setListReadOk] = useState(false);
 
   // Edit / Delete dialogs. Each dialog records the operation token that opened it;
   // a late response may refresh the list, but only closes the dialog it belongs to.
@@ -54,8 +75,11 @@ export function ProjectsView({ onSelectProject, onOpenSettings }: ProjectsViewPr
    * A recorded intent carries the dialog token that submitted it, so a coalesced
    * Save from a reopened dialog owns its own success/failure feedback instead of
    * inheriting the token of the write it is queued behind.
+   *
+   * The map lives at module scope (renameFlights) so a remount inherits the flight
+   * still in flight rather than racing a second PATCH at it (V25-01).
    */
-  const renameFlightRef = useRef<Map<string, { desired: string; pending: { label: string; token: object | null; revision: number } | null }>>(new Map());
+  const renameFlightRef = { current: renameFlights };
   const createOperationRef = useRef<object | null>(null);
   /**
    * Draft revision of the new-project label, bumped on every keystroke. A create
@@ -78,10 +102,14 @@ export function ProjectsView({ onSelectProject, onOpenSettings }: ProjectsViewPr
     // overlay the star column with the values the favorite path last applied.
     if (seq !== listSeqRef.current) return;
     if (res.ok) {
+      setListReadOk(true);
       setProjects(epoch === favoriteEpochRef.current
         ? res.data
         : res.data.map((p) => ({ ...p, favorite: favoriteValueRef.current.get(p.id) ?? p.favorite })));
     } else {
+      // A failed list read proves nothing about the workspace, so it must retract
+      // any earlier empty claim (N25-01) and surface its own error.
+      setListReadOk(false);
       setError(res.error.message);
     }
   };
@@ -174,7 +202,7 @@ export function ProjectsView({ onSelectProject, onOpenSettings }: ProjectsViewPr
    * only close the dialog they belong to, never a newer one opened meanwhile.
    */
   const writeRename = async (projectId: string, record: { desired: string; pending: { label: string; token: object | null; revision: number } | null }, token: object | null, revision: number): Promise<void> => {
-    const res = await api.updateProject(projectId, { label: record.desired });
+    const res = await chainMutation(`project-rename:${projectId}`, () => api.updateProject(projectId, { label: record.desired }));
     // A response acts only on the dialog that submitted it: the token captured at
     // that Save must still be the open dialog's token. Success additionally needs the
     // draft revision captured at that same Save to still be current — the text
@@ -304,7 +332,7 @@ export function ProjectsView({ onSelectProject, onOpenSettings }: ProjectsViewPr
 
       {loading ? (
         <div style={{ padding: "32px", textAlign: "center", color: "var(--text-muted)" }}>Loading projects…</div>
-      ) : projects.length === 0 ? (
+      ) : projects.length === 0 && listReadOk ? (
         <div className="card" style={{ textAlign: "center", padding: "40px 20px" }}>
           <p style={{ color: "var(--text-muted)", marginBottom: "16px" }}>No projects added yet.</p>
           <button type="button" className="primary" onClick={() => setShowBrowser(true)}>
