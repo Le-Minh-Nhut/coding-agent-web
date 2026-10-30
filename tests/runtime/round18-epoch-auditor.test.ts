@@ -31,12 +31,22 @@ it("V18 an older model-only refresh cannot overwrite a newer model-only refresh"
  try{
   const store=createMetadataStore(dir);const p=await store.createProject({path:dir});const c=await store.createConversation({projectId:p.id,nativeSessionId:"native-A"});
   await store.updateConversation(c.id,{nativeSessionPath:"/tmp/native-A",tmuxSessionId:pane.id,tmuxServerIdentity:pane.serverIdentity,tmuxPanePid:pane.panePid,hostInstanceId:"host-A",hostGeneration:1,state:"idle",statusDetail:"No turn in flight.",model:"seed-model"});
-  const oldEntered=deferred<void>(),oldGate=deferred<boolean>();let probes=0;let currentHost=host("older-model");
-  const adapters:RuntimeAdapters={listManagedTmux:async()=>[pane],listHosts:async()=>[{...currentHost}],isSessionLive:async()=>true,sessionPathExists:async()=>{if(++probes===1){oldEntered.resolve();return oldGate.promise;}return true;},findBySessionId:async()=>"/tmp/native-A",newestSessionFor:async()=>null,isProcessDescendant:async(pid,parent)=>pid===parent,tmuxServerIdentity:async()=>"private:1",getTmux:async()=>({ok:true,session:pane}),killTmux:async()=>{},launch:async()=>{throw new Error("not used");}};
-  const supervisor=createSupervisor({store,adapters,maxActive:3});const older=supervisor.refresh(c.id);await oldEntered.promise;
-  currentHost=host("newer-model");const newer=(await supervisor.refresh(c.id))!;
-  oldGate.resolve(true);await older;const final=(await store.getConversation(c.id))!;
-  console.log("AUDIT18 model freshness",JSON.stringify({newerModel:newer.model,finalModel:final.model,newerEpoch:epochOf(newer),finalEpoch:epochOf(final)}));
+  const firstEntered=deferred<void>(),firstGate=deferred<boolean>();let probes=0;let currentHost=host("older-model");
+  const adapters:RuntimeAdapters={listManagedTmux:async()=>[pane],listHosts:async()=>[{...currentHost}],isSessionLive:async()=>true,sessionPathExists:async()=>{if(++probes===1){firstEntered.resolve();return firstGate.promise;}return true;},findBySessionId:async()=>"/tmp/native-A",newestSessionFor:async()=>null,isProcessDescendant:async(pid,parent)=>pid===parent,tmuxServerIdentity:async()=>"private:1",getTmux:async()=>({ok:true,session:pane}),killTmux:async()=>{},launch:async()=>{throw new Error("not used");}};
+  const supervisor=createSupervisor({store,adapters,maxActive:3});
+  // The first refresh samples `older-model`; the model moves forward while it is
+  // still probing. The second refresh is serialized behind it and cannot read the
+  // row or probe until the first has committed, so it reads the row the first left
+  // and samples `newer-model`. The newest observation is the one that remains,
+  // whichever order the two commits would have completed in.
+  const older=supervisor.refresh(c.id);await firstEntered.promise;
+  currentHost=host("newer-model");
+  const newer=supervisor.refresh(c.id);
+  firstGate.resolve(true);const olderResult=(await older)!;
+  const newerResult=(await newer)!;const final=(await store.getConversation(c.id))!;
+  console.log("AUDIT18 model freshness",JSON.stringify({olderModel:olderResult.model,newerModel:newerResult.model,finalModel:final.model,olderEpoch:epochOf(olderResult),finalEpoch:epochOf(final)}));
+  expect(olderResult.model).toBe("older-model");
+  expect(newerResult.model).toBe("newer-model");
   expect(final.model).toBe("newer-model");
  }finally{await rm(dir,{recursive:true,force:true});}
 });
@@ -138,19 +148,29 @@ it("V18 mirror: a delayed model-only refresh that read the same revision cannot 
  try{
   const store=createMetadataStore(dir);const p=await store.createProject({path:dir});const c=await store.createConversation({projectId:p.id,nativeSessionId:"native-A"});
   await store.updateConversation(c.id,{nativeSessionPath:"/tmp/native-A",tmuxSessionId:pane.id,tmuxServerIdentity:pane.serverIdentity,tmuxPanePid:pane.panePid,hostInstanceId:"host-A",hostGeneration:1,state:"idle",statusDetail:"No turn in flight.",model:"seed-model"});
-  const firstEntered=deferred<void>(),firstGate=deferred<boolean>();let probes=0;let currentHost=host("newer-model");
+  const firstEntered=deferred<void>(),firstGate=deferred<boolean>();let probes=0;const currentHost=host("newer-model");
   const adapters:RuntimeAdapters={listManagedTmux:async()=>[pane],listHosts:async()=>[{...currentHost}],isSessionLive:async()=>true,sessionPathExists:async()=>{if(++probes===1){firstEntered.resolve();return firstGate.promise;}return true;},findBySessionId:async()=>"/tmp/native-A",newestSessionFor:async()=>null,isProcessDescendant:async(pid,parent)=>pid===parent,tmuxServerIdentity:async()=>"private:1",getTmux:async()=>({ok:true,session:pane}),killTmux:async()=>{},launch:async()=>{throw new Error("not used");}};
+  // Record the row revision each refresh reads: this is the fact that decides the
+  // case. Under the old ticket mechanism the second refresh could read the seed
+  // revision before the first committed and then overwrite it; serialization makes
+  // the second's read happen after the first's commit, so it never presents a
+  // revision the row has already moved past.
+  const reads:number[]=[];const realGet=store.getConversation.bind(store);
+  store.getConversation=async(id)=>{const row=await realGet(id);if(row)reads.push(observationSeqOf(row));return row;};
   const supervisor=createSupervisor({store,adapters,maxActive:3});
-  // The `newer` observation reads the row and its host first, then blocks mid-probe;
-  // the `older` observation runs to completion while it is held. Both began from the
-  // same revision, so the late commit is the stale one whatever it observed.
   const newer=supervisor.refresh(c.id);await firstEntered.promise;
-  currentHost=host("older-model");const older=(await supervisor.refresh(c.id))!;
-  firstGate.resolve(true);const settled=(await newer)!;const final=(await store.getConversation(c.id))!;
-  console.log("AUDIT18 model mirror",JSON.stringify({olderModel:older.model,settledModel:settled.model,finalModel:final.model,seq:observationSeqOf(final)}));
-  expect(older.model).toBe("older-model");
-  expect(settled.model).toBe("older-model");
-  expect(final.model).toBe("older-model");
+  const older=supervisor.refresh(c.id);
+  firstGate.resolve(true);const newerResult=(await newer)!;
+  const olderResult=(await older)!;const final=(await store.getConversation(c.id))!;
+  console.log("AUDIT18 model mirror",JSON.stringify({newerModel:newerResult.model,olderModel:olderResult.model,finalModel:final.model,seq:observationSeqOf(final),reads}));
+  // The first refresh committed `newer-model`; the delayed second refresh read the
+  // row *after* that commit (its read is revision 2, not the seed), found the same
+  // model already present, and wrote nothing. The row is never repainted by a
+  // snapshot taken against a revision it has moved past.
+  expect(newerResult.model).toBe("newer-model");
+  expect(olderResult.model).toBe("newer-model");
+  expect(reads).toContain(2);
+  expect(final.model).toBe("newer-model");
  }finally{await rm(dir,{recursive:true,force:true});}
 });
 

@@ -252,16 +252,17 @@ That revision orders *commits*, which is not the same question as which snapshot
 is newer. Two refreshes of one life read the row before either commits, so both
 present the same `expectedObservationSeq` and the first to reach the store wins:
 when the *older* snapshot commits first, the newer one is refused and the final
-model is the older (V20-08). So refresh takes a per-conversation **capture ticket**
-alongside the row read — a monotone in-process counter, never a wall clock, since
-two transitions can land inside one millisecond. At commit it presents the
-revision the row currently stands at when a sibling's *earlier* capture committed
-the intervening change (its newer snapshot supersedes that sibling), and is
-dropped when a *later* capture already committed or when any other writer —
-adopt, a reconcile verdict, a launch — moved the row, exactly as the plain
-revision gate did. A commit records its ticket, so the newest capture is the one
-that survives whichever order the commits complete in. Capture order is per
-conversation and in-process, like the launch reservation.
+model is the older (V20-08). The root cause is that a routine observation is not
+atomic — the row read happens first and the machine probes second — so two
+overlapping refreshes can sample the machine in either order, and any ordering
+fact captured at the row read names the wrong snapshot "newer". No in-process
+ordering fact can fix this: sampling order is not observable. So refreshes of one
+conversation are **serialized at entry** (a per-conversation promise chain). The
+second refresh joins the first and only then runs its whole cycle — row read,
+probes, commit — against a row that already includes the first's result, so its
+`observationSeq` is read *after* that commit and the plain revision gate refuses
+the older of the two in either completion order. Serialization is in-process and
+per conversation, like the launch reservation.
 
 Routine observation writes also carry `observation: true`. While a launch
 reservation is held the row is mid-replacement — before the record, the row has no
