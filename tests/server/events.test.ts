@@ -235,4 +235,18 @@ describe("GET /api/conversations/:id/events", () => {
 
     await app.close();
   });
+
+  it("A3 a zero limit yields an empty tail page instead of the whole log", async () => {
+    const { app, store } = await fixture();
+    const project = await store.createProject({ path: "/tmp/p" });
+    const conv = await store.createConversation({ projectId: project.id });
+    for (let i = 1; i <= 5; i++) await store.recordEvent(conv.id, "test.event", { n: i });
+
+    // `slice(-0)` is `slice(0)`, which returned the entire log; the forward read
+    // has always returned nothing for limit 0, and the tail now matches it.
+    expect(await store.listEventsTail(conv.id, Number.POSITIVE_INFINITY, 0)).toEqual([]);
+    expect(await store.listEvents(conv.id, 0, 0)).toEqual([]);
+    expect(await store.listEventsTail(conv.id) as Array<{ seq: number }>).toHaveLength(5);
+    await app.close();
+  });
 });

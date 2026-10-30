@@ -54,6 +54,13 @@ export function createAuthenticationService(options: { stateDir: string; ttlHour
   const ttlMs = (options.ttlHours ?? 720) * 60 * 60 * 1000;
   const now = options.now ?? Date.now;
   let authRecord: AuthRecord | null = null;
+  /**
+   * F-A2: bumped by every credential write. A password check reads the record
+   * before its scrypt await, so a rotation that lands inside that window would
+   * otherwise let a login authenticated against the OLD credential mint a live
+   * session. The check compares this counter across the await and refuses.
+   */
+  let credentialGeneration = 0;
 
   async function derive(password: string, salt: Buffer): Promise<Buffer> {
     return Buffer.from(await scrypt(password, salt, HASH_BYTES) as Buffer);
@@ -67,20 +74,31 @@ export function createAuthenticationService(options: { stateDir: string; ttlHour
     await chmod(temp, 0o600);
     await rename(temp, file);
     authRecord = record;
+    credentialGeneration += 1;
   }
 
   async function matches(password: string, kind: AuthRecord["kind"]): Promise<boolean> {
     const record = authRecord;
     if (!record || record.kind !== kind) return false;
     if (record.kind === "pending" && (record.expiresAt <= now() || record.used)) return false;
+    // F-A2: `derive` (scrypt) is an await window. A credential write that lands
+    // inside it — a password rotation or a reset — means the hash just compared
+    // is no longer the credential of record, so the comparison proves nothing
+    // about the CURRENT credential. Refuse; the caller answers 401.
+    const generation = credentialGeneration;
     const candidate = await derive(password, Buffer.from(record.salt, "hex"));
+    if (credentialGeneration !== generation) return false;
     return safeEqual(candidate.toString("hex"), record.hash);
   }
 
   async function matchesPendingToken(password: string): Promise<boolean> {
     const record = authRecord;
     if (record?.kind !== "pending" || !record.used || record.expiresAt <= now()) return false;
+    // F-A2 family: a reset that persists a new pending token inside the scrypt
+    // window invalidates the record compared here.
+    const generation = credentialGeneration;
     const candidate = await derive(password, Buffer.from(record.salt, "hex"));
+    if (credentialGeneration !== generation) return false;
     return safeEqual(candidate.toString("hex"), record.hash);
   }
 
@@ -221,8 +239,13 @@ export function createAuthenticationService(options: { stateDir: string; ttlHour
         // expired since; the new credential is already on disk either way. When it
         // is gone the change still reports success and the client simply gets 401
         // on the next call, which is the honest answer.
-        if (sessions.get(key) === session && session.expiresAt > now()) {
-          sessions.clear();
+        //
+        // F-A1: every OTHER live session must still be revoked. The requester's
+        // own expiry must not make the revocation conditional, so the clear is
+        // unconditional and only the re-add is gated.
+        const stillOurs = sessions.get(key) === session && session.expiresAt > now();
+        sessions.clear();
+        if (stillOurs) {
           session.passwordSetupRequired = false;
           sessions.set(key, session);
         }
@@ -243,10 +266,11 @@ export function createAuthenticationService(options: { stateDir: string; ttlHour
         // Same revocation window as completePasswordSetup: a logout or reset that
         // revoked this session while the new credential was being derived and
         // persisted must not be undone by reinstating the captured object.
-        if (sessions.get(key) === session && session.expiresAt > now()) {
-          sessions.clear();
-          sessions.set(key, session);
-        }
+        // F-A1: and the other live sessions are revoked regardless of whether the
+        // requester itself expired inside the window.
+        const stillOurs = sessions.get(key) === session && session.expiresAt > now();
+        sessions.clear();
+        if (stillOurs) sessions.set(key, session);
         return true;
       } finally {
         credentialWriteInProgress = false;

@@ -595,9 +595,11 @@ export function createMetadataStore(stateDir: string, now: () => Date = () => ne
     },
     async listEventsTail<T = unknown>(conversationId: string, beforeSeq = Number.POSITIVE_INFINITY, limit = 100) {
       await load();
+      const capped = Math.max(0, Math.min(1000, limit));
+      if (capped === 0) return [] as Array<StoreEvent<T>>;
       const older = (events.get(conversationId) ?? []).filter((event) => event.seq < beforeSeq);
       // The list is stored in ascending seq order, so the newest `limit` are its tail.
-      return older.slice(-Math.max(0, Math.min(1000, limit))) as Array<StoreEvent<T>>;
+      return older.slice(-capped) as Array<StoreEvent<T>>;
     },
     recordCommandOnce(idempotencyKey, conversationId, kind, payload) {
       return serialize(async () => {
