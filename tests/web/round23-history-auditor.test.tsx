@@ -156,27 +156,34 @@ it('V23 a late read resolving after Back/unmount is dropped without error',async
 });
 
 /**
- * F-B3: the saved transcript used to outlive a LATER unverified verdict. Archived
- * → save → a fresh read that proves nothing (not_found/internal) left the saved
- * rows on screen and hid the error, so the panel kept claiming a transcript it
- * could no longer stand behind. Only a current-generation `archived` verdict
- * sustains that claim.
+ * F-B3: a fresh unverified verdict must supersede the CLAIM, not the data. Archived
+ * → save → a fresh read that proves nothing (not_found/internal) used to leave the
+ * "this session is not running" banner standing over rows it could no longer stand
+ * behind, with the fresh failure hidden. The verdict now keeps the rows readable as
+ * cached data, replaces that banner with a hedge, and surfaces the same error and
+ * Retry the fallback card offers — so a real error can never hide behind the rows.
  */
-it.each(['not_found','internal'] as const)('V23 a fresh unverified verdict replaces a stale saved transcript (%s)',async kind=>{
+it.each(['not_found','internal'] as const)('V23 a fresh unverified verdict keeps the cached transcript without claiming liveness (%s)',async kind=>{
  const f=await fixture();
- await enterSaved(f,history('STALE_TRANSCRIPT'));
- const savedShown=screen.queryByText('STALE_TRANSCRIPT')!==null;
+ await enterSaved(f,history('CACHED_TRANSCRIPT'));
+ const savedShown=screen.queryByText('CACHED_TRANSCRIPT')!==null;
+ const archivedClaim=screen.queryByText(/Saved transcript — this session is not running/)!==null;
  vi.mocked(api.getConversationHistory).mockResolvedValue({ok:false,error:{code:kind,message:kind==='internal'?'Journal read failed':'No saved history'}});
  await act(async()=>fireEvent.click(screen.getByRole('button',{name:'Open live view'})));
- await screen.findByText('Live host unavailable');
- const staleRows=screen.queryByText('STALE_TRANSCRIPT')!==null;
- const unverifiedCard=screen.queryByText('Live host unavailable')!==null;
- const errorVisible=kind==='internal'?screen.queryByText('Journal read failed')!==null:screen.queryByText('Host presence is not yet verified. No saved transcript is available; retry to check for a live host.')!==null;
- console.log('AUDIT23 stale transcript superseded',JSON.stringify({kind,savedShown,staleRows,unverifiedCard,errorVisible}));
+ await screen.findByText(/Saved transcript — host presence not verified/);
+ const rowsKept=screen.queryByText('CACHED_TRANSCRIPT')!==null;
+ const deadClaim=screen.queryByText(/Saved transcript — this session is not running/)!==null;
+ const errorVisible=kind==='internal'?screen.queryByText('Journal read failed')!==null:screen.queryByText(/Host presence is not yet verified; this cached transcript may be stale\./)!==null;
+ const retryAvailable=screen.queryByRole('button',{name:'Retry'})!==null;
+ console.log('AUDIT23 unverified keeps cached transcript',JSON.stringify({kind,savedShown,archivedClaim,rowsKept,deadClaim,errorVisible,retryAvailable}));
  expect(savedShown).toBe(true);
- expect(staleRows).toBe(false);
- expect(unverifiedCard).toBe(true);
+ expect(archivedClaim).toBe(true);
+ // The owner's text: a cached transcript may be kept for reading, but it must not
+ // prove current liveness. Rows stay; the stopped claim and the hidden error go.
+ expect(rowsKept).toBe(true);
+ expect(deadClaim).toBe(false);
  expect(errorVisible).toBe(true);
+ expect(retryAvailable).toBe(true);
 });
 
 

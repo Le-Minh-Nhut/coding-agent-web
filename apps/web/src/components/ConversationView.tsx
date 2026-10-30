@@ -320,9 +320,12 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
   //
   // F-B3: the transcript is only a claim when a CURRENT generation verifiably read
   // the journal (`archived`). A later fresh read that proves nothing (`unverified`,
-  // e.g. not_found/internal) supersedes that claim, so the stale rows must give way
-  // to the unverified card and its Retry instead of rendering beside a hidden error.
-  const isShowingSavedHistory = linkUnavailable && savedHistory !== null && historyVerdict === "archived";
+  // e.g. not_found/internal) supersedes that claim — the rows may stay readable as
+  // cached data, but they must not sit beside a hidden error or under a claim about
+  // the session. So the unverified verdict keeps the rows and REPLACES the "not
+  // running" banner with a hedge, surfacing the fresh error/Retry in the same view.
+  // A `live` verdict proves nothing about a writer either; it keeps the card.
+  const isShowingSavedHistory = linkUnavailable && savedHistory !== null && historyVerdict !== "live";
   const commandSuggestions = inputText.startsWith("/") && !/\s/.test(inputText)
     ? slashCommands.filter((command) => command.name.startsWith(inputText)).slice(0, 5)
     : [];
@@ -1278,13 +1281,25 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
         <div className="messages-content" ref={messagesContentRef}>
         {isShowingSavedHistory && savedHistory ? (
           <>
-            <div className="banner idle" role="status">Saved transcript — this session is not running. {savedHistory.header.title ?? savedHistory.header.sessionId}</div>
+            <div className="banner idle" role="status">
+              {historyVerdict === "archived"
+                ? `Saved transcript — this session is not running. ${savedHistory.header.title ?? savedHistory.header.sessionId}`
+                : `Saved transcript — host presence not verified. ${savedHistory.header.title ?? savedHistory.header.sessionId}`}
+            </div>
+            {/* V22-01/F-B3: an unverified verdict keeps the cached rows readable but
+                must not hide the fresh failure behind them. Surface the same error the
+                fallback card offers; the button below retries under its verdict label. */}
+            {historyVerdict !== "archived" && (
+              <div className="banner unknown" role="alert">
+                {historyLoading ? "Checking for a live host…" : historyError ?? "Host presence is not yet verified; this cached transcript may be stale."}
+              </div>
+            )}
             {/* V21-02: saved mode must not be a dead end. The host may resume the
                 native session later (external ones especially, where the app cannot
                 restart the process itself), so offer an on-screen check for a fresh
                 link. One click, no polling and no auto launch: a successful mint
                 switches to the live view, a failure keeps this transcript. */}
-            <button type="button" className="primary" onClick={() => void retryUnavailableConversation()}>Open live view</button>
+            <button type="button" className="primary" onClick={() => void retryUnavailableConversation()}>{historyVerdict === "archived" ? "Open live view" : "Retry"}</button>
             {savedHistory.skippedOversized && <div className="banner unknown" role="alert">History is incomplete: a record too large to display was skipped; journal intact on disk.</div>}
             {savedHistory.truncated && (savedHistory.hasOlder || savedHistory.skippedOversized) && <div className="banner unknown" role="status">Saved transcript truncated; some history is omitted.</div>}
             {savedHistory.hasOlder && savedHistory.nextCursor !== null && <button type="button" className="ghost" disabled={olderHistoryLoading} onClick={() => void loadOlderHistory()}>{olderHistoryLoading ? "Loading older…" : "Load older"}</button>}
