@@ -114,6 +114,13 @@ export interface MetadataStore {
   ): Promise<{ conversation: Conversation; applied: boolean } | null>;
   recordEvent<T>(conversationId: string, type: string, payload: T, ts?: string): Promise<StoreEvent<T>>;
   listEvents<T = unknown>(conversationId: string, afterSeq?: number, limit?: number): Promise<Array<StoreEvent<T>>>;
+  /**
+   * The newest `limit` events strictly older than `beforeSeq`, returned ascending
+   * (V23-02). A timeline opens on the tail of the log, not on the first page of
+   * the oldest events: the forward read above walks away from the interesting end.
+   * Ascending matches `listEvents` so the caller can slice/annotate identically.
+   */
+  listEventsTail<T = unknown>(conversationId: string, beforeSeq?: number, limit?: number): Promise<Array<StoreEvent<T>>>;
   recordCommandOnce(idempotencyKey: string, conversationId: string, kind: string, payload: Record<string, unknown>): Promise<{ first: boolean; command: StoredCommand }>;
 }
 
@@ -585,6 +592,12 @@ export function createMetadataStore(stateDir: string, now: () => Date = () => ne
     async listEvents<T = unknown>(conversationId: string, afterSeq = 0, limit = 100) {
       await load();
       return (events.get(conversationId) ?? []).filter((event) => event.seq > afterSeq).slice(0, Math.max(0, Math.min(1000, limit))) as Array<StoreEvent<T>>;
+    },
+    async listEventsTail<T = unknown>(conversationId: string, beforeSeq = Number.POSITIVE_INFINITY, limit = 100) {
+      await load();
+      const older = (events.get(conversationId) ?? []).filter((event) => event.seq < beforeSeq);
+      // The list is stored in ascending seq order, so the newest `limit` are its tail.
+      return older.slice(-Math.max(0, Math.min(1000, limit))) as Array<StoreEvent<T>>;
     },
     recordCommandOnce(idempotencyKey, conversationId, kind, payload) {
       return serialize(async () => {

@@ -5,7 +5,7 @@ import { api } from "../api.js";
 export interface ActivityPanelProps {
   conversationId?: string;
   events?: ConversationEvent[];
-  nextAfter?: number | null;
+  nextBefore?: number | null;
   onClose?: () => void;
 }
 
@@ -41,15 +41,17 @@ export function humanizeEventType(type: string): string {
 export function ActivityPanel({
   conversationId,
   events: initialEvents,
-  nextAfter: initialNextAfter = null,
+  nextBefore: initialNextBefore = null,
   onClose,
 }: ActivityPanelProps) {
   const [events, setEvents] = useState<ConversationEvent[]>(initialEvents ?? []);
-  const [nextAfter, setNextAfter] = useState<number | null>(initialNextAfter);
+  const [nextBefore, setNextBefore] = useState<number | null>(initialNextBefore);
   const [loading, setLoading] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // V23-02: open on the TAIL — no cursor means the newest page, and "Load older"
+  // walks backwards with `before`, so the newest events are visible immediately.
   const loadEvents = async () => {
     if (!conversationId) return;
     setLoading(true);
@@ -58,28 +60,28 @@ export function ActivityPanel({
     setLoading(false);
     if (res.ok) {
       setEvents(res.data.events);
-      setNextAfter(res.data.nextAfter);
+      setNextBefore(res.data.nextBefore ?? null);
     } else setError(res.error.message || "Could not load activity.");
   };
 
   useEffect(() => {
     if (initialEvents !== undefined) {
       setEvents(initialEvents);
-      setNextAfter(initialNextAfter);
+      setNextBefore(initialNextBefore);
       return;
     }
     void loadEvents();
   }, [conversationId, initialEvents]);
 
   const handleLoadMore = async () => {
-    if (!conversationId || nextAfter === null || loadingMore) return;
+    if (!conversationId || nextBefore === null || loadingMore) return;
     setLoadingMore(true);
     setError(null);
-    const res = await api.getConversationEvents(conversationId, { after: nextAfter });
+    const res = await api.getConversationEvents(conversationId, { before: nextBefore });
     setLoadingMore(false);
     if (res.ok) {
-      setEvents((prev) => [...prev, ...res.data.events]);
-      setNextAfter(res.data.nextAfter);
+      setEvents((prev) => [...res.data.events, ...prev]);
+      setNextBefore(res.data.nextBefore ?? null);
     } else setError(res.error.message || "Could not load more activity.");
   };
 
@@ -188,7 +190,7 @@ export function ActivityPanel({
             </div>
           ))}
 
-          {nextAfter !== null && (
+          {nextBefore !== null && (
             <div style={{ padding: "12px 0", textAlign: "center" }}>
               <button
                 type="button"

@@ -476,19 +476,31 @@ export function buildApp(deps: AppDependencies): FastifyInstance<HttpServer> {
     if (!query.success) return reply.code(400).send(fail("bad_request", "Invalid query parameters"));
     const conversation = await deps.store.getConversation(params.data.id);
     if (!conversation) return reply.code(404).send(fail("not_found", "Conversation not found"));
-    const afterSeq = query.data.after ?? 0;
     const limit = query.data.limit;
-    const rawEvents = await deps.store.listEvents(params.data.id, afterSeq, limit + 1);
+    // V23-02: a timeline opens on the tail. With no cursor the newest page is
+    // returned and `nextBefore` walks backwards; `after` keeps the forward contract
+    // intact for consumers that page away from the oldest event.
+    const backward = query.data.after === undefined;
+    const rawEvents = backward
+      ? await deps.store.listEventsTail(params.data.id, query.data.before ?? Number.POSITIVE_INFINITY, limit + 1)
+      : await deps.store.listEvents(params.data.id, query.data.after ?? 0, limit + 1);
     const hasMore = rawEvents.length > limit;
-    const pageEvents = hasMore ? rawEvents.slice(0, limit) : rawEvents;
+    // Forward pages keep the oldest `limit` and page up; backward pages drop the
+    // extra OLDEST row and keep the newest `limit`, since the extra row was read
+    // from the past end of the window.
+    const pageEvents = hasMore ? (backward ? rawEvents.slice(1) : rawEvents.slice(0, limit)) : rawEvents;
     const events = pageEvents.map((event) => ({
       seq: event.seq,
       type: event.type,
       ts: event.ts,
       payload: redactEventPayload(event.payload),
     }));
+    if (backward) {
+      const nextBefore = hasMore ? (events[0]?.seq ?? null) : null;
+      return ok({ events, nextAfter: null, nextBefore });
+    }
     const nextAfter = hasMore ? (events.at(-1)?.seq ?? null) : null;
-    return ok({ events, nextAfter });
+    return ok({ events, nextAfter, nextBefore: null });
   });
   /**
    * Mint a room link for a conversation's live host.

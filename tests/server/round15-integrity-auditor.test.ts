@@ -65,7 +65,9 @@ it("V15 control: oversized event limit clamps to 500 and all pages stay reachabl
  try{
   const p=await store.createProject({path:dir}); const c=await store.createConversation({projectId:p.id});
   for(let i=0;i<1001;i++)await store.recordEvent(c.id,"audit.event",{i});
-  const response=await app.inject({method:"GET",url:`/api/conversations/${c.id}/events?limit=1000`,headers:{cookie:headers.cookie}});
+  // V23-02: an uncursored read now returns the newest page; this control checks the
+  // forward cap and reachability, so it asks for the forward window explicitly.
+  const response=await app.inject({method:"GET",url:`/api/conversations/${c.id}/events?after=0&limit=1000`,headers:{cookie:headers.cookie}});
   const data=response.json().data;
   console.log("AUDIT15 max events page",JSON.stringify({status:response.statusCode,length:data.events.length,nextAfter:data.nextAfter,total:(await store.listEvents(c.id,1000,10)).length+1000}));
   expect(data.events).toHaveLength(500);

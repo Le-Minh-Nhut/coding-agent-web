@@ -93,7 +93,9 @@ describe("ActivityPanel UI", () => {
     }).not.toThrow();
   });
 
-  it("supports pagination when nextAfter is present", async () => {
+  it("supports paging to older events when a nextBefore cursor is present", async () => {
+    // V23-02: the panel opens on the tail and walks BACKWARD. The initial page is
+    // seq 2..3 and `nextBefore: 2` asks for the event just older than seq 2.
     vi.mocked(api.getConversationEvents).mockResolvedValue({
       ok: true,
       data: {
@@ -106,10 +108,17 @@ describe("ActivityPanel UI", () => {
           },
         ],
         nextAfter: null,
+        nextBefore: null,
       },
     });
 
     const initialEvents: ConversationEvent[] = [
+      {
+        seq: 3,
+        type: "agent.stopped",
+        ts: "2026-10-25T01:02:00.000Z",
+        payload: {},
+      },
       {
         seq: 2,
         type: "agent.hosted",
@@ -124,7 +133,7 @@ describe("ActivityPanel UI", () => {
         <ActivityPanel
           conversationId="c-1"
           events={initialEvents}
-          nextAfter={2}
+          nextBefore={2}
         />
       );
       viewContainer = container;
@@ -137,8 +146,11 @@ describe("ActivityPanel UI", () => {
       fireEvent.click(loadMoreButton!);
     });
 
-    expect(api.getConversationEvents).toHaveBeenCalledWith("c-1", { after: 2 });
+    expect(api.getConversationEvents).toHaveBeenCalledWith("c-1", { before: 2 });
     const items = viewContainer?.querySelectorAll(".activity-item");
-    expect(items?.length).toBe(2);
+    expect(items?.length).toBe(3);
+    // The older page is prepended, and the rendering stays newest-first.
+    expect(items?.[0]?.textContent).toContain("#3");
+    expect(items?.[2]?.textContent).toContain("#1");
   });
 });

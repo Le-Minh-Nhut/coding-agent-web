@@ -333,7 +333,14 @@ export interface ConversationEvent<T = unknown> {
 
 export interface ConversationEventsResponse {
   events: ConversationEvent[];
+  /** Cursor for the next page FORWARD (higher seqs); null when the tail was reached. */
   nextAfter: number | null;
+  /**
+   * Cursor for the next older page (V23-02). The default read returns the newest
+   * page, so this is the field a timeline uses to walk backwards; null when the
+   * oldest event reached. Optional so a forward-only consumer need not set it.
+   */
+  nextBefore?: number | null;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -409,7 +416,10 @@ export type ConversationActionRequest = z.infer<typeof conversationActionSchema>
 export type CommandRequest = z.infer<typeof commandSchema>;
 
 export const listEventsQuerySchema = z.object({
+  /** Forward cursor: the page immediately AFTER this seq. Omitted with `before` too. */
   after: z.coerce.number().int().nonnegative().optional(),
+  /** Backward cursor (V23-02): the page immediately BEFORE (strictly older than) this seq. */
+  before: z.coerce.number().int().nonnegative().optional(),
   limit: z.coerce
     .number()
     .int()

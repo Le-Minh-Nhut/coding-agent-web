@@ -106,7 +106,8 @@ describe("GET /api/conversations/:id/events", () => {
       await store.recordEvent(conv.id, "test.event", { n: i });
     }
 
-    // Default limit should return 100 events
+    // V23-02: with no cursor this now returns the NEWEST page (the timeline opens on
+    // the tail); the forward contract below is reached by passing `after` explicitly.
     const resDefault = await app.inject({
       method: "GET",
       url: `/api/conversations/${conv.id}/events`,
@@ -115,23 +116,28 @@ describe("GET /api/conversations/:id/events", () => {
     expect(resDefault.statusCode).toBe(200);
     const dataDefault = resDefault.json().data;
     expect(dataDefault.events.length).toBe(100);
-    expect(dataDefault.nextAfter).toBe(100);
+    expect(dataDefault.events[0].seq).toBe(451);
+    expect(dataDefault.events.at(-1).seq).toBe(550);
+    expect(dataDefault.nextBefore).toBe(451);
+    expect(dataDefault.nextAfter).toBeNull();
 
-    // Explicit limit above 500 should be capped to 500
+    // Explicit limit above 500 should be capped to 500 (forward read)
     const resCapped = await app.inject({
       method: "GET",
-      url: `/api/conversations/${conv.id}/events?limit=9999`,
+      url: `/api/conversations/${conv.id}/events?after=0&limit=9999`,
       headers,
     });
     expect(resCapped.statusCode).toBe(200);
     const dataCapped = resCapped.json().data;
     expect(dataCapped.events.length).toBe(500);
+    expect(dataCapped.events[0].seq).toBe(1);
     expect(dataCapped.nextAfter).toBe(500);
+    expect(dataCapped.nextBefore).toBeNull();
 
     await app.close();
   });
 
-  it("pages through the timeline in seq order and signals nextAfter null at end", async () => {
+  it("pages through the timeline in seq order and signals the cursor null at each end", async () => {
     const { app, headers, store } = await fixture();
     const project = await store.createProject({ path: "/tmp/p" });
     const conv = await store.createConversation({ projectId: project.id });
@@ -140,7 +146,7 @@ describe("GET /api/conversations/:id/events", () => {
     await store.recordEvent(conv.id, "agent.hosted", { sessionId: "s1" });
     await store.recordEvent(conv.id, "agent.stopped", { tmuxSessionId: "$1" });
 
-    // Fetch page 1 with limit 2
+    // V23-02: the default read is the tail page. Two events → the newest two.
     const page1Res = await app.inject({
       method: "GET",
       url: `/api/conversations/${conv.id}/events?limit=2`,
@@ -148,19 +154,38 @@ describe("GET /api/conversations/:id/events", () => {
     });
     expect(page1Res.statusCode).toBe(200);
     const page1 = page1Res.json().data;
-    expect(page1.events.map((e: { seq: number }) => e.seq)).toEqual([1, 2]);
-    expect(page1.nextAfter).toBe(2);
+    expect(page1.events.map((e: { seq: number }) => e.seq)).toEqual([2, 3]);
+    expect(page1.nextBefore).toBe(2);
+    expect(page1.nextAfter).toBeNull();
 
-    // Fetch page 2 with after=2
+    // Walk backwards with before=2 → the remaining oldest event, and no older cursor.
     const page2Res = await app.inject({
       method: "GET",
-      url: `/api/conversations/${conv.id}/events?after=2&limit=2`,
+      url: `/api/conversations/${conv.id}/events?before=2&limit=2`,
       headers,
     });
     expect(page2Res.statusCode).toBe(200);
     const page2 = page2Res.json().data;
-    expect(page2.events.map((e: { seq: number }) => e.seq)).toEqual([3]);
+    expect(page2.events.map((e: { seq: number }) => e.seq)).toEqual([1]);
+    expect(page2.nextBefore).toBeNull();
     expect(page2.nextAfter).toBeNull();
+
+    // The forward `after` contract is retained for consumers that page away from
+    // the oldest event; it is only reachable by passing `after` explicitly.
+    const fwd1Res = await app.inject({
+      method: "GET",
+      url: `/api/conversations/${conv.id}/events?after=0&limit=2`,
+      headers,
+    });
+    expect(fwd1Res.json().data.events.map((e: { seq: number }) => e.seq)).toEqual([1, 2]);
+    expect(fwd1Res.json().data.nextAfter).toBe(2);
+    const fwd2Res = await app.inject({
+      method: "GET",
+      url: `/api/conversations/${conv.id}/events?after=2&limit=2`,
+      headers,
+    });
+    expect(fwd2Res.json().data.events.map((e: { seq: number }) => e.seq)).toEqual([3]);
+    expect(fwd2Res.json().data.nextAfter).toBeNull();
 
     await app.close();
   });

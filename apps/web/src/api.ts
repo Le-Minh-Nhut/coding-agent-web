@@ -204,9 +204,10 @@ export const api = {
     return request<SavedConversationHistory>(`/api/conversations/${encodeURIComponent(id)}/history${cursor}`);
   },
 
-  async getConversationEvents(id: string, options?: { after?: number; limit?: number }): Promise<ApiResult<ConversationEventsResponse>> {
+  async getConversationEvents(id: string, options?: { after?: number; before?: number; limit?: number }): Promise<ApiResult<ConversationEventsResponse>> {
     const params = new URLSearchParams();
     if (options?.after !== undefined) params.set("after", String(options.after));
+    if (options?.before !== undefined) params.set("before", String(options.before));
     if (options?.limit !== undefined) params.set("limit", String(options.limit));
     const qs = params.toString() ? `?${params.toString()}` : "";
     return request<ConversationEventsResponse>(`/api/conversations/${encodeURIComponent(id)}/events${qs}`);
