@@ -136,16 +136,22 @@ writeFileSync(passwordFile, JSON.stringify({ salt: salt.toString("hex"), hash: h
 chmodSync(passwordFile, 0o600);
 
 // ── 4. Runtime configuration ───────────────────────────────────────────────
-// The Collab registry is read by shelling out to `omp collab list --json`, and
-// the CI runner has no OMP: the real binary is ENOENT, the server answers 500 on
-// /api/projects/:id/sessions, and every spec that opens a conversation sees a
-// console error it never asked for. So the harness hands the server its own
-// `omp`, which answers that one call with an empty host list and refuses
-// everything else. The app code stays real and the registry stays hermetic (it
-// reads no host state, spawns no agent), so the route answers 200 with zero
-// hosts anywhere. Only the *registry* is pinned this way — see the README
-// (`## The launcher`) for why `CAW_OMP_PATH` below is not the no-launch guard it
-// looks like.
+// The Collab registry is read by shelling out to `omp collab list --json`, and a
+// CI runner has no OMP. Two layers keep that from turning into a 500 on
+// /api/projects/:id/sessions (which every spec that opens a conversation would
+// see as a console error it never asked for):
+//   1. the product answers `[]` on its own when the registry *directory* is
+//      absent, because no directory means no host has ever published — so a
+//      runner whose state dir never existed needs no `omp` at all;
+//   2. this stub covers the remaining case, a registry directory that *does*
+//      exist (a developer machine, a runner that has run OMP before) where the
+//      real binary is missing or answers oddly.
+// The harness therefore hands the server its own `omp`, which answers that one
+// call with an empty host list and refuses everything else. The app code stays
+// real and the registry stays hermetic (it reads no host state, spawns no
+// agent), so the route answers 200 with zero hosts anywhere. Only the *registry*
+// is pinned this way — see the README (`## The launcher`) for why `CAW_OMP_PATH`
+// below is not the no-launch guard it looks like.
 const stubBinDir = join(tempRoot, "stub-bin");
 mkdirSync(stubBinDir, { recursive: true });
 const stubOmp = join(stubBinDir, "omp");

@@ -56,13 +56,21 @@ afterwards:
   agent runs and no credits are spent, which is the case these specs are written
   against. Running the suite locally against an installed OMP is at your own
   cost.
-- **The Collab registry needs no OMP.** The server reads it by running
-  `omp collab list --json`, which is ENOENT on a runner with no OMP — so the
-  launcher writes a stub `omp` into the harness temp dir and points the server at
-  it with `CAW_OMP_BINARY_PATH`. The stub answers that one call with an empty
-  host list and refuses everything else, so `/api/projects/:id/sessions` answers
-  `200` with zero hosts on any machine. It is deliberately *not* on `PATH`; only
-  the registry binary is pinned, and the launch path is untouched.
+- **The Collab registry needs no OMP, in two layers.** The server reads it by
+  running `omp collab list --json`, which is ENOENT on a runner with no OMP.
+  Layer 1 is the product: when the registry *directory* is itself absent,
+  `DefaultCollabRegistryService.list()` answers `[]` without spawning anything —
+  no directory means no host has ever published, so the empty list is a
+  confirmed fact (proved by `tests/adapter/collab-registry.test.ts`). Layer 2 is
+  the launcher stub: for a machine where the directory *exists* but `omp` is
+  absent or answers oddly, `scripts/e2e-server.mjs` writes a stub `omp` into the
+  harness temp dir and points the server at it with `CAW_OMP_BINARY_PATH`. The
+  stub answers that one call with an empty host list and refuses everything
+  else, so `/api/projects/:id/sessions` answers `200` with zero hosts on any
+  machine. Either layer alone is enough on a directory that never existed; the
+  stub is what keeps a *populated* directory from being read by a foreign `omp`.
+  The stub is deliberately *not* on `PATH`; only the registry binary is pinned,
+  and the launch path is untouched.
 - The server is started as `tsx apps/server/src/server.ts` (via the workspace's
   own `node_modules/.bin/tsx`, overridable with `CAW_E2E_TSX`) rather than a
   TypeScript build, so the suite exercises current source.
@@ -74,8 +82,9 @@ afterwards:
 `fixture.ts` attaches `pageerror`, `console` (`error` only) and `requestfailed`
 collectors the first time a spec navigates (`gotoApp`/`login`), and exposes
 `unexpectedAppErrors(page)` / `assertNoUnexpectedAppErrors(page)`. The specs that
-inject faults or carry the most state (all of `round13.spec.ts` and
-`regression.spec.ts`) assert the list is empty before they end. The filter is an
+inject faults or carry the most state (all of `round13.spec.ts`,
+`round17-flows.spec.ts` and `regression.spec.ts`) assert the list is empty before
+they end. The filter is an
 **allowlist, never a blanket rule**: a console error reporting a response status
 is forgiven only when the spec *declares* that exact URL+status with
 `declareInjectedFault(page, { urlPattern, status })`, registered where the fault

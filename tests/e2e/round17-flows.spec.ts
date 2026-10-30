@@ -7,6 +7,7 @@ import {
   harnessFixture,
   installMockCollabHost,
   login,
+  openFolderRow,
   openSeededConversation,
   projectByLabel,
   readProjects,
@@ -33,9 +34,11 @@ import {
 const COMPOSER = /Send instructions to agent|Turn in flight/;
 const REFUSAL = "prompting is unavailable until the host finishes starting up";
 
-/** Bunched so a failure names the viewport it happened at. */
+/** Bunched so a failure names the viewport it happened at: the three phone widths the ticket names, plus a desktop. */
 const VIEWPORTS = [
+  { name: "mobile 375x812", size: { width: 375, height: 812 } },
   { name: "mobile 390x844", size: { width: 390, height: 844 } },
+  { name: "mobile 430x932", size: { width: 430, height: 932 } },
   { name: "desktop 1280x800", size: { width: 1280, height: 800 } },
 ] as const;
 
@@ -109,6 +112,184 @@ for (const viewport of VIEWPORTS) {
     await assertNoUnexpectedAppErrors(page);
   });
 }
+
+test("a rename whose intent changes while a write is pending settles on the last label", async ({ page }) => {
+  const RUN = Date.now().toString(36).slice(-5);
+  const folderName = `r17-rename-${RUN}`;
+  const createdLabel = `Round17 Rename ${RUN}`;
+  const firstIntent = `${createdLabel} First`;
+  const finalIntent = `${createdLabel} Final`;
+  await page.setViewportSize({ width: 375, height: 812 });
+  await login(page);
+  await page.getByRole("button", { name: "+ New Project" }).click();
+  await expect(page.getByRole("heading", { name: "Browse Folders" })).toBeVisible();
+  await page.getByRole("button", { name: "+ New Folder" }).click();
+  await page.getByLabel(/New folder in/).fill(folderName);
+  await page.getByRole("button", { name: "Create folder" }).click();
+  await page.getByRole("button", { name: "Use this folder" }).click();
+  await page.getByPlaceholder("Display label (e.g. My Backend)").fill(createdLabel);
+  await page.getByRole("button", { name: "Create", exact: true }).click();
+  await expect(page.getByRole("heading", { name: createdLabel, exact: true })).toBeVisible();
+
+  const project = await projectByLabel(page, createdLabel);
+  assertInsideHarnessTemp(project.path);
+
+  // The first PATCH is held open until the user has saved a second label: that
+  // pending window *is* the race. Nothing is mocked — both writes still reach the
+  // real server through `continue()`, so the end state is the server's own.
+  // (Hand-rolled gate: this repo targets Node 20, which lacks Promise.withResolvers.)
+  let releaseFirstWrite!: () => void;
+  const firstWriteHeld = new Promise<void>((resolve) => { releaseFirstWrite = resolve; });
+  const renameBodies: Array<{ label?: string }> = [];
+  await page.route(`**/api/projects/${project.id}`, async (route) => {
+    if (route.request().method() !== "PATCH") return route.continue();
+    renameBodies.push(route.request().postDataJSON() as { label?: string });
+    if (renameBodies.length === 1) await firstWriteHeld;
+    await route.continue();
+  });
+
+  const card = page
+    .getByRole("heading", { name: createdLabel, exact: true })
+    .locator("xpath=ancestor::div[.//button[normalize-space(.)='Rename']][1]");
+  await card.getByRole("button", { name: "Rename" }).click();
+  await expect(page.getByRole("heading", { name: "Rename Project Label" })).toBeVisible();
+  const input = page.getByRole("textbox");
+  await input.fill(firstIntent);
+  await page.getByRole("button", { name: "Save" }).click();
+
+  // The write is in flight and unanswered, so the dialog is still open.
+  await expect.poll(() => renameBodies.length).toBe(1);
+  await expect(page.getByRole("heading", { name: "Rename Project Label" })).toBeVisible();
+
+  // The user changes their mind before the write settles: the second Save records
+  // the newest label instead of racing a second PATCH the server would order.
+  await input.fill(finalIntent);
+  await page.getByRole("button", { name: "Save" }).click();
+  expect(renameBodies, "a Save while a write is open must coalesce, not race").toHaveLength(1);
+
+  releaseFirstWrite();
+
+  // Exactly one follow-up carries the last label; the dialog closes on the write
+  // that belongs to it and the list shows the label the user asked for last.
+  await expect.poll(() => renameBodies.length).toBe(2);
+  expect(renameBodies[1]).toEqual({ label: finalIntent });
+  await expect(page.getByRole("heading", { name: "Rename Project Label" })).toBeHidden();
+  await expect(page.getByRole("heading", { name: finalIntent, exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: firstIntent, exact: true })).toHaveCount(0);
+
+  // Persisted truth, re-fetched and re-rendered: no residual "First" write can
+  // still win, because both writes were applied in the order the user asked.
+  await page.reload();
+  await expect(page.getByRole("heading", { name: finalIntent, exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: firstIntent, exact: true })).toHaveCount(0);
+  expect((await readProjects(page)).find((item) => item.id === project.id)?.label).toBe(finalIntent);
+
+  await assertNoUnexpectedAppErrors(page);
+});
+
+test("clicking Roots while the first listing is in flight does not strand the browser", async ({ page }) => {
+  const fixture = harnessFixture();
+  await page.setViewportSize({ width: 375, height: 812 });
+  await login(page);
+
+  // Hold the browser's very first listing open: the Roots click lands while the
+  // only in-flight loader is unanswered, which is the state a stray generation
+  // bump would strand (`loading` never cleared, every button left disabled).
+  let releaseFirstListing!: () => void;
+  const firstListingHeld = new Promise<void>((resolve) => { releaseFirstListing = resolve; });
+  let listings = 0;
+  await page.route("**/api/browse*", async (route) => {
+    listings += 1;
+    if (listings === 1) await firstListingHeld;
+    await route.continue();
+  });
+
+  await page.getByRole("button", { name: "+ New Project" }).click();
+  await expect(page.getByRole("heading", { name: "Browse Folders" })).toBeVisible();
+  await expect(page.getByText("Loading…")).toBeVisible();
+
+  // Re-asserting Roots starts no replacement load, so the pending listing must
+  // survive the click and still be the one that clears the loading state.
+  await page.getByRole("button", { name: "Roots", exact: true }).click();
+  releaseFirstListing();
+
+  await expect(page.getByText("Loading…")).toBeHidden();
+  await expect(page.locator(".folder-item").first()).toBeVisible();
+
+  // Rows are actionable: selecting one navigates, which the breadcrumbs prove.
+  await openFolderRow(page, "p-alpha");
+  const breadcrumbs = page.locator(".breadcrumbs");
+  await expect(breadcrumbs.getByRole("button", { name: "p-alpha", exact: true })).toBeVisible();
+
+  // And the roots strip is usable too: switching root loads its listing to completion.
+  await page.getByRole("button", { name: "Roots", exact: true }).click();
+  await page.getByRole("button", { name: `${fixture.tempRoot}/roots-secondary`, exact: true }).click();
+  await expect(breadcrumbs.getByRole("button", { name: "roots-secondary", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Use this folder" })).toBeEnabled();
+  await expect(page.getByText("Loading…")).toBeHidden();
+
+  await page.getByRole("button", { name: "Cancel", exact: true }).click();
+  await assertNoUnexpectedAppErrors(page);
+});
+
+test("cancelling the new-folder form while the created folder pages in does not strand the listing", async ({ page }) => {
+  const fixture = harnessFixture();
+  const RUN = Date.now().toString(36).slice(-5);
+  const folderName = `r17-cancel-${RUN}`;
+  await page.setViewportSize({ width: 375, height: 812 });
+  await login(page);
+
+  // Hold the first cursor'd page open: the auto-pagination that follows a create
+  // is then the only in-flight loader when the form is cancelled.
+  let releaseCursorPage!: () => void;
+  const cursorPageHeld = new Promise<void>((resolve) => { releaseCursorPage = resolve; });
+  let cursorPages = 0;
+  await page.route("**/api/browse*", async (route) => {
+    if (new URL(route.request().url()).searchParams.has("cursor")) {
+      cursorPages += 1;
+      if (cursorPages === 1) await cursorPageHeld;
+    }
+    await route.continue();
+  });
+
+  await page.getByRole("button", { name: "+ New Project" }).click();
+  await expect(page.getByRole("heading", { name: "Browse Folders" })).toBeVisible();
+  await openFolderRow(page, "paged");
+  await expect(page.locator(".folder-item").first()).toBeVisible();
+
+  // The created folder sorts after entry-205, so it lands on the last page and the
+  // browser pages forward to find it — through the held page. The row itself cannot
+  // be on screen yet (the listing renders only once `loading` clears), so the held
+  // cursor request is the observable that the pagination is in flight.
+  await page.getByRole("button", { name: "+ New Folder" }).click();
+  await page.getByLabel(/New folder in/).fill(folderName);
+  await page.getByRole("button", { name: "Create folder" }).click();
+  await expect.poll(() => cursorPages).toBe(1);
+  await expect(page.getByText("Loading…")).toBeVisible();
+
+  // Cancel a reopened form while the pagination is still unanswered.
+  await page.getByRole("button", { name: "+ New Folder" }).click();
+  await expect(page.getByLabel(/New folder in/)).toBeVisible();
+  await page.locator("form").getByRole("button", { name: "Cancel" }).click();
+  await expect(page.getByLabel(/New folder in/)).toBeHidden();
+
+  releaseCursorPage();
+
+  // The pagination finishes, the created folder is on screen and still selected,
+  // and the controls are live again — no stuck loading state.
+  await expect(page.getByText(new RegExp(`^📁 ${folderName}$`, "u"))).toBeVisible();
+  await expect(page.getByText("Selected")).toBeVisible();
+  await expect(page.getByText("Loading…")).toBeHidden();
+  await expect(page.getByRole("button", { name: "+ New Folder" })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "Use this folder" })).toBeEnabled();
+
+  // And the rows are actionable: the created folder can be opened.
+  await openFolderRow(page, folderName);
+  await expect(page.locator(".breadcrumbs").getByRole("button", { name: folderName, exact: true })).toBeVisible();
+
+  await page.getByRole("button", { name: "Cancel", exact: true }).click();
+  await assertNoUnexpectedAppErrors(page);
+});
 
 test("deleting a project with no agents removes it and leaves its directory", async ({ page }) => {
   const fixture = harnessFixture();
