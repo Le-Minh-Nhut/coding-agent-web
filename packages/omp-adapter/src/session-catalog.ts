@@ -265,15 +265,14 @@ export class DefaultNativeSessionCatalog implements NativeSessionCatalog {
       const fullPath = path.join(bucketDir, file);
       const parsed = await this.#readHeaderAndMeta(fullPath);
       if (!parsed) continue;
-      // A header cwd we cannot resolve is a directory we cannot prove: it is
-      // excluded, like `readHistory` treats an unresolvable journal cwd. One
-      // such journal must not fail the whole listing.
-      let headerCwd: string;
-      try {
-        headerCwd = resolveCanonical(parsed.header.cwd, realpathSync);
-      } catch {
-        continue;
-      }
+      // The header cwd is resolved with the same realpath equality as the requested
+      // one. A resolution failure (EACCES/EIO) is a real read error, not proof that
+      // this journal is foreign, so it propagates: dropping the journal would hand
+      // the caller an empty or short list that is indistinguishable from "this
+      // project has no sessions", and callers use this list to decide whether a
+      // launch would fork history. ENOENT cannot arrive here — resolveCanonical
+      // already falls back to the lexical path for a not-yet-created directory.
+      const headerCwd = resolveCanonical(parsed.header.cwd, realpathSync);
       if (headerCwd !== canonicalCwd) continue;
       summaries.push(await this.#summaryFor(fullPath, parsed));
     }
