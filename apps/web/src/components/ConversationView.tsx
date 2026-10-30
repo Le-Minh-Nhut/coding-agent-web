@@ -1,6 +1,6 @@
 import React, { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { api, type SavedConversationHistory } from "../api.js";
-import { chainMutation } from "../mutation-order.js";
+import { chainMutation, MUTATION_CANCELLED } from "../mutation-order.js";
 import { MarkdownCodeBlock, renderMarkdown } from "../sanitize.js";
 import { ActivityPanel } from "./ActivityPanel.js";
 import { SubagentPanel } from "./SubagentPanel.js";
@@ -1106,6 +1106,10 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     // after the "MODEL_FINAL" the reopened view sent and rewind the stored
     // preference. Submission order becomes arrival order. (V25-02)
     const result = await chainMutation(`conversation-lifecycle:${conversationId}`, () => api.setConversationModel(conversationId, modelDraft));
+    // Retired with the session: the request never left, so there is no failure to
+    // report and no success to claim. Clear the busy flag — the mount is almost
+    // certainly gone, but it is this callback's last touch on the instance.
+    if (result === MUTATION_CANCELLED) { setModelBusy(false); return; }
     if (!viewActiveRef.current || operationGenerationRef.current !== operationGeneration || conversationIdRef.current !== conversationAtSave) return;
     setModelBusy(false);
     setModelMessage(result.ok ? "Model saved for next launch." : result.error.message);
@@ -1129,6 +1133,10 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     // pair, so the preference the restart launched with is the one that stays
     // stored. (V25-02)
     const saved = await chainMutation(`conversation-lifecycle:${conversationId}`, () => api.setConversationModel(conversationId, submittedDraft));
+    // Retired with the session: the save never left, so the pair stops here — we must
+    // not restart a session under credentials the user has left, and we must not claim
+    // a restart that did not happen.
+    if (saved === MUTATION_CANCELLED) { setModelBusy(false); return; }
     if (!viewActiveRef.current || operationGenerationRef.current !== operationGeneration || conversationIdRef.current !== conversationAtRestart) return;
     if (!saved.ok) {
       setModelBusy(false);
@@ -1138,6 +1146,9 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     metadataGenerationRef.current += 1;
     setConversation(saved.data);
     const result = await chainMutation(`conversation-lifecycle:${conversationId}`, () => api.restartConversation(conversationId));
+    // Same retirement: the restart was never sent, so the pending spinner is cleared
+    // and no outcome is claimed.
+    if (result === MUTATION_CANCELLED) { setModelBusy(false); return; }
     if (!viewActiveRef.current || operationGenerationRef.current !== operationGeneration || conversationIdRef.current !== conversationAtRestart) return;
     setModelBusy(false);
     if (result.ok) {

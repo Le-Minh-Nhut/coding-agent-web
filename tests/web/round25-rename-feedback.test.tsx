@@ -4,6 +4,8 @@ import { afterEach, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { App } from "../../apps/web/src/App.js";
 import { api } from "../../apps/web/src/api.js";
+import { resetMutationQueues } from "../../apps/web/src/mutation-order.js";
+import { resetProjectMutationState } from "../../apps/web/src/components/ProjectsView.js";
 
 /**
  * V25-01 feedback path: a rename write issued from a ProjectsView that has since
@@ -24,9 +26,11 @@ vi.mock("../../apps/web/src/api.js", () => ({
     listProjects: vi.fn(),
     updateProject: vi.fn(),
   },
+  setCsrfToken: vi.fn(),
 }));
 
 afterEach(() => {
+  resetMutationQueues(); resetProjectMutationState();
   cleanup();
   vi.restoreAllMocks();
 });
@@ -136,4 +140,65 @@ it("V25 a rename failure reported after the view remounted reaches the live aler
   expect(error).toContain("Rename refused by the server");
   // The dialog belongs to the intent that failed, so it stays open for a retry.
   expect(screen.queryByRole("heading", { name: "Rename Project Label" }) !== null).toBe(true);
+});
+
+it("V26 a rename write cancelled at the auth boundary reports nothing to the reopened session", async () => {
+  let stored = { ...PROJECT };
+  vi.mocked(api.getMe).mockResolvedValue({ ok: true, data: { csrfToken: "t" } });
+  vi.mocked(api.getCapabilities).mockResolvedValue({ ok: true, data: {} } as never);
+  vi.mocked(api.getRuntime).mockResolvedValue({ ok: false, error: { code: "internal", message: "No runtime in this test" } });
+  vi.mocked(api.listProjects).mockImplementation(async () => ({ ok: true, data: [{ ...stored }] }));
+  // The old session's request is held; the recorded intent behind it is what the
+  // boundary must retire. The server still accepted the held write — its label is
+  // stored, and it is the label the new session's read shows.
+  const gate = deferred();
+  let calls = 0;
+  vi.mocked(api.updateProject).mockImplementation(async (_id, patch) => {
+    const n = ++calls;
+    if (n === 1) {
+      await gate.promise;
+      stored = { ...stored, label: patch.label! };
+      return { ok: true, data: { ...stored } };
+    }
+    stored = { ...stored, label: patch.label! };
+    return { ok: true, data: { ...stored } };
+  });
+
+  const first = render(<App />);
+  await screen.findByText("Original");
+  fireEvent.click(screen.getByRole("button", { name: "Rename" }));
+  fireEvent.change(screen.getByRole("textbox"), { target: { value: "First" } });
+  fireEvent.click(screen.getByRole("button", { name: "Save" }));
+  await waitFor(() => expect(calls).toBe(1));
+  // A second label recorded while the write is open would otherwise be chained as a
+  // follow-up — under the new session's credentials.
+  fireEvent.change(screen.getByRole("textbox"), { target: { value: "Queued" } });
+  fireEvent.click(screen.getByRole("button", { name: "Save" }));
+  fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+
+  // The auth boundary: the app leaves the session and mounts a fresh ProjectsView.
+  first.unmount();
+  resetMutationQueues();
+  resetProjectMutationState();
+  await act(async () => { render(<App />); });
+  await screen.findByText("Original");
+  expect(screen.queryByRole("heading", { name: "Rename Project Label" })).toBeNull();
+
+  await act(async () => { gate.resolve(undefined); });
+  await act(async () => { await Promise.resolve(); });
+
+  const error = screen.queryByRole("alert")?.textContent ?? null;
+  const open = screen.queryByRole("heading", { name: "Rename Project Label" }) !== null;
+  const cardLabel = screen.queryByRole("heading", { name: "First" }) !== null ? "First" : "Original";
+  console.log("AUDIT25 rename cancelled feedback", JSON.stringify({ calls, error, open, cardLabel, stored: stored.label }));
+  // Only the request the user actually submitted went out; the recorded intent did
+  // not follow it, and nothing was reported to the view that is on screen now.
+  expect(calls).toBe(1);
+  expect(error).toBeNull();
+  expect(open).toBe(false);
+  // The retired response did not repaint that view either: it still shows the label
+  // this session's own read returned. The server's newer value appears on the next
+  // read, not because a dead session's callback wrote it.
+  expect(cardLabel).toBe("Original");
+  expect(stored.label).toBe("First");
 });

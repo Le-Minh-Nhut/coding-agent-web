@@ -4,6 +4,8 @@ import { afterEach, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { App } from "../../apps/web/src/App.js";
 import { api } from "../../apps/web/src/api.js";
+import { resetMutationQueues } from "../../apps/web/src/mutation-order.js";
+import { resetProjectMutationState } from "../../apps/web/src/components/ProjectsView.js";
 
 /**
  * V25-01 favorite path: the star toggle has the same cross-remount write race the
@@ -24,9 +26,11 @@ vi.mock("../../apps/web/src/api.js", () => ({
     listProjects: vi.fn(),
     updateProject: vi.fn(),
   },
+  setCsrfToken: vi.fn(),
 }));
 
 afterEach(() => {
+  resetMutationQueues(); resetProjectMutationState();
   cleanup();
   vi.restoreAllMocks();
 });
@@ -153,4 +157,56 @@ it("V25 a star write that settles after remount repaints the live view without a
   expect(starTitle).toBe("Unstar");
   // The accepted value is applied directly, so no third list read is required.
   expect(listCalls).toBe(2);
+});
+
+it("V26 a star write whose flight was reset at sign-out does not repaint the new session's list", async () => {
+  let stored = { ...PROJECT };
+  vi.mocked(api.getMe).mockResolvedValue({ ok: true, data: { csrfToken: "t" } });
+  vi.mocked(api.getCapabilities).mockResolvedValue({ ok: true, data: {} } as never);
+  vi.mocked(api.getRuntime).mockResolvedValue({ ok: false, error: { code: "internal", message: "No runtime in this test" } });
+  let listCalls = 0;
+  vi.mocked(api.listProjects).mockImplementation(async () => {
+    listCalls++;
+    return { ok: true, data: [{ ...stored }] };
+  });
+
+  // The request is already in flight when the boundary is crossed — it cannot be
+  // recalled, and the server applies it — but its response must not be applied to the
+  // star column of the mount that is on screen afterwards.
+  const gate = deferred();
+  let calls = 0;
+  vi.mocked(api.updateProject).mockImplementation(async (_id, patch) => {
+    calls++;
+    await gate.promise;
+    stored = { ...stored, favorite: patch.favorite! };
+    return { ok: true, data: { ...stored } } as never;
+  });
+
+  const first = render(<App />);
+  await screen.findByTitle("Star");
+  fireEvent.click(screen.getByTitle("Star"));
+  await waitFor(() => expect(calls).toBe(1));
+
+  // The auth boundary retires the flight, then a fresh ProjectsView mounts.
+  first.unmount();
+  resetMutationQueues();
+  resetProjectMutationState();
+  await act(async () => { render(<App />); });
+  await screen.findByTitle("Star");
+  const readsBefore = listCalls;
+
+  await act(async () => { gate.resolve(undefined); });
+  await act(async () => { await Promise.resolve(); });
+
+  const starTitle = screen.queryByTitle("Star") ? "Star" : screen.queryByTitle("Unstar") ? "Unstar" : null;
+  console.log("AUDIT25 favorite retired", JSON.stringify({ calls, starTitle, listCalls: listCalls - readsBefore, stored: stored.favorite, error: screen.queryByRole("alert")?.textContent ?? null }));
+  // The star on screen is still the value this session's own read returned: the
+  // retired callback neither repainted the column nor reported anything, and it sent
+  // no follow-up under the new credentials.
+  expect(calls).toBe(1);
+  expect(starTitle).toBe("Star");
+  expect(listCalls).toBe(readsBefore);
+  expect(screen.queryByRole("alert")).toBeNull();
+  // The server did apply the request that was already in flight — the next read sees it.
+  expect(stored.favorite).toBe(true);
 });

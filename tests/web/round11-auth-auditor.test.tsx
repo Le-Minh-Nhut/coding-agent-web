@@ -4,7 +4,7 @@ import {afterEach,beforeEach,it,expect,vi} from "vitest";
 import {act,cleanup,render,waitFor} from "@testing-library/react";
 import {api} from "../../apps/web/src/api.js";
 import {App} from "../../apps/web/src/App.js";
-vi.mock("../../apps/web/src/api.js",()=>({api:{getMe:vi.fn(),getCapabilities:vi.fn()}}));
+vi.mock("../../apps/web/src/api.js",()=>({api:{getMe:vi.fn(),getCapabilities:vi.fn()},setCsrfToken:vi.fn()}));
 vi.mock("../../apps/web/src/components/ProjectsView.js",()=>({ProjectsView:()=> <div>Project screen</div>,resetProjectMutationState:vi.fn()}));
 afterEach(()=>{cleanup();vi.restoreAllMocks();});
 beforeEach(()=>vi.clearAllMocks());

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { chainMutation, resetMutationQueues } from "../../apps/web/src/mutation-order.js";
+import { chainMutation, resetMutationQueues, MUTATION_CANCELLED } from "../../apps/web/src/mutation-order.js";
 
 // Node 20.19 here has no Promise.withResolvers, so the executor form is required.
 const gate = () => {
@@ -85,7 +85,7 @@ describe("chainMutation", () => {
     expect(order).toEqual(["old:start", "new:start", "old:end"]);
   });
 
-  it("resetMutationQueues cannot unsend a continuation already attached to its predecessor", async () => {
+  it("resetMutationQueues retires a successor already chained: it does not run", async () => {
     const g = gate();
     const order: string[] = [];
     const first = chainMutation("reset-key", async () => {
@@ -93,16 +93,60 @@ describe("chainMutation", () => {
       await g.released;
       order.push("first:end");
     });
-    // Submitted before the reset, so already chained onto `first`: it runs when the
-    // gate resolves whatever the map says. The auth boundary calls the reset before
-    // the app can submit anything under the next session, so nothing user-driven
-    // can land behind it in the meantime.
+    // Submitted before the reset, so its continuation is already attached to
+    // `first`. The predecessor is in flight and cannot be recalled, but the
+    // successor has not issued anything yet: at the boundary its lifetime ends, so
+    // it must settle as cancelled instead of sending the user's old intent under
+    // the next session's credentials.
     const successor = chainMutation("reset-key", async () => {
       order.push("successor");
     });
     resetMutationQueues();
     g.release();
-    await Promise.all([first, successor]);
-    expect(order).toEqual(["first:start", "first:end", "successor"]);
+    await expect(first).resolves.toBeUndefined();
+    await expect(successor).resolves.toBe(MUTATION_CANCELLED);
+    await Promise.resolve();
+    expect(order).toEqual(["first:start", "first:end"]);
+  });
+
+  it("a chained submission retired at the boundary never runs its body: no send", async () => {
+    const g = gate();
+    let runs = 0;
+    // A predecessor must be in flight for the gate to be observable at all: with an
+    // idle key the attempt starts synchronously (see the prune case), so it would
+    // have issued its request before any boundary could be crossed. A queued
+    // attempt is the only one that can be caught by the gate.
+    void chainMutation("spy-key", async () => {
+      await g.released;
+    });
+    const queued = chainMutation("spy-key", async () => {
+      runs++;
+      return "sent";
+    });
+    resetMutationQueues();
+    g.release();
+    await expect(queued).resolves.toBe(MUTATION_CANCELLED);
+    expect(runs).toBe(0);
+  });
+
+  it("same-generation submissions are not cancelled", async () => {
+    const first = chainMutation("control-key", async () => "first");
+    const second = chainMutation("control-key", async () => "second");
+    await expect(first).resolves.toBe("first");
+    await expect(second).resolves.toBe("second");
+  });
+
+  it("a cancelled successor does not poison the chain", async () => {
+    const g = gate();
+    void chainMutation("poison-key", async () => {
+      await g.released;
+    });
+    const blocked = chainMutation("poison-key", async () => "blocked");
+    resetMutationQueues();
+    g.release();
+    // The retired attempt settled normally, so its key is free: the next submission
+    // for the same key runs its own value rather than hanging behind a dead chain.
+    await expect(blocked).resolves.toBe(MUTATION_CANCELLED);
+    await expect(chainMutation("poison-key", async () => "after")).resolves.toBe("after");
   });
 });

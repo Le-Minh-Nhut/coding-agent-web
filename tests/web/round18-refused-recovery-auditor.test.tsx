@@ -6,7 +6,7 @@ import {CollabSocket,type HostFrame} from "@caw/collab-protocol";
 import {ConversationView} from "../../apps/web/src/components/ConversationView.js";
 import {App} from "../../apps/web/src/App.js";
 import {api} from "../../apps/web/src/api.js";
-vi.mock("../../apps/web/src/api.js",()=>({api:{getConversation:vi.fn(),getAttachInstructions:vi.fn(),getConversationLink:vi.fn(),getModels:vi.fn(),getMe:vi.fn(),getCapabilities:vi.fn(),listProjects:vi.fn(),listConversations:vi.fn(),listNativeSessions:vi.fn()}}));
+vi.mock("../../apps/web/src/api.js",()=>({api:{getConversation:vi.fn(),getAttachInstructions:vi.fn(),getConversationLink:vi.fn(),getModels:vi.fn(),getMe:vi.fn(),getCapabilities:vi.fn(),listProjects:vi.fn(),listConversations:vi.fn(),listNativeSessions:vi.fn()},setCsrfToken:vi.fn()}));
 afterEach(()=>{cleanup();vi.restoreAllMocks();});
 const welcome:HostFrame={t:"welcome",proto:3,header:{type:"session",id:"s",cwd:"/",timestamp:""},state:{isStreaming:false,queuedMessageCount:0,cwd:"/",participants:[]},agents:[],entryCount:0};
 const refusal:HostFrame={t:"error",message:"prompting is unavailable until the host finishes starting up"};

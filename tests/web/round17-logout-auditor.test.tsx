@@ -4,7 +4,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { App } from "../../apps/web/src/App.js";
 import { api } from "../../apps/web/src/api.js";
-vi.mock("../../apps/web/src/api.js", () => ({ api: { getMe: vi.fn(), getCapabilities: vi.fn(), listProjects: vi.fn(), getRuntime: vi.fn(), logout: vi.fn() } }));
+vi.mock("../../apps/web/src/api.js", () => ({ api: { getMe: vi.fn(), getCapabilities: vi.fn(), listProjects: vi.fn(), getRuntime: vi.fn(), logout: vi.fn() }, setCsrfToken: vi.fn() }));
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 it("V17 a failed logout cannot present the user as signed out while the session still authenticates", async () => {
   vi.mocked(api.getMe).mockResolvedValue({ ok: true, data: { csrfToken: "test-csrf" } });

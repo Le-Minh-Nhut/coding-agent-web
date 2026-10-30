@@ -7,11 +7,13 @@ import {afterEach,it,expect,vi} from 'vitest';
 import {act,cleanup,fireEvent,render,screen,waitFor} from '@testing-library/react';
 import {App} from '../../apps/web/src/App.js';
 import {api} from '../../apps/web/src/api.js';
+import {resetMutationQueues} from '../../apps/web/src/mutation-order.js';
+import {resetProjectMutationState} from '../../apps/web/src/components/ProjectsView.js';
 import {CollabSocket,type HostFrame} from '@caw/collab-protocol';
 import {buildApp} from '../../apps/server/src/app.js';
 import {createMetadataStore} from '../../apps/server/src/store.js';
 import {createAuthenticationService} from '../../apps/server/src/auth.js';
-vi.mock('../../apps/web/src/api.js',()=>({api:Object.fromEntries(['getMe','getCapabilities','getRuntime','listProjects','listConversations','listNativeSessions','updateProject','getConversation','getAttachInstructions','getModels','getConversationLink','setConversationModel','getConversationHistory'].map(k=>[k,vi.fn()]))}));
+vi.mock('../../apps/web/src/api.js',()=>({api:Object.fromEntries(['getMe','getCapabilities','getRuntime','listProjects','listConversations','listNativeSessions','updateProject','getConversation','getAttachInstructions','getModels','getConversationLink','setConversationModel','getConversationHistory'].map(k=>[k,vi.fn()])),setCsrfToken:vi.fn()}));
 vi.mock('../../apps/server/src/config.js',async original=>({...await original<any>(),findRepoRoot:()=>process.cwd()}));
 afterEach(()=>{cleanup();vi.restoreAllMocks();});
 const deferred=()=>{let resolve!:(v?:unknown)=>void;const promise=new Promise(r=>resolve=r);return {resolve,promise};};
@@ -103,5 +105,35 @@ it.each([false,true])('V25 a delayed model save cannot override a later save aft
   await waitFor(()=>expect(calls).toBe(2));await act(async()=>{await Promise.all(writes);});
   const model=(await f.store.getConversation(f.conversation.id))!.modelPreference;
   console.log('AUDIT25 model write lifetime',JSON.stringify({remount,model,calls}));expect(model).toBe('MODEL_FINAL');
+ }finally{await f.teardown();}
+});
+
+it('V26 a model save recorded before sign-out is retired, not replayed',async()=>{
+ const f=await setup();const gate=deferred();const writes:Promise<any>[]=[];
+ let calls=0;
+ vi.mocked(api.setConversationModel).mockImplementation((id,model)=>{
+  // The request is applied when it arrives; the response is held. The server has the
+  // model either way — what the boundary decides is whether the client sends more.
+  const p=(++calls===1?gate.promise:Promise.resolve()).then(()=>f.request('PATCH',`/api/conversations/${id}/model`,{model}));writes.push(p);return p;
+ });
+ try{
+  render(<App/>);await f.openChat();fireEvent.click(screen.getByText('Conversation model settings'));
+  // First Save: its request goes out and its response is held.
+  fireEvent.change(screen.getByLabelText('Custom model ID'),{target:{value:'OLD_FIRST'}});fireEvent.click(screen.getByRole('button',{name:'Save model'}));
+  await waitFor(()=>expect(calls).toBe(1));
+  // Second Save while the first is open: this intent is recorded, never submitted.
+  fireEvent.change(screen.getByLabelText('Custom model ID'),{target:{value:'OLD_QUEUED'}});fireEvent.click(screen.getByRole('button',{name:'Save model'}));
+  await act(async()=>{await Promise.resolve();});
+  expect(calls).toBe(1);
+  // The auth boundary between the two sessions.
+  resetMutationQueues();resetProjectMutationState();
+  await act(async()=>{gate.resolve();await writes[0];});
+  await act(async()=>{await Promise.resolve();});
+  // The recorded intent did not follow the held write: exactly one request was made,
+  // and the conversation keeps what the server actually received.
+  const model=(await f.store.getConversation(f.conversation.id))!.modelPreference;
+  console.log('AUDIT26 model retired intent',JSON.stringify({calls,model}));
+  expect(calls).toBe(1);
+  expect(model).toBe('OLD_FIRST');
  }finally{await f.teardown();}
 });

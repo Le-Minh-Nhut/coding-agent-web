@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { api } from "./api.js";
+import { api, setCsrfToken } from "./api.js";
 import { LoginView } from "./components/LoginView.js";
 import { ProjectsView } from "./components/ProjectsView.js";
 import { ProjectDetailView } from "./components/ProjectDetailView.js";
@@ -18,6 +18,9 @@ type View = "projects" | "project-detail" | "conversation" | "settings";
  * new auth-loss path cannot forget one of the two resets.
  */
 function clearSessionScopedMutations(): void {
+  // Retire the in-memory CSRF token too: a held closure is not the only thing that
+  // can mis-send after a sign-out, and the next login's `getMe` overwrites it anyway.
+  setCsrfToken(null);
   resetMutationQueues();
   resetProjectMutationState();
 }

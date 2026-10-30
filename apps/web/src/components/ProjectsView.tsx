@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import { api } from "../api.js";
-import { chainMutation } from "../mutation-order.js";
+import { chainMutation, currentAuthGeneration, MUTATION_CANCELLED } from "../mutation-order.js";
 import { FolderBrowser } from "./FolderBrowser.js";
 import type { ProjectWithStats } from "@caw/contracts";
 
@@ -228,10 +228,24 @@ export function ProjectsView({ onSelectProject, onOpenSettings }: ProjectsViewPr
    * which already carries the accepted value. (V25-01 feedback path)
    */
   const writeFavorite = async (projectId: string, record: { desired: boolean; base: boolean; pending: boolean | null }): Promise<void> => {
+    // The auth lifetime this write was submitted in. A star PATCH that had already
+    // reached the network before the sign-out cannot be unsent — the queue gate only
+    // stops intents that had not started — so a result returning after re-login must
+    // be recognized as retired and dropped: `liveProjectsFeedback.current` by then is
+    // the NEW view's bridge, and applying the old response would repaint a session
+    // that never asked for that write.
+    const lifetime = currentAuthGeneration();
     // Chained on the project key like the rename path (V25-01): submission order
     // becomes arrival order, so a star PATCH that outlived its view cannot land
     // after a newer one from the reopened view and rewind the stored flag.
     const res = await chainMutation(`project-favorite:${projectId}`, () => api.updateProject(projectId, { favorite: record.desired }));
+    if (res === MUTATION_CANCELLED || lifetime !== currentAuthGeneration()) {
+      // The flight this record belonged to died with the session. Drop the record
+      // only if it is still ours: a re-login may have recorded a fresh intent under
+      // the same key, and that one owns the map now.
+      if (favoriteFlightRef.current.get(projectId) === record) favoriteFlightRef.current.delete(projectId);
+      return; // never recurses ⇒ no follow-up is sent under the new credentials
+    }
     const live = liveProjectsFeedback.current;
     if (res.ok) {
       if (live) live.applyFavorite(projectId, res.data.favorite);
@@ -249,7 +263,7 @@ export function ProjectsView({ onSelectProject, onOpenSettings }: ProjectsViewPr
       await writeFavorite(projectId, next);
       return;
     }
-    favoriteFlightRef.current.delete(projectId);
+    if (favoriteFlightRef.current.get(projectId) === record) favoriteFlightRef.current.delete(projectId);
   };
 
   const handleToggleFavorite = (e: React.MouseEvent, project: ProjectWithStats) => {
@@ -312,7 +326,18 @@ export function ProjectsView({ onSelectProject, onOpenSettings }: ProjectsViewPr
    * the user can see. (V25-01 feedback path)
    */
   const writeRename = async (projectId: string, record: { desired: string; pending: { label: string; token: object | null; revision: number } | null }, token: object | null, revision: number): Promise<void> => {
+    // The auth lifetime this write was submitted in. A write that had already
+    // reached the network before the sign-out cannot be unsent, so its result
+    // returning after re-login must neither report to the new view (its bridge is
+    // the live one now) nor close/acknowledge anything in it.
+    const lifetime = currentAuthGeneration();
     const res = await chainMutation(`project-rename:${projectId}`, () => api.updateProject(projectId, { label: record.desired }));
+    if (res === MUTATION_CANCELLED || lifetime !== currentAuthGeneration()) {
+      // Retired with the session: drop the record only if it is still ours — the new
+      // session may already own this key with its own flight.
+      if (renameFlightRef.current.get(projectId) === record) renameFlightRef.current.delete(projectId);
+      return; // no feedback, no acknowledgment, no follow-up under the new credentials
+    }
     // A response acts only on the dialog that submitted it: the token captured at
     // that Save must still be the open dialog's token. Success additionally needs the
     // draft revision captured at that same Save to still be current — the text
@@ -320,18 +345,22 @@ export function ProjectsView({ onSelectProject, onOpenSettings }: ProjectsViewPr
     // chain (V20-03). A stale response must never blame a dialog that submitted
     // nothing (V18-04).
     const live = liveProjectsFeedback.current;
-    const owned = live ? live.openDialogToken() === token : renameOperationRef.current === token;
+    const owned = live !== null && live.openDialogToken() === token;
     if (res.ok) {
       // The draft revision check is the live dialog's: an untouched draft is
-      // indistinguishable from a First→Final→First edit chain by text alone.
-      if (owned && (live ? live.draftRevision() : editRevisionRef.current) === revision) (live ? live.closeDialog : () => setEditingProject(null))();
+      // indistinguishable from a First→Final→First edit chain by text alone. Both
+      // the ownership test and the close go through the mounted view: with no view
+      // mounted there is no dialog on screen to close, and this closure's setters
+      // belong to an instance React has already discarded.
+      if (owned && live.draftRevision() === revision) live.closeDialog();
       // The list on screen belongs to the live view; a write that landed for a view
       // that is gone would refresh a component nobody sees.
       if (live) live.refresh();
-      else loadProjects();
     } else if (owned) {
       if (live) live.reportError(res.error.message);
-      else setError(res.error.message);
+      // With no bridge mounted there is no alert to write to and no list to repaint:
+      // the next mount reads the server's stored label fresh, so touching this dead
+      // closure's state (setError/loadProjects) would only report to nobody.
     }
     // Send exactly one follow-up when this write left the user's newest intent
     // unserved: a newer label (both outcomes), or — after a failure — a pending Save
@@ -343,13 +372,33 @@ export function ProjectsView({ onSelectProject, onOpenSettings }: ProjectsViewPr
     // Only the current flight record may chain: a record already superseded by an
     // earlier settlement must not resurrect its own old intent.
     const stillCurrent = renameFlightRef.current.get(projectId) === record;
-    if (stillCurrent && record.pending !== null && (!res.ok || record.pending.label !== record.desired)) {
-      const next = { desired: record.pending.label, pending: null as { label: string; token: object | null; revision: number } | null };
-      renameFlightRef.current.set(projectId, next);
-      await writeRename(projectId, next, record.pending.token, record.pending.revision);
-      return;
+    if (stillCurrent) {
+      const pending = record.pending;
+      if (pending !== null) {
+        // V26-03: a success whose accepted label equals the recorded intent has
+        // served that intent, but the intent's OWN dialog was never acknowledged —
+        // the record that carried it is not this write's, so none of the feedback
+        // above touched it. Acknowledge it here, through the same ownership test the
+        // direct-success path uses, and send no PATCH: the server already holds the
+        // label the user typed. A failure still owes the pending intent a request
+        // (V20-04), so only a delivered success takes this branch.
+        if (res.ok && pending.label === record.desired) {
+          // The feedback goes to the live bridge only when one exists. With no view
+          // mounted there is no dialog to close and no list to repaint; the token and
+          // revision recorded at that Save are the submitter's, so a dialog opened
+          // since (different token) or a draft edited since (different revision) is
+          // left alone — exactly as the direct-success path decides it.
+          if (live && live.openDialogToken() === pending.token && live.draftRevision() === pending.revision) live.closeDialog();
+          if (live) live.refresh();
+        } else {
+          const next = { desired: pending.label, pending: null as { label: string; token: object | null; revision: number } | null };
+          renameFlightRef.current.set(projectId, next);
+          await writeRename(projectId, next, pending.token, pending.revision);
+          return;
+        }
+      }
+      if (renameFlightRef.current.get(projectId) === record) renameFlightRef.current.delete(projectId);
     }
-    if (stillCurrent) renameFlightRef.current.delete(projectId);
   };
 
   const handleRenameProject = async (e: React.FormEvent) => {
