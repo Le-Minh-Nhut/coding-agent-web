@@ -255,6 +255,56 @@ it.each(["entry","message_end"] as const)("V19-fix1 a live echo during bootstrap
 });
 
 /**
+ * Finding 8: the host journaled the prompt and cut the dump AFTERWARDS, so the
+ * dump itself carries A's own echo and no live frame ever arrives. The row's
+ * `message.timestamp` (ms epoch) is at or after the send, so it is a receipt, not
+ * baseline: A must be acknowledged once and the later refusal must land on B.
+ */
+it("V19-fix8 a dump row newer than the send is the prompt's echo, not baseline",async()=>{
+ const f=await fixture(2);
+ const composer=f.view.container.querySelector("textarea")!;
+ fireEvent.change(composer,{target:{value:"A_DUMPED"}});
+ await act(async()=>fireEvent.click(f.view.getByRole("button",{name:"Send"})));
+ expect(composer.value).toBe("");
+ const echoTs=Date.now();
+ const oldEntry:any={type:"message",id:"old-history",parentId:null,timestamp:"2026-01-01T00:00:00Z",message:{role:"user",content:"OLD_HISTORY",timestamp:1}};
+ const echoEntry:any={type:"message",id:"echo-a",parentId:null,timestamp:"2026-01-01T00:00:00Z",message:{role:"user",content:"A_DUMPED",timestamp:echoTs}};
+ await f.emit({t:"snapshot-chunk",entries:[oldEntry,echoEntry],final:true});
+ const aRows=f.view.getAllByText("A_DUMPED").length;
+ // A is acknowledged: the NEXT refusal belongs to B, not to A.
+ fireEvent.change(composer,{target:{value:"B_REFUSED"}});
+ await act(async()=>fireEvent.click(f.view.getByRole("button",{name:"Send"})));
+ fireEvent.change(composer,{target:{value:"my newer draft"}});
+ await f.emit({t:"error",message:"prompting is unavailable until the host finishes starting up"});
+ const recovery=f.view.container.querySelector(".refused-prompt")?.textContent??"";
+ console.log("AUDIT19-fix8 dumped echo",JSON.stringify({echoTs,aRows,recovery,draft:composer.value}));
+ expect(aRows).toBe(1);
+ expect(recovery).toContain("B_REFUSED");
+ expect(recovery).not.toContain("A_DUMPED");
+ expect(composer.value).toBe("my newer draft");
+});
+
+/**
+ * Finding 8 discriminator control: identical dump shape, but the same-text row is
+ * OLDER than the send, so it is baseline and the V19-01 protection must still hold:
+ * the allowance is raised, A stays pending, and the refusal attributes to A.
+ */
+it("V19-fix8 a same-text dump row older than the send is still baseline",async()=>{
+ const f=await fixture(2);
+ const composer=f.view.container.querySelector("textarea")!;
+ fireEvent.change(composer,{target:{value:"A_OLD"}});
+ await act(async()=>fireEvent.click(f.view.getByRole("button",{name:"Send"})));
+ const echoEntry:any={type:"message",id:"echo-old",parentId:null,timestamp:"2026-01-01T00:00:00Z",message:{role:"user",content:"A_OLD",timestamp:1}};
+ await f.emit({t:"snapshot-chunk",entries:[echoEntry],final:true});
+ fireEvent.change(composer,{target:{value:"my newer draft"}});
+ await f.emit({t:"error",message:"prompting is unavailable until the host finishes starting up"});
+ const recovery=f.view.container.querySelector(".refused-prompt")?.textContent??"";
+ console.log("AUDIT19-fix8 baseline discriminator",JSON.stringify({recovery,draft:composer.value}));
+ expect(recovery).toContain("A_OLD");
+ expect(composer.value).toBe("my newer draft");
+});
+
+/**
  * Finding 6: the live streaming assistant bubble must not render in saved mode,
  * where the journal is the only transcript source.
  */

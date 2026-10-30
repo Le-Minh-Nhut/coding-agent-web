@@ -56,6 +56,8 @@ interface PendingPrompt {
    * completing snapshot must not acknowledge it.
    */
   preSnapshot: boolean;
+  /** Wall clock at send; a dump row for this text newer than this is its own echo. */
+  sentAtMs: number;
   token: object;
 }
 
@@ -297,14 +299,22 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
    * to the count the snapshot published so its rows cannot acknowledge them; their
    * real echo can only arrive in later frames, which then exceed the allowance.
    *
-   * Exception: a pre-snapshot prompt whose echo arrived as a *live* frame during
-   * the snapshot was already acked by the replay and must not be blocked — the ack
-   * pass right after (`removeAcknowledgedPrompts`, reading the post-reduce rows)
-   * settles it by count. Only the queued frames count as evidence: a snapshot's own
-   * rows are baseline, never a receipt, even when the text matches.
+   * Two exceptions, both cases where the dump DOES carry this prompt's own echo:
+   * - the echo arrived as a *live* frame during the snapshot, so the replay already
+   *   published it. Skipped; the ack pass right after reads the post-reduce rows
+   *   and settles it by count.
+   * - the host journaled the prompt before cutting the dump and delivered it only
+   *   inside the dump, so no live frame exists. A same-text user row whose
+   *   `message.timestamp` (ms epoch, `packages/collab-protocol/src/types.ts`) is at
+   *   or after this prompt's send time is that echo, not baseline. Skipped too, so
+   *   the same ack pass acknowledges it and the later refusal lands on the next
+   *   prompt instead of being misattributed to a prompt that was accepted.
+   *   Older same-text rows still bump the allowance: V19-01 protection.
    *
-   * ponytail: the skip is keyed on text, so a same-text pre-snapshot send is skipped
-   * too; prompts are text-keyed throughout (an identity key would be the upgrade).
+   * ponytail: the discriminator is wall-clock, so a host clock AHEAD of the browser
+   * can classify a historical same-text row as an echo (false ack) and a host clock
+   * BEHIND leaves today's stuck-prompt behaviour. Chosen because a stuck prompt plus
+   * a stranded refusal is the worse failure, and hosts are NTP-synced.
    */
   const rebasePendingAfterBootstrap = (liveFrames: readonly HostFrame[]): void => {
     const genuinelyEchoed = new Set<string>();
@@ -319,10 +329,17 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     for (const message of transcriptRef.current.messages) {
       if (message.role === "user") hostCounts.set(message.text, (hostCounts.get(message.text) ?? 0) + 1);
     }
+    const dumpedEchoes = new Map<string, number>();
+    for (const entry of transcriptRef.current.entries) {
+      if (entry.type !== "message" || entry.message.role !== "user") continue;
+      const text = textFromContent(entry.message.content);
+      dumpedEchoes.set(text, Math.max(dumpedEchoes.get(text) ?? 0, entry.message.timestamp));
+    }
     const bumped = new Map<string, number>();
     for (const prompt of pendingPromptRef.current) {
       if (!prompt.preSnapshot) continue;
       if (genuinelyEchoed.has(prompt.submitted)) continue;
+      if ((dumpedEchoes.get(prompt.submitted) ?? 0) >= prompt.sentAtMs) continue;
       prompt.hostEchoCount = Math.max(prompt.hostEchoCount, hostCounts.get(prompt.submitted) ?? 0);
       if (prompt.optimisticId) bumped.set(prompt.optimisticId, prompt.hostEchoCount);
     }
@@ -702,6 +719,7 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     const connectionGeneration = connectionGenerationRef.current;
     const physicalConnection = physicalConnectionRef.current;
     const sendToken = { id: sendId, text: trimmed };
+    const sentAtMs = Date.now();
     const hostEchoCount = transcript.messages.filter((message) => message.role === "user" && message.text === trimmed).length;
     const echoAllowance = hostEchoCount + optimisticMessages.filter((message) => message.text === trimmed && hostEchoCount <= (message.hostEchoCount ?? 0)).length;
     const submitted = allowSlashCommand ? text : trimmed;
@@ -715,6 +733,7 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
       draftVersion,
       physicalConnection,
       preSnapshot: transcriptRef.current.pendingSnapshot !== null,
+      sentAtMs,
       token: sendToken,
     };
     pendingPromptRef.current.push(pendingPrompt);
