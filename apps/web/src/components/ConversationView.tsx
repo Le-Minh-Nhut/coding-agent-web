@@ -256,10 +256,28 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
    * earlier physical connection must not consume a refusal meant for a newer one.
    */
   const physicalConnectionRef = useRef(0);
+  /**
+   * Saved-history mode generation (V21-03). Bumped on every transition out of or
+   * into saved mode — leaving saved for live, a Retry that re-reads history, and a
+   * conversation change. A paging or history response carries the generation it was
+   * sent under and is dropped when it no longer matches, so a late page cannot
+   * re-enter saved mode or repaint a stale snapshot over a live verdict. Separate
+   * from `connectionGenerationRef`, which is minted-link identity: a restart that
+   * fails to mint a link still leaves saved mode, and that must invalidate paging.
+   */
+  const historyModeGenerationRef = useRef(0);
   const conversationIdRef = useRef(conversationId);
   conversationIdRef.current = conversationId;
   const modelDraftRef = useRef(modelDraft);
   modelDraftRef.current = modelDraft;
+  /**
+   * True once the user has edited the model draft in this conversation. A late
+   * initial/retry read may hydrate the server value only while the draft is still
+   * untouched; a hydration must never clobber a value the user already chose
+   * (V21-01). Reset per conversation, both as an edit flag and as the submitted
+   * draft baseline for the restart completion.
+   */
+  const modelDraftTouchedRef = useRef(false);
   const watchedTranscriptAgentRef = useRef<string | null>(null);
   const reqIdCounterRef = useRef(1);
   const transcriptRequestsRef = useRef(new Map<number, { agentId: string; fromByte: number; timer: ReturnType<typeof setTimeout> }>());
@@ -272,7 +290,11 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     .filter((part) => part.type === "text")
     .map((part) => part.text)
     .join("") ?? "";
-  const isShowingSavedHistory = linkUnavailable && savedHistory !== null;
+  // V21-03: a positive "a writer is live" verdict from the history endpoint wins
+  // over a saved snapshot. Belt-and-braces alongside the generation guards — a
+  // stale page that somehow landed must not shadow the live fact and claim the
+  // session is not running.
+  const isShowingSavedHistory = linkUnavailable && savedHistory !== null && !historyLive;
   const commandSuggestions = inputText.startsWith("/") && !/\s/.test(inputText)
     ? slashCommands.filter((command) => command.name.startsWith(inputText)).slice(0, 5)
     : [];
@@ -572,6 +594,10 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     olderHistoryLoadingRef.current = false;
     setHistoryError(null);
     setOlderHistoryError(null);
+    // V21-03: a new conversation is a new saved-history mode. Any page or history
+    // read still in flight for the previous one must not land here.
+    historyModeGenerationRef.current += 1;
+    historyScrollAnchorRef.current = null;
 
     sendVersionRef.current++;
     pendingPromptRef.current = [];
@@ -584,11 +610,16 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     }
     setRefusedCopyState(null);
     sendingPromptTextsRef.current.clear();
+    // This conversation's model draft starts untouched again: the initial read may
+    // hydrate the server preference until the user edits the control (V21-01).
+    modelDraftTouchedRef.current = false;
     const currentId = conversationId;
     api.getConversation(conversationId).then((res) => {
+      // An initial read that lands after the user picked a model must not overwrite
+      // that choice with the stale saved preference.
       if (conversationIdRef.current === currentId && res.ok) {
         setConversation(res.data);
-        setModelDraft(res.data.modelPreference ?? res.data.model ?? "");
+        if (!modelDraftTouchedRef.current) setModelDraft(res.data.modelPreference ?? res.data.model ?? "");
       }
     });
     api.getAttachInstructions(conversationId).then((res) => {
@@ -598,10 +629,20 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
   useEffect(() => {
     if (!linkUnavailable) return;
     let active = true;
+    // V21-03: this read belongs to the saved-history mode generation it started in.
+    // A Retry re-runs the effect and takes a new generation, so an earlier read's
+    // verdict can no longer re-enter saved mode or clear a newer live verdict.
+    const generation = ++historyModeGenerationRef.current;
     setHistoryLoading(true);
     setHistoryError(null);
+    // A new mode read supersedes any page from the previous one: its completion is
+    // dropped by the generation check, so this mode must not inherit its in-flight
+    // flag and refuse Load older.
+    setOlderHistoryLoading(false);
+    setOlderHistoryError(null);
+    olderHistoryLoadingRef.current = false;
     void api.getConversationHistory(conversationId).then((result) => {
-      if (!active) return;
+      if (!active || historyModeGenerationRef.current !== generation) return;
       setHistoryLoading(false);
       if (result.ok) {
         setHistoryError(null);
@@ -612,7 +653,7 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
         setHistoryError(result.error.message || "Could not load saved transcript.");
       }
     }).catch((error: unknown) => {
-      if (!active) return;
+      if (!active || historyModeGenerationRef.current !== generation) return;
       setHistoryLoading(false);
       setHistoryError(error instanceof Error ? error.message : "Could not load saved transcript.");
     });
@@ -625,10 +666,20 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     setOlderHistoryLoading(true);
     setOlderHistoryError(null);
     const conversationAtRequest = conversationIdRef.current;
+    // V21-03: a page belongs to the mode it was requested in. Restart, reconnect or
+    // a conversation change moves the generation, and the page is then dropped whole
+    // rather than re-entering saved mode or writing loading/error/anchor state.
+    const generationAtRequest = historyModeGenerationRef.current;
     const scroll = messagesScrollRef.current;
     if (scroll) historyScrollAnchorRef.current = { top: scroll.scrollTop, height: scroll.scrollHeight };
     const result = await api.getConversationHistory(conversationAtRequest, current.nextCursor);
-    if (conversationIdRef.current !== conversationAtRequest) return;
+    if (conversationIdRef.current !== conversationAtRequest || historyModeGenerationRef.current !== generationAtRequest) {
+      // V21-03: the mode moved while this page was in flight — restart, reconnect or
+      // a conversation change. Drop it whole: no savedHistory, no loading/error, no
+      // scroll anchor. The transition itself cleared the loading flags, so a newer
+      // page's own flag is never disturbed by this late completion.
+      return;
+    }
     olderHistoryLoadingRef.current = false;
     setOlderHistoryLoading(false);
     if (!result.ok) {
@@ -720,6 +771,10 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     setLinkAccess(linkRes.data.access);
 
     setLinkUnavailable(false);
+    // V21-03: leaving saved mode invalidates any page still in flight. Without this
+    // a late saved page would re-enter saved mode over the live session we just got.
+    historyModeGenerationRef.current += 1;
+    historyScrollAnchorRef.current = null;
     setSavedHistory(null);
     setHistoryLive(false);
     rawUrlRef.current = linkRes.data.url;
@@ -777,7 +832,7 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     if (conversationIdRef.current !== currentId) return;
     if (result.ok) {
       setConversation(result.data);
-      setModelDraft(result.data.modelPreference ?? result.data.model ?? "");
+      if (!modelDraftTouchedRef.current) setModelDraft(result.data.modelPreference ?? result.data.model ?? "");
     }
     await connectToCollab(true);
     // The live link may still be down; re-run the saved-history read so a
@@ -1086,12 +1141,12 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
         <summary>Conversation model settings</summary>
         <section className="model-controls" aria-label="Conversation model">
           <label htmlFor="conversation-model">Preferred model for next launch</label>
-          <select id="conversation-model" value={modelCatalogState.status === "loaded" && modelCatalogState.models.includes(modelDraft) ? modelDraft : ""} onChange={(event) => setModelDraft(event.target.value)}>
+          <select id="conversation-model" value={modelCatalogState.status === "loaded" && modelCatalogState.models.includes(modelDraft) ? modelDraft : ""} onChange={(event) => { modelDraftTouchedRef.current = true; setModelDraft(event.target.value); }}>
             <option value="">Choose a catalog model</option>
             {modelCatalogState.status === "loaded" && modelCatalogState.models.map((model) => <option key={model} value={model}>{model}</option>)}
           </select>
           <label htmlFor="custom-model">Custom model ID</label>
-          <input id="custom-model" ref={modelInputRef} value={modelDraft} maxLength={128} onChange={(event) => setModelDraft(event.target.value)} placeholder="Enter any OMP model ID" aria-describedby="model-launch-note" />
+          <input id="custom-model" ref={modelInputRef} value={modelDraft} maxLength={128} onChange={(event) => { modelDraftTouchedRef.current = true; setModelDraft(event.target.value); }} placeholder="Enter any OMP model ID" aria-describedby="model-launch-note" />
           {modelCatalogState.status === "loading" && <p role="status">Loading model catalog…</p>}
           {modelCatalogState.status === "empty" && <p role="status">No models reported by OMP. Saved preference is unchanged.</p>}
           {modelCatalogState.status === "unavailable" && <p role="status">Model catalog unavailable: {modelCatalogState.reason} Saved preference is unchanged.</p>}
@@ -1168,6 +1223,12 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
         {isShowingSavedHistory && savedHistory ? (
           <>
             <div className="banner idle" role="status">Saved transcript — this session is not running. {savedHistory.header.title ?? savedHistory.header.sessionId}</div>
+            {/* V21-02: saved mode must not be a dead end. The host may resume the
+                native session later (external ones especially, where the app cannot
+                restart the process itself), so offer an on-screen check for a fresh
+                link. One click, no polling and no auto launch: a successful mint
+                switches to the live view, a failure keeps this transcript. */}
+            <button type="button" className="primary" onClick={() => void retryUnavailableConversation()}>Open live view</button>
             {savedHistory.skippedOversized && <div className="banner unknown" role="alert">History is incomplete: a record too large to display was skipped; journal intact on disk.</div>}
             {savedHistory.truncated && (savedHistory.hasOlder || savedHistory.skippedOversized) && <div className="banner unknown" role="status">Saved transcript truncated; some history is omitted.</div>}
             {savedHistory.hasOlder && savedHistory.nextCursor !== null && <button type="button" className="ghost" disabled={olderHistoryLoading} onClick={() => void loadOlderHistory()}>{olderHistoryLoading ? "Loading older…" : "Load older"}</button>}
