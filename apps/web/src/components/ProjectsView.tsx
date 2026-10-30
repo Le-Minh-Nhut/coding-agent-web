@@ -22,6 +22,33 @@ interface ProjectsViewProps {
  */
 const renameFlights = new Map<string, { desired: string; pending: { label: string; token: object | null; revision: number } | null }>();
 
+/**
+ * The feedback surface of the ProjectsView that is mounted right now.
+ *
+ * A rename write — and the coalesced follow-up it chains — can be issued from the
+ * closure of a view that has since unmounted (Back, Settings round-trip). Applying
+ * its result to that closure does nothing the user can see: the dialog the *live*
+ * view has open stays open and the live list keeps the stale label. So the mounted
+ * view registers here and the write asks it for feedback instead. Each accessor
+ * dereferences the live view's refs rather than captured values, so a registration
+ * made once on mount always reads the dialog token and draft revision of the
+ * moment the response lands. (V25-01 feedback path)
+ */
+interface LiveProjectsFeedback {
+  /** The rename dialog this view has open now, or null when it has none. */
+  openDialogToken: () => object | null;
+  /** Current draft revision of its rename input. */
+  draftRevision: () => number;
+  /** Close its rename dialog. */
+  closeDialog: () => void;
+  /** Re-read and repaint its project list. */
+  refresh: () => void;
+  /** Report a failed write on its alert region. */
+  reportError: (message: string) => void;
+}
+
+const liveProjectsFeedback: { current: LiveProjectsFeedback | null } = { current: null };
+
 export function ProjectsView({ onSelectProject, onOpenSettings }: ProjectsViewProps) {
   const [projects, setProjects] = useState<ProjectWithStats[]>([]);
   const [loading, setLoading] = useState(true);
@@ -113,6 +140,30 @@ export function ProjectsView({ onSelectProject, onOpenSettings }: ProjectsViewPr
       setError(res.error.message);
     }
   };
+  /**
+   * Register this mount as the surface a rename response reports to. Every
+   * accessor reads through a ref or a state setter, so the registration made once
+   * on mount still sees the dialog token and draft revision of the moment the
+   * response lands (and `loadProjects` closes over refs and setters only, so the
+   * mount-time instance it captures is equivalent to a fresh one).
+   *
+   * Cleared on unmount: a response that lands while no ProjectsView is mounted has
+   * nowhere to report, and must not touch an unmounted instance's state.
+   */
+  useEffect(() => {
+    const bridge: LiveProjectsFeedback = {
+      openDialogToken: () => renameOperationRef.current,
+      draftRevision: () => editRevisionRef.current,
+      closeDialog: () => setEditingProject(null),
+      refresh: () => void loadProjects(),
+      reportError: (message: string) => setError(message),
+    };
+    liveProjectsFeedback.current = bridge;
+    // Only clear our own registration: a newer mount may already have replaced it.
+    return () => {
+      if (liveProjectsFeedback.current === bridge) liveProjectsFeedback.current = null;
+    };
+  }, []);
 
   useEffect(() => {
     loadProjects();
@@ -200,6 +251,11 @@ export function ProjectsView({ onSelectProject, onOpenSettings }: ProjectsViewPr
    * the follow-up is what makes the last Save win regardless of arrival order.
    * The dialog token is captured at Save, so both this write and its follow-up can
    * only close the dialog they belong to, never a newer one opened meanwhile.
+   *
+   * Feedback is resolved through `liveProjectsFeedback` — the ProjectsView mounted
+   * now — not through this closure: a write issued before Back/Settings can settle
+   * after the view that submitted it is gone, and only the mounted view has state
+   * the user can see. (V25-01 feedback path)
    */
   const writeRename = async (projectId: string, record: { desired: string; pending: { label: string; token: object | null; revision: number } | null }, token: object | null, revision: number): Promise<void> => {
     const res = await chainMutation(`project-rename:${projectId}`, () => api.updateProject(projectId, { label: record.desired }));
@@ -209,12 +265,19 @@ export function ProjectsView({ onSelectProject, onOpenSettings }: ProjectsViewPr
     // comparison alone cannot tell an untouched draft from a First→Final→First edit
     // chain (V20-03). A stale response must never blame a dialog that submitted
     // nothing (V18-04).
-    const owned = renameOperationRef.current === token;
+    const live = liveProjectsFeedback.current;
+    const owned = live ? live.openDialogToken() === token : renameOperationRef.current === token;
     if (res.ok) {
-      if (owned && editRevisionRef.current === revision) setEditingProject(null);
-      loadProjects();
+      // The draft revision check is the live dialog's: an untouched draft is
+      // indistinguishable from a First→Final→First edit chain by text alone.
+      if (owned && (live ? live.draftRevision() : editRevisionRef.current) === revision) (live ? live.closeDialog : () => setEditingProject(null))();
+      // The list on screen belongs to the live view; a write that landed for a view
+      // that is gone would refresh a component nobody sees.
+      if (live) live.refresh();
+      else loadProjects();
     } else if (owned) {
-      setError(res.error.message);
+      if (live) live.reportError(res.error.message);
+      else setError(res.error.message);
     }
     // Send exactly one follow-up when this write left the user's newest intent
     // unserved: a newer label (both outcomes), or — after a failure — a pending Save
