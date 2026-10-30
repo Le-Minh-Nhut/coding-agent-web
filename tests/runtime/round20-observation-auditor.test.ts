@@ -218,7 +218,7 @@ it("V20 an unchanged poll returns the row as it stands now, not the pre-probe sn
   // The poll observes exactly what the row already holds — nothing to write — but a
   // newer life takes the row while it is still probing.
   const poll=supervisor.refresh(c.id);await entered.promise;
-  const moved=await store.updateConversation(c.id,{state:"stopped",statusDetail:"Stopped."});
+  const moved=(await store.updateConversation(c.id,{state:"stopped",statusDetail:"Stopped."}))!;
   gate.resolve(true);const result=(await poll)!;
   console.log("AUDIT20 f3",JSON.stringify({resultState:result.state,resultEpoch:epochOf(result),finalState:moved.state,writes}));
   expect(writes).toBe(0);
