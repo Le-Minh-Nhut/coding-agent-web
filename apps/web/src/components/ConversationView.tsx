@@ -1347,12 +1347,13 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
           <span>State: unknown — Agent status cannot be determined</span>
         </div>
       )}
-      {/* A conversation whose record still says `starting` reports the collab link
-          as idle, so this row used to sit directly above "Host is starting up;
-          prompting may be refused." — two live regions claiming opposite things.
-          The startup warning is the stronger state: it owns the status row while
-          it applies, rather than both being printed. */}
-      {conversation?.state !== "starting" && status === "idle" && (
+      {/* Two live regions must not claim opposite things here. The record's
+          `starting` is the app-side process verdict for a conversation that has
+          never launched (no native session, no tmux); `status` describes the live
+          collab link. When the link is established the host is demonstrably
+          responsive — prompts are accepted — so the idle row is the true one and
+          the startup warning yields to it (see the gate below). */}
+      {status === "idle" && (
         <div className="banner idle" role="status">
           <span>Connected — no turn in flight</span>
         </div>
@@ -1373,7 +1374,10 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
           <span>{transcript.notice.message}</span>
         </div>
       )}
-      {conversation?.state === "starting" && (
+      {/* While the link is live (idle/running) the host is up, so the record's
+          stale `starting` must not claim prompting may be refused. Only while the
+          link is down/connecting does the startup warning stay honest. */}
+      {conversation?.state === "starting" && status !== "idle" && status !== "running" && (
         <div className="banner connecting" role="status">Host is starting up; prompting may be refused.</div>
       )}
       <div className="messages-scroll" ref={messagesScrollRef} role="region" aria-label="Conversation transcript">
@@ -1440,15 +1444,15 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
             state makes assistive tech (and any test filtering by role) ambiguous. */}
         {messages.length === 0 && !streamingText && !linkUnavailable && (
           <div className="empty-transcript">
-            {/* Same contradiction as the status row: while the record says
-                `starting`, "Connected to this conversation's agent" is not true yet. */}
-            {conversation?.state !== "starting" && status === "idle" && (
+            {/* Same rule as the status row: a live idle link outranks the
+                record's stale `starting`, so the connected copy is the true one. */}
+            {status === "idle" && (
               <>
                 <p>Connected to this conversation&apos;s agent.</p>
                 <p>No prompts yet. Send one below to start the turn.</p>
               </>
             )}
-            {conversation?.state === "starting" && <p>The host is starting up. Prompting may be refused until it finishes.</p>}
+            {conversation?.state === "starting" && status !== "idle" && status !== "running" && <p>The host is starting up. Prompting may be refused until it finishes.</p>}
             {status === "running" && <p>The agent is working. Output appears here as it streams.</p>}
             {status === "connecting" && <p>Contacting the agent…</p>}
             {(status === "reconnecting" || status === "disconnected") && (
