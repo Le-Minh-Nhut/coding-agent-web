@@ -7,7 +7,7 @@
  * — is documented at the top of `tests/e2e/README.md`. Read that before
  * changing anything here.
  */
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { randomBytes, scryptSync } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -240,25 +240,57 @@ const child = spawn(tsxBin, [SERVER_ENTRY], {
 });
 
 /**
- * Playwright's webServer teardown contract: on SIGTERM it waits up to
- * `gracefulShutdown.timeout`, then SIGKILLs. `gracefulShutdown` kills the whole
- * process group (`-pid`), but the group dies the moment this parent dies, so a
- * signal handler that exits immediately cannot be relied on to clean up.
- * Instead we ignore SIGTERM: the timeout expires, Playwright SIGKILLs the group
- * (taking the `tsx` child with it, since stdio is inherited and it does not
- * daemonize), and this handler removes the temp tree afterwards. The tree is
- * inside the OS temp dir either way, so a SIGKILL cannot leak anything precious.
+ * The app's private tmux server socket. Derived exactly as the server derives it
+ * (`join(config.stateDir, "tmux.sock")`, apps/server/src/tmux-service.ts) — the
+ * app's own server lives on this socket while the server process runs, and it
+ * daemonizes, so it survives a SIGKILL of this process group. Playwright's
+ * teardown SIGKILLs the group and the daemon leaks; reaping it by socket is the
+ * only way to reach it, and always through `-S` so the owner's default server is
+ * never contacted.
  */
-process.on("SIGTERM", () => {});
+const tmuxSocket = join(stateDir, "tmux.sock");
+
+/**
+ * Reap the app's tmux server on its own socket. Array argv + `shell: false`
+ * (AGENTS.md hard rule 1); errors are swallowed because "no server running" and
+ * a missing socket are both the desired end state. Never reads `$TMUX`/
+ * `TMUX_TMPDIR`: that would address the owner's server.
+ */
+function reapTmuxServer() {
+  if (!existsSync(tmuxSocket)) return;
+  try {
+    spawnSync("tmux", ["-S", tmuxSocket, "kill-server"], { stdio: "ignore", shell: false });
+  } catch {
+    /* no server running, or tmux absent: nothing left to reap. */
+  }
+}
+
+/**
+ * Playwright's webServer teardown contract: on SIGTERM it waits up to
+ * `gracefulShutdown.timeout` (10s), then SIGKILLs the process group. The group
+ * dies the moment this parent dies, so the handler must not exit: it reaps the
+ * app's tmux daemon by socket and stays alive. The daemon outlives the group
+ * (tmux daemonizes), which is exactly why the reap is needed on every path.
+ * SIGINT also removes the temp tree first — its socket is about to disappear
+ * with it, which is why the reap runs *before* the `rmSync`.
+ */
 process.on("SIGINT", () => {
+  reapTmuxServer(true);
   rmSync(tempRoot, { recursive: true, force: true });
   child.kill("SIGINT");
   process.exitCode = 0;
 });
+// Synchronous so it beats the SIGKILL escalation; Playwright then SIGKILLs the
+// group (taking the `tsx` child with it, since stdio is inherited and it does not
+// daemonize). No `exit`: staying alive is what keeps the group's SIGKILL the
+// final word rather than this handler's own exit.
+process.on("SIGTERM", () => reapTmuxServer(true));
 
 child.on("exit", (code) => {
-  // The server ended on its own (crash, or an external stop). Remove the temp
-  // tree and mirror the exit so Playwright reports the real failure.
+  // The server ended on its own (crash, or an external stop). Reap its tmux
+  // server, remove the temp tree, and mirror the exit so Playwright reports the
+  // real failure.
+  reapTmuxServer(true);
   rmSync(tempRoot, { recursive: true, force: true });
   process.exit(code ?? 0);
 });

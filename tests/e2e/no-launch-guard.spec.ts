@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, statSync } from "node:fs";
+import { join } from "node:path";
 import { assertInsideHarnessTemp, assertNoUnexpectedAppErrors, declareInjectedFault, harnessFixture, login, requireAppServer } from "./fixture.js";
 
 /**
@@ -53,6 +54,29 @@ function tmuxAvailable(): boolean {
   }
 }
 
+/** The app's private tmux socket; derived exactly as the server derives it. */
+function harnessTmuxSocket(): string {
+  return join(harnessFixture().stateDir, "tmux.sock");
+}
+
+/**
+ * Session names on the harness socket, via `-S` only — never the owner's default
+ * server. `[]` means no server is reachable there (not an error: it is the
+ * desired end state after a run).
+ */
+function harnessTmuxSessions(): string[] {
+  const socket = harnessTmuxSocket();
+  if (!existsSync(socket)) return [];
+  try {
+    return execFileSync("tmux", ["-S", socket, "list-sessions", "-F", "#{session_name}"], { encoding: "utf8" })
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line !== "");
+  } catch {
+    return [];
+  }
+}
+
 /** Every recorded invocation ran the pinned stub, never a bare `omp` from PATH. */
 function assertEveryInvocationWasTheStub(fixture: ReturnType<typeof harnessFixture>, records: readonly StubRecord[]): void {
   expect(existsSync(fixture.stubOmpPath), "the pinned stub binary exists").toBe(true);
@@ -100,6 +124,18 @@ test("a chat created through the UI launches only the pinned stub and settles as
 
   const fixture = harnessFixture();
   await login(page);
+
+  // The app legitimately runs its own tmux server on the harness socket while the
+  // server process lives (one daemon per state dir). Two things are asserted here:
+  // every session on that socket is the app's own `caw-` prefix (the adapter's
+  // SESSION_PREFIX rule), and the socket itself is inside the harness temp tree —
+  // so the launcher's reap-by-socket can only ever address the harness's server,
+  // never the owner's. Post-run absence of the daemon cannot be asserted from
+  // inside Playwright (the server is still up when specs finish); the launcher's
+  // reap and the /proc scan in the run report cover that.
+  assertInsideHarnessTemp(harnessTmuxSocket());
+  const sessionsAtStart = harnessTmuxSessions();
+  expect(sessionsAtStart.filter((name) => !name.startsWith("caw-")), "only app-owned caw- sessions exist on the harness socket").toEqual([]);
 
   // The created conversation is opened by the app as soon as it exists. It has no
   // native session and no live writer, so its history answers 404 and its link 409
