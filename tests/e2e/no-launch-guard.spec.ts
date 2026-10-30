@@ -1,7 +1,7 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test } from "@playwright/test";
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, statSync } from "node:fs";
-import { assertInsideHarnessTemp, assertNoUnexpectedAppErrors, harnessFixture, login, requireAppServer } from "./fixture.js";
+import { assertInsideHarnessTemp, assertNoUnexpectedAppErrors, declareInjectedFault, harnessFixture, login, requireAppServer } from "./fixture.js";
 
 /**
  * K1 end-to-end proof: no real agent can be started by this harness.
@@ -94,13 +94,19 @@ test("registry and model catalog calls all run the pinned stub; the PATH canary 
 });
 
 test("a chat created through the UI launches only the pinned stub and settles as an honest failure", async ({ page }) => {
+  // The launch path spawns into a tmux session, so without a tmux binary the pin
+  // cannot be exercised here at all. That is reported as a skip, not a pass.
+  test.skip(!tmuxAvailable(), "no tmux on this machine: the launch path cannot be reached, so the pin is covered by tests/server/round19-harness-record-auditor.test.ts instead");
+
   const fixture = harnessFixture();
   await login(page);
 
-  // The created conversation is opened by the app and has no native session and no
-  // live writer, so its history (404) and link (409) are the states the screen is
-  // built to render. A refused launch (409) is the same kind of expected answer.
-  test.skip(!tmuxAvailable(), "no tmux on this machine: the launch path cannot be reached, so the pin is covered by tests/server/round19-harness-record-auditor.test.ts instead");
+  // The created conversation is opened by the app as soon as it exists. It has no
+  // native session and no live writer, so its history answers 404 and its link 409
+  // — the states the screen is built to render, declared here rather than
+  // forgiven by a blanket rule.
+  declareInjectedFault(page, { urlPattern: /\/api\/conversations\/[^/]+\/history/, status: 404 });
+  declareInjectedFault(page, { urlPattern: /\/api\/conversations\/[^/]+\/link/, status: 409 });
 
   await page.getByRole("heading", { name: "Seeded Fixture", exact: true }).click();
   const newChat = page.getByRole("button", { name: "+ New chat" });
@@ -155,4 +161,6 @@ test("a chat created through the UI launches only the pinned stub and settles as
     expect(["error", "stopped", "unknown"]).toContain(row.state);
     expect(row.statusDetail, "the failure is explained, not silent").toBeTruthy();
   }
+
+  await assertNoUnexpectedAppErrors(page);
 });
