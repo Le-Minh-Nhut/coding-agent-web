@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import type { ConversationEvent } from "@caw/contracts";
 import { api } from "../api.js";
 
@@ -49,15 +49,36 @@ export function ActivityPanel({
   const [loading, setLoading] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /**
+   * F-B1/F-B2: every read (tail reload and backward page) takes the next
+   * generation, and it may only touch the panel while it is still the newest
+   * read *and* still the same conversation. A disposition-less "in flight" flag
+   * is not enough: a tail reload that started first but lands last used to replace
+   * the rows a backward page had just prepended, silently dropping the seq range
+   * between the two windows and leaving the cursor unable to reach it. A late read
+   * for a previous conversation is dropped the same way.
+   */
+  const readGenerationRef = useRef(0);
+  const conversationIdRef = useRef(conversationId);
+  conversationIdRef.current = conversationId;
 
   // V23-02: open on the TAIL — no cursor means the newest page, and "Load older"
   // walks backwards with `before`, so the newest events are visible immediately.
+  // B6: Retry is a tail RESTART by design — it reloads the newest page and
+  // intentionally discards any older pages already walked (the shared error is
+  // recovered by re-reading the newest truth, not by resuming a broken walk).
   const loadEvents = async () => {
     if (!conversationId) return;
+    const id = conversationId;
+    const generation = ++readGenerationRef.current;
     setLoading(true);
     setError(null);
-    const res = await api.getConversationEvents(conversationId);
+    const res = await api.getConversationEvents(id);
+    // The flags belong to THIS request alone (the other entry point owns the other
+    // one), so they are released even when the payload is stale — otherwise a
+    // dropped tail reload would leave `loading` stuck true and Retry disabled.
     setLoading(false);
+    if (conversationIdRef.current !== id || readGenerationRef.current !== generation) return;
     if (res.ok) {
       setEvents(res.data.events);
       setNextBefore(res.data.nextBefore ?? null);
@@ -65,20 +86,31 @@ export function ActivityPanel({
   };
 
   useEffect(() => {
+    conversationIdRef.current = conversationId;
+    // F-B2: a new conversation starts blank. Anything already in flight for the
+    // previous one is superseded here and dropped on landing.
+    readGenerationRef.current += 1;
     if (initialEvents !== undefined) {
       setEvents(initialEvents);
       setNextBefore(initialNextBefore);
       return;
     }
+    setEvents([]);
+    setNextBefore(null);
+    setError(null);
     void loadEvents();
   }, [conversationId, initialEvents]);
 
   const handleLoadMore = async () => {
     if (!conversationId || nextBefore === null || loadingMore) return;
+    const id = conversationId;
+    const cursor = nextBefore;
+    const generation = ++readGenerationRef.current;
     setLoadingMore(true);
     setError(null);
-    const res = await api.getConversationEvents(conversationId, { before: nextBefore });
+    const res = await api.getConversationEvents(id, { before: cursor });
     setLoadingMore(false);
+    if (conversationIdRef.current !== id || readGenerationRef.current !== generation) return;
     if (res.ok) {
       setEvents((prev) => [...res.data.events, ...prev]);
       setNextBefore(res.data.nextBefore ?? null);

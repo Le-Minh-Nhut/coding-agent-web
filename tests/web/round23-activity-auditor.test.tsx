@@ -142,3 +142,90 @@ it('V23 the oldest page is reached with no gap after the tail, and the label goe
   expect(screen.queryByRole('button',{name:'Load older activity'})).toBeNull();
  }finally{await teardown();}
 },30000);
+
+// Node 20.19 has no Promise.withResolvers; keep the tiny local deferred.
+const deferred=()=>{let resolve!:(v:any)=>void;const promise=new Promise<any>(r=>{resolve=r;});return {promise,resolve};};
+
+/**
+ * F-B1: the tail reload and backward paging shared one error/loading state, so a
+ * tail reload that started FIRST but landed LAST replaced the rows a page had
+ * just prepended — dropping the seq range between the two windows and leaving the
+ * cursor unable to reach it. The two reads are held here so their landing order
+ * is exactly the reviewer's probe: tail first, page second.
+ */
+it('V23 a tail restart cannot overwrite a page loaded while it was in flight (450 events)',async()=>{
+ const total=450;const {conversation,teardown}=await setup(total);
+ try{
+  const real=vi.mocked(api.getConversationEvents).getMockImplementation()!;
+  const held:{d:{resolve:(v:any)=>void};v:any}[]=[];
+  let holdNext=0;
+  vi.mocked(api.getConversationEvents).mockImplementation((id,options)=>{
+   const result=real(id,options);
+   if(holdNext<=0)return result;
+   holdNext--;
+   const d=deferred();
+   void result.then(v=>{held.push({d,v});});
+   return d.promise;
+  });
+  const view=render(<ActivityPanel conversationId={conversation.id}/>);
+  await screen.findAllByText(/Older Event|Latest Problem/);
+  await clickOlder();
+  const walked=renderedSeqs(view.container);
+  expect(walked[0]).toBe(450);
+  expect(walked.at(-1)).toBe(251);
+  // The next backward page fails, which is the only way the tail Retry appears.
+  vi.mocked(api.getConversationEvents).mockImplementationOnce(async()=>({ok:false,error:{code:'internal',message:'older page failed'}}));
+  await clickOlder();
+  await screen.findByRole('alert');
+  holdNext=2;
+  await act(async()=>fireEvent.click(screen.getByRole('button',{name:'Retry'})));
+  await clickOlder();
+  await waitFor(()=>expect(held).toHaveLength(2));
+  // Tail restart first, the page it raced second — the reviewer's ordering.
+  await act(async()=>{held[0]!.d.resolve(held[0]!.v);});
+  await act(async()=>{held[1]!.d.resolve(held[1]!.v);});
+  const seqs=renderedSeqs(view.container);
+  const unique=[...new Set(seqs)];
+  console.log('AUDIT23 concurrent tail/paging',JSON.stringify({count:seqs.length,unique:unique.length,top:seqs[0],bottom:seqs.at(-1)}));
+  expect(seqs.length).toBe(300);
+  expect(unique.length).toBe(300);
+  expect(seqs[0]).toBe(450);
+  expect(seqs.at(-1)).toBe(151);
+  expect(unique).toEqual(descending(450,151));
+ }finally{await teardown();}
+},30000);
+
+/**
+ * F-B2: a conversation switch used to keep the previous conversation's rows and
+ * let a late response repaint them. The panel must start blank for the new id and
+ * drop anything still in flight for the old one.
+ */
+it('V23 a conversation switch clears the previous rows and drops its late read',async()=>{
+ const {store,conversation,teardown}=await setup(5);
+ try{
+  const project=await store.createProject({path:'/tmp/other'});
+  const other=await store.createConversation({projectId:project.id});
+  for(let i=1;i<=3;i++)await store.recordEvent(other.id,'other.event',{n:i});
+  const real=vi.mocked(api.getConversationEvents).getMockImplementation()!;
+  const held:{d:{resolve:(v:any)=>void};v:any}[]=[];
+  let holdNext=1;
+  vi.mocked(api.getConversationEvents).mockImplementation((id,options)=>{
+   const result=real(id,options);
+   if(holdNext<=0)return result;
+   holdNext--;
+   const d=deferred();
+   void result.then(v=>{held.push({d,v});});
+   return d.promise;
+  });
+  const view=render(<ActivityPanel conversationId={conversation.id}/>);
+  await waitFor(()=>expect(held).toHaveLength(1));
+  view.rerender(<ActivityPanel conversationId={other.id}/>);
+  await screen.findAllByText('Other Event');
+  const underB=renderedSeqs(view.container);
+  await act(async()=>{held[0]!.d.resolve(held[0]!.v);});
+  const afterLate=renderedSeqs(view.container);
+  console.log('AUDIT23 activity switch',JSON.stringify({underB,afterLate}));
+  expect(underB).toEqual([3,2,1]);
+  expect(afterLate).toEqual([3,2,1]);
+ }finally{await teardown();}
+},30000);
