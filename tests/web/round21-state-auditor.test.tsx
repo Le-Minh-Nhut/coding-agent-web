@@ -104,15 +104,15 @@ it("V21 a later good journal read clears a stuck live-host verdict (conflict the
  vi.mocked(api.getConversationHistory).mockResolvedValue({ok:false,error:{code:"conflict_owner",message:"Session is live"}});
  await act(async()=>fireEvent.click(screen.getByRole("button",{name:"Retry"})));
  await screen.findByRole("button",{name:"Open live view"});
- const stuckLive=screen.queryByText("Live host available")!==null;
+ const stuckLive=screen.queryByText("Writer status unverified")!==null;
  // The writer is gone; the SAME read that once said conflict_owner now reads fine.
  // ok and conflict_owner are mutually exclusive verdicts, so ok must clear the
- // stale verdict or the view is stuck on "Live host available" forever.
+ // stale verdict or the view is stuck on "Writer status unverified" forever.
  vi.mocked(api.getConversationHistory).mockResolvedValue(history("SAVED_AFTER_LIVE"));
  await act(async()=>fireEvent.click(screen.getByRole("button",{name:"Open live view"})));
  await screen.findByText(/Saved transcript —/);
  const savedRendered=screen.queryByText("SAVED_AFTER_LIVE")!==null;
- const stillLive=screen.queryByText("Live host available")!==null;
+ const stillLive=screen.queryByText("Writer status unverified")!==null;
  console.log("AUDIT21 history verdict clears",JSON.stringify({stuckLive,savedRendered,stillLive}));
  expect(stuckLive).toBe(true);
  expect(savedRendered).toBe(true);

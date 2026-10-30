@@ -317,7 +317,12 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
   // over a saved snapshot. Belt-and-braces alongside the generation guards — a
   // stale page that somehow landed must not shadow the live fact and claim the
   // session is not running.
-  const isShowingSavedHistory = linkUnavailable && savedHistory !== null && historyVerdict !== "live";
+  //
+  // F-B3: the transcript is only a claim when a CURRENT generation verifiably read
+  // the journal (`archived`). A later fresh read that proves nothing (`unverified`,
+  // e.g. not_found/internal) supersedes that claim, so the stale rows must give way
+  // to the unverified card and its Retry instead of rendering beside a hidden error.
+  const isShowingSavedHistory = linkUnavailable && savedHistory !== null && historyVerdict === "archived";
   const commandSuggestions = inputText.startsWith("/") && !/\s/.test(inputText)
     ? slashCommands.filter((command) => command.name.startsWith(inputText)).slice(0, 5)
     : [];
@@ -1293,7 +1298,7 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
           </>
         ) : linkUnavailable ? (
           <div className="card" style={{ borderColor: "var(--warning)", backgroundColor: "#1e180d" }}>
-            <h4 style={{ color: "var(--warning)", marginBottom: "8px" }}>{historyVerdict === "live" ? "Live host available" : "Live host unavailable"}</h4>
+            <h4 style={{ color: "var(--warning)", marginBottom: "8px" }}>{historyVerdict === "live" ? "Writer status unverified" : "Live host unavailable"}</h4>
             <p style={{ fontSize: "0.9rem", color: "var(--text-muted)", marginBottom: "12px" }}>
               {/* V22-01: the history endpoint cannot tell a live writer from an
                   unverifiable one, so this copy hedges the claim rather than
@@ -1438,7 +1443,7 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
             {item.unconfirmed ? "Unconfirmed — not yet received by the host — " : "Refused — "}{item.text}
           </span>
           <span style={{ display: "flex", gap: "8px", flexShrink: 0 }}>
-            {canWriteToHost && !linkUnavailable && !isShowingSavedHistory && historyVerdict !== "live" && (
+            {canWriteToHost && !linkUnavailable && (
               <button type="button" className="ghost" onClick={() => recoverRefusedPromptText(item)}>Recover</button>
             )}
             <button type="button" className="ghost" onClick={() => void copyRefusedPromptText(item)}>
@@ -1448,7 +1453,7 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
           </span>
         </div>
       ))}
-      {canWriteToHost && !linkUnavailable && !isShowingSavedHistory && historyVerdict !== "live" && (
+      {canWriteToHost && !linkUnavailable && (
       <form onSubmit={handleSendPrompt} className="composer-container">
         <textarea
           className="composer-input"

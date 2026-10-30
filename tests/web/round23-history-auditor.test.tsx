@@ -55,10 +55,10 @@ it.each(["ok","not_found","internal","path_forbidden"] as const)("V22 a fresh hi
  vi.mocked(api.getConversationLink).mockResolvedValue({ok:false,error:{code:"link_unavailable",message:"No room"}});
  vi.mocked(api.getConversationHistory).mockResolvedValue({ok:false,error:{code:"conflict_owner",message:"Writer is live"}});
  await act(async()=>fireEvent.click(screen.getByRole("button",{name:"Retry"})));
- await screen.findByText("Live host available");
+ await screen.findByText("Writer status unverified");
  vi.mocked(api.getConversationHistory).mockResolvedValue(kind==="ok"?history("SAVED_AFTER_STOP"):{ok:false,error:{code:kind,message:"New verdict cannot verify the host"}});
  await act(async()=>fireEvent.click(screen.getByRole("button",{name:"Open live view"})));
- const staleLive=screen.queryByText("Live host available")!==null;
+ const staleLive=screen.queryByText("Writer status unverified")!==null;
  console.log("AUDIT22 history verdict",JSON.stringify({kind,staleLive,body:f.view.container.textContent?.includes("Host presence is not yet verified")}));
  expect(staleLive).toBe(false);
 });
@@ -153,6 +153,30 @@ it('V23 a late read resolving after Back/unmount is dropped without error',async
  await act(async()=>{d.resolve({ok:true,data:{...base,modelPreference:'MODEL_A'}});});
  console.log('AUDIT23 late read after unmount',JSON.stringify({rendered:document.body.textContent?.length??0}));
  expect(document.body.textContent ?? '').not.toContain('Preferred for next launch:');
+});
+
+/**
+ * F-B3: the saved transcript used to outlive a LATER unverified verdict. Archived
+ * → save → a fresh read that proves nothing (not_found/internal) left the saved
+ * rows on screen and hid the error, so the panel kept claiming a transcript it
+ * could no longer stand behind. Only a current-generation `archived` verdict
+ * sustains that claim.
+ */
+it.each(['not_found','internal'] as const)('V23 a fresh unverified verdict replaces a stale saved transcript (%s)',async kind=>{
+ const f=await fixture();
+ await enterSaved(f,history('STALE_TRANSCRIPT'));
+ const savedShown=screen.queryByText('STALE_TRANSCRIPT')!==null;
+ vi.mocked(api.getConversationHistory).mockResolvedValue({ok:false,error:{code:kind,message:kind==='internal'?'Journal read failed':'No saved history'}});
+ await act(async()=>fireEvent.click(screen.getByRole('button',{name:'Open live view'})));
+ await screen.findByText('Live host unavailable');
+ const staleRows=screen.queryByText('STALE_TRANSCRIPT')!==null;
+ const unverifiedCard=screen.queryByText('Live host unavailable')!==null;
+ const errorVisible=kind==='internal'?screen.queryByText('Journal read failed')!==null:screen.queryByText('Host presence is not yet verified. No saved transcript is available; retry to check for a live host.')!==null;
+ console.log('AUDIT23 stale transcript superseded',JSON.stringify({kind,savedShown,staleRows,unverifiedCard,errorVisible}));
+ expect(savedShown).toBe(true);
+ expect(staleRows).toBe(false);
+ expect(unverifiedCard).toBe(true);
+ expect(errorVisible).toBe(true);
 });
 
 
