@@ -1381,9 +1381,11 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
           <button type="button" className="ghost" onClick={() => setInterceptedCommand(null)}>Cancel</button>
         </div>
       )}
-      {/* V20-07: the strip is a LOCAL affordance — Copy writes the clipboard, Recover
-          writes the composer draft. Neither touches the network, so a lost link, a
-          saved transcript or a read-only link must not hide it. Sending stays gated by
+      {/* V20-07: the strip is a LOCAL affordance. Copy writes the clipboard, so a lost
+          link, a saved transcript or a read-only link never hides it. Recover writes the
+          composer draft, so it is offered only while the composer is writable: staging
+          it into a hidden composer would call updateDraft and silently overwrite the
+          App-owned draft, the only copy of the user's newer text. Sending stays gated by
           the composer's own disabled state. */}
       {refusedRecoveries.map((item) => (
         <div key={item.id} className="banner warning refused-prompt" role="status">
