@@ -1,6 +1,6 @@
 import type { Server as HttpServer } from "node:http";
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest, type RouteGenericInterface } from "fastify";
-import { browseQuerySchema, conversationActionSchema, conversationModelSchema, createConversationSchema, createDirectorySchema, createProjectSchema, epochOf, ERROR_CODES, fail, listEventsQuerySchema, loginSchema, ok, updateProjectSchema } from "@caw/contracts";
+import { browseQuerySchema, conversationActionSchema, conversationModelSchema, createConversationSchema, createDirectorySchema, createProjectSchema, epochOf, ERROR_CODES, fail, listEventsQuerySchema, loginSchema, observationSeqOf, ok, updateProjectSchema } from "@caw/contracts";
 import { z } from "zod";
 import type { Capabilities, CollabLinkResponse, Conversation, ErrorCode, NativeSessionSummary, ProjectWithStats } from "@caw/contracts";
 import type { CapabilityService, CollabHost, ModelCatalogService, NativeSessionHistory } from "@caw/omp-adapter";
@@ -418,17 +418,35 @@ export function buildApp(deps: AppDependencies): FastifyInstance<HttpServer> {
       // already carry the process identity, or the reservation, that makes them the
       // only pointer to something live.
       const started = await deps.store.getConversation(conversation.id);
+      // The `isLaunching` check is a short-circuit, not the guarantee: it skips
+      // composing the patch when a launch already holds the reservation, but the
+      // reservation can be taken *after* it runs and *before* the write below
+      // (another request's launch, in its post-spawn pre-record window). The
+      // guarantee is the write's own shape.
       if (started && started.state === "starting" && started.tmuxSessionId === null && !deps.supervisor?.isLaunching?.(conversation.id)) {
-        // Bound to the life `started` describes. A restart (or another launch) that
-        // opens a newer life in the row between this read and the write advances the
-        // epoch, so the conditional write refuses and the newer row keeps its own
-        // identity and state instead of being stamped `error` by a refusal that was
-        // about the previous life. A row that vanished (`null`) and a refused write
-        // are both no-ops: there is nothing of ours left to mark.
-        await deps.store.updateConversationIfCurrent(conversation.id, epochOf(started), {
-          state: "error",
-          statusDetail: `Agent launch was refused: ${message}`,
-        }).catch(() => null);
+        // This is an *observation*: the refusal is a verdict about the row `started`
+        // describes, and carries that row's `observationSeq`. While a launch holds
+        // the reservation the row is mid-replacement — a launch that began after this
+        // read owns the row's truth in this window, and its record only compares the
+        // epoch, which the pre-record row has not advanced, so an unflagged stamp
+        // would land, bump the epoch, and make the launch refuse its own process and
+        // kill it. The store drops an observation during the reservation, so the
+        // stamp is refused and the launch keeps the row. Bound to the life `started`
+        // describes: a restart (or another launch) that opens a newer life in the row
+        // before this write advances the epoch, so the conditional write refuses and
+        // the newer row keeps its own identity and state instead of being stamped
+        // `error` by a refusal that was about the previous life. A row that vanished
+        // (`null`) and a refused write are both no-ops: there is nothing of ours left
+        // to mark.
+        await deps.store.updateConversationIfCurrent(
+          conversation.id,
+          epochOf(started),
+          {
+            state: "error",
+            statusDetail: `Agent launch was refused: ${message}`,
+          },
+          { observation: true, expectedObservationSeq: observationSeqOf(started) },
+        ).catch(() => null);
       }
       return reply.code(code === "internal" ? 500 : code === "not_found" ? 404 : 409).send(fail(code, message));
     }

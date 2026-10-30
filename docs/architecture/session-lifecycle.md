@@ -253,8 +253,21 @@ reservation is held the row is mid-replacement — before the record, the row ha
 pane (so an observation would call the launch's own host *external*), and before
 the publish the launch's own publish is bound to the epoch it recorded. The store
 drops any observation write outright while the reservation is held, so a refresh
-observed in that window can no longer discard the very launch it observed. Intent
-writes (`start`'s record/undo, `stop`'s commit/refuse, `waitForPublish`'s
+observed in that window can no longer discard the very launch it observed.
+
+The same gate covers the app's own refusal stamp. After `POST
+/api/projects/:id/conversations` is refused, `app.ts` marks the still-`starting`
+row `error` with the reason — a verdict about the row it read, not a user intent,
+so it writes as an observation (`observation: true` plus that row's
+`expectedObservationSeq`). Its `isLaunching` guard short-circuits composing the
+patch, but the reservation can be taken *after* that check and *before* the write:
+a second launch for the same conversation, in its post-spawn pre-record window,
+whose own record compares the epoch the pre-record row has not advanced. Unflagged,
+the stamp would land there, bump the epoch, and the launch would then refuse its
+own process and kill it as an unrecorded writer. Flagged, the store drops the
+stamp and the launch keeps the row.
+
+Intent writes (`start`'s record/undo, `stop`'s commit/refuse, `waitForPublish`'s
 verdicts) leave both markers off: a real stop or replacement still beats a
 launch's publish, and a launch still beats an observation.
 
