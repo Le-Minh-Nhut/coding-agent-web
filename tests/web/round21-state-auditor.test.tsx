@@ -95,3 +95,59 @@ it.each([false,true])("V21 old saved pagination cannot reappear after live resta
  expect(deadClaim).toBe(false);expect(stale).toBe(false);
 });
 
+
+it("V21 a later good journal read clears a stuck live-host verdict (conflict then ok)",async()=>{
+ const f=await fixture();
+ // The host disappears; a Retry finds no link and the journal reports a live writer.
+ await act(async()=>f.sockets.at(-1)!.onClose?.("closed",false));
+ vi.mocked(api.getConversationLink).mockResolvedValue({ok:false,error:{code:"link_unavailable",message:"No link"}});
+ vi.mocked(api.getConversationHistory).mockResolvedValue({ok:false,error:{code:"conflict_owner",message:"Session is live"}});
+ await act(async()=>fireEvent.click(screen.getByRole("button",{name:"Retry"})));
+ await screen.findByRole("button",{name:"Open live view"});
+ const stuckLive=screen.queryByText("Live host available")!==null;
+ // The writer is gone; the SAME read that once said conflict_owner now reads fine.
+ // ok and conflict_owner are mutually exclusive verdicts, so ok must clear the
+ // stale verdict or the view is stuck on "Live host available" forever.
+ vi.mocked(api.getConversationHistory).mockResolvedValue(history("SAVED_AFTER_LIVE"));
+ await act(async()=>fireEvent.click(screen.getByRole("button",{name:"Open live view"})));
+ await screen.findByText(/Saved transcript —/);
+ const savedRendered=screen.queryByText("SAVED_AFTER_LIVE")!==null;
+ const stillLive=screen.queryByText("Live host available")!==null;
+ console.log("AUDIT21 history verdict clears",JSON.stringify({stuckLive,savedRendered,stillLive}));
+ expect(stuckLive).toBe(true);
+ expect(savedRendered).toBe(true);
+ expect(stillLive).toBe(false);
+});
+
+it("V21 a late saved page cannot re-seed saved mode after a successful live reconnect",async()=>{
+ const f=await fixture();
+ await enterSaved(f,history("OLD_TAIL","older-cursor"));
+ const d=deferred();
+ vi.mocked(api.getConversationHistory).mockReturnValueOnce(d.promise as any);
+ fireEvent.click(screen.getByRole("button",{name:"Load older"}));
+ // A successful reconnect bumps the mode generation and clears savedHistory.
+ vi.mocked(api.getConversationLink).mockResolvedValue({ok:true,data:{url:"ws://127.0.0.1:7466/r/0123456789abcdef.AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE",access:"full",instanceId:"host-B",generation:2}});
+ await act(async()=>fireEvent.click(screen.getByRole("button",{name:"Open live view"})));
+ await waitFor(()=>expect(f.sockets).toHaveLength(2));
+ await f.emit(welcome(0));
+ const liveBefore=screen.queryByText("STALE_OLDER")!==null;
+ // The page now resolves for a mode that no longer exists. Only the paging
+ // generation clause drops it — it must not re-create savedHistory.
+ await act(async()=>d.resolve(history("STALE_OLDER")));
+ const staleInLive=screen.queryByText("STALE_OLDER")!==null;
+ const olderError=screen.queryByText(/Could not load older history/)!==null;
+ // Later the link dies again; a re-seeded savedHistory would now surface the
+ // stale page as if it were this conversation's transcript.
+ await act(async()=>f.sockets.at(-1)!.onClose?.("closed",false));
+ vi.mocked(api.getConversationLink).mockResolvedValue({ok:false,error:{code:"link_unavailable",message:"No host"}});
+ vi.mocked(api.getConversationHistory).mockResolvedValue({ok:false,error:{code:"not_found",message:"No saved history"}});
+ await act(async()=>fireEvent.click(screen.getByRole("button",{name:"Retry"})));
+ const staleAfterLoss=screen.queryByText("STALE_OLDER")!==null;
+ const tailAfterLoss=screen.queryByText("OLD_TAIL")!==null;
+ console.log("AUDIT21 late page after reconnect",JSON.stringify({liveBefore,staleInLive,olderError,staleAfterLoss,tailAfterLoss}));
+ expect(liveBefore).toBe(false);
+ expect(staleInLive).toBe(false);
+ expect(olderError).toBe(false);
+ expect(staleAfterLoss).toBe(false);
+ expect(tailAfterLoss).toBe(false);
+});

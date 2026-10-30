@@ -213,9 +213,14 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
    */
   const promoteUnconfirmedPending = (): void => {
     if (!onRefusedRecoveriesChange) return;
-    const pending = pendingPromptRef.current.filter((prompt) => !prompt.refusalMessage);
-    for (const prompt of pending) appendRefusedRecovery(prompt.submitted, true);
-    if (pending.length > 0) pendingPromptRef.current = pendingPromptRef.current.filter((prompt) => prompt.refusalMessage);
+    // F3: promote EVERYTHING, including a refusal that arrived while the send
+    // promise was still unresolved (sent=false but refusalMessage set): the late
+    // resolution is generation-guarded and would drop it. Label by state.
+    // recoverRefusedPrompt always removes the prompt after appending/restoring, so
+    // a prompt cannot be appended twice.
+    const pending = [...pendingPromptRef.current];
+    for (const prompt of pending) appendRefusedRecovery(prompt.submitted, !prompt.refusalMessage);
+    if (pending.length > 0) pendingPromptRef.current = [];
   };
   /**
    * A live echo for an unconfirmed prompt is a real host acknowledgement, so the
@@ -646,6 +651,10 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
       setHistoryLoading(false);
       if (result.ok) {
         setHistoryError(null);
+        // F1: ok and conflict_owner are mutually exclusive verdicts of the same read,
+        // so a good read must clear a verdict a previous one left stuck. Only a
+        // current generation reaches here, so a stale read cannot clear a newer one.
+        setHistoryLive(false);
         setSavedHistory({ ...result.data, messages: transcriptMessagesFromEntries(result.data.entries as unknown as SessionEntry[]) });
       } else if (result.error.code === "conflict_owner") {
         setHistoryLive(true);
@@ -1382,7 +1391,9 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
             {item.unconfirmed ? "Unconfirmed — not yet received by the host — " : "Refused — "}{item.text}
           </span>
           <span style={{ display: "flex", gap: "8px", flexShrink: 0 }}>
-            <button type="button" className="ghost" onClick={() => recoverRefusedPromptText(item)}>Recover</button>
+            {canWriteToHost && !linkUnavailable && !isShowingSavedHistory && !historyLive && (
+              <button type="button" className="ghost" onClick={() => recoverRefusedPromptText(item)}>Recover</button>
+            )}
             <button type="button" className="ghost" onClick={() => void copyRefusedPromptText(item)}>
               {refusedCopyState?.id === item.id ? (refusedCopyState.state === "copied" ? "Copied" : "Copy failed") : "Copy"}
             </button>

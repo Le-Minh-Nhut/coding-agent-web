@@ -13,6 +13,7 @@ function welcome(entryCount=0):HostFrame{return {t:"welcome",proto:3,header:{typ
 const refusal:HostFrame={t:"error",message:"prompting is unavailable until the host finishes starting up"};
 const row=(id:string,text:string,ts=1):any=>({type:"message",id,parentId:null,timestamp:"2026-01-01T00:00:00Z",message:{role:"user",content:text,timestamp:ts}});
 const collabRow=(id:string,text:string):any=>({type:"custom_message",id,parentId:null,timestamp:new Date().toISOString(),customType:"collab-prompt",content:text,display:true,details:{from:"Mobile Web Controller"}});
+const deferredSend=()=>{let resolve!:(v:boolean)=>void;const promise=new Promise<boolean>(r=>{resolve=r;});return {promise,resolve};};
 async function fixture(entryCount=0,realApp=false){
  vi.mocked(api.getConversation).mockResolvedValue({ok:true,data:{...base}});
  vi.mocked(api.getAttachInstructions).mockResolvedValue({ok:true,data:{available:false}} as any);
@@ -147,4 +148,59 @@ it("V20 a collab-prompt row inside the bootstrap dump is its own echo, not basel
  expect(aRows).toBe(1);
  expect(recovered).toContain("B_COLLAB_REFUSED");
  expect(recovered).not.toContain("A_COLLAB_DUMPED");
+});
+
+it("V20 saved mode keeps Copy but hides Recover, so draft staging cannot stomp the App-owned draft",async()=>{
+ const f=await fixture(0,true);
+ await f.send("REFUSED_IN_SAVED");
+ f.type("KEEP_MY_DRAFT");
+ await f.emit(refusal);
+ expect(f.recovery()).toContain("REFUSED_IN_SAVED");
+ expect(screen.getByRole("button",{name:"Recover"})).not.toBeNull();
+ // Host gone: saved mode, composer hidden. Recover would call updateDraft and
+ // stomp the App-owned draft (the only copy of the user's newer text).
+ await act(async()=>f.sockets.at(-1)!.onClose?.("closed",false));
+ vi.mocked(api.getConversationLink).mockResolvedValue({ok:false,error:{code:"link_unavailable",message:"No host"}});
+ vi.mocked(api.getConversationHistory).mockResolvedValue({ok:true,data:{header:{sessionId:"native-A",cwd:"/work",timestamp:null,version:3,title:"History"},entries:[],hasOlder:false,nextCursor:null,truncated:false,truncatedByBytes:false,truncatedByEntries:false,skippedOversized:false}});
+ await act(async()=>fireEvent.click(screen.getByRole("button",{name:"Retry"})));
+ await screen.findByText(/Saved transcript —/);
+ await act(async()=>fireEvent.click(screen.getByRole("button",{name:"Copy"})));
+ const recoverHidden=screen.queryByRole("button",{name:"Recover"})===null;
+ const copyPresent=screen.queryAllByRole("button",{name:/Copy|Copied|Copy failed/}).length>0;
+ const composerHidden=f.view.container.querySelector("textarea.composer-input")===null;
+ // Back live: Recover returns and the draft the App always owned is intact.
+ vi.mocked(api.getConversationLink).mockResolvedValue({ok:true,data:{url:"ws://127.0.0.1:7466/r/0123456789abcdef.AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE",access:"full",instanceId:"host-B",generation:2}});
+ await act(async()=>fireEvent.click(screen.getByRole("button",{name:"Open live view"})));
+ await waitFor(()=>expect(f.sockets).toHaveLength(2));
+ await f.emit(welcome(0));
+ const draftAfter=f.input().value;
+ const recoverBack=screen.queryByRole("button",{name:"Recover"})!==null;
+ console.log("AUDIT20 saved-mode recovery gate",JSON.stringify({recoverHidden,copyPresent,composerHidden,draftAfter,recoverBack}));
+ expect(recoverHidden).toBe(true);
+ expect(copyPresent).toBe(true);
+ expect(composerHidden).toBe(true);
+ expect(draftAfter).toBe("KEEP_MY_DRAFT");
+ expect(recoverBack).toBe(true);
+});
+
+it("V20 a refusal that arrives while the send promise is unresolved is promoted as Refused, not Unconfirmed",async()=>{
+ const f=await fixture(0,true);
+ const d=deferredSend();
+ vi.spyOn(CollabSocket.prototype,"send").mockReturnValue(d.promise);
+ await f.send("REFUSED_IN_FLIGHT");
+ f.type("NEWER_DRAFT_KEPT");
+ // The refusal frame lands before the socket send promise resolves: sent=false but
+ // refusalMessage set. The late resolution is generation-guarded and would drop it,
+ // so unmount promotion is the only chance to keep the text.
+ await f.emit(refusal);
+ expect(f.recovery()).not.toContain("REFUSED_IN_FLIGHT");
+ fireEvent.click(screen.getByTitle("Back"));
+ fireEvent.click(await screen.findByText("Chat"));
+ await waitFor(()=>expect(f.sockets).toHaveLength(2));
+ await f.emit(welcome(0));
+ const promoted=f.recovery();
+ console.log("AUDIT20 in-flight refusal promotion",JSON.stringify({promoted,draft:f.input().value}));
+ expect(promoted).toContain("Refused — REFUSED_IN_FLIGHT");
+ expect(promoted).not.toContain("Unconfirmed");
+ expect(f.input().value).toBe("NEWER_DRAFT_KEPT");
 });
