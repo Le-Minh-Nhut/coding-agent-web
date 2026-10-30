@@ -327,9 +327,92 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
     return conversation ? observationsFor(conversation) : null;
   }
 
+  /**
+   * Same-life capture order per conversation, for routine observations.
+   *
+   * The row's `observationSeq` orders *commits*, which is a different question
+   * from which snapshot is newer: two refreshes of one life read the same
+   * revision, so both present the same `expectedObservationSeq` and the one that
+   * reaches the store first wins — a snapshot captured *later* then loses to one
+   * captured earlier (V20-08). A ticket taken together with the row orders the
+   * captures themselves, so the newest capture is the one that survives, whichever
+   * order the commits complete in. Deliberately *not* a wall clock: two transitions
+   * land inside one millisecond. In-process and per conversation, like the launch
+   * reservation; `lifecycleEpoch` stays the process-generation authority.
+   */
+  const observationTickets = new Map<string, { next: number; committed: number; seq: number }>();
+
+  function takeObservationTicket(conversationId: string): number {
+    const order = observationTickets.get(conversationId) ?? { next: 0, committed: 0, seq: 0 };
+    order.next += 1;
+    observationTickets.set(conversationId, order);
+    return order.next;
+  }
+
+  /**
+   * Commit as a routine observation: both markers, so a launch reservation held
+   * meanwhile drops it outright (the launch owns the row in that window) and a
+   * newer applied change refuses it as stale. A commit that lands records the
+   * ticket, which is what lets a later capture supersede it.
+   *
+   * The fresh read here is what makes the *ticket* authoritative over the write
+   * order: `observationSeq` alone would let two same-revision captures pass this
+   * check and then have the store serialize them, so the older snapshot's commit
+   * lands first and the newer one is refused (V20-08). With the ticket, a commit
+   * from an earlier capture is recognised as superseded and this newer snapshot
+   * takes the row. A commit refused because the row moved between the read and the
+   * write loops once more, so a sibling's intervening commit is superseded too
+   * rather than losing the newer observation.
+   */
+  async function commitObservation(
+    conversationId: string,
+    ticket: number,
+    observedEpoch: number,
+    observedSeq: number,
+    patch: Partial<Conversation>,
+  ): Promise<Conversation | null> {
+    // Two extra rounds at most: one for a sibling's commit landing between the
+    // freshness read and ours, one for the mirror of that.
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const fresh = await options.store.getConversation(conversationId);
+      if (!fresh) return null;
+      // A newer life (launch, stop, replacement) owns the row; this snapshot
+      // describes a process that is already gone.
+      if (epochOf(fresh) !== observedEpoch) return fresh;
+      const order = observationTickets.get(conversationId);
+      const committed = order?.committed ?? 0;
+      // A capture later than ours already committed: ours is the older news.
+      if (ticket < committed) return fresh;
+      const freshSeq = observationSeqOf(fresh);
+      // The revision we read still stands, or a sibling's *earlier* capture
+      // committed it (its `order.seq` is the revision it left). Anything else —
+      // adopt, a reconcile verdict, a launch — is newer news of a life we did not
+      // observe, and drops this snapshot exactly as the plain revision gate did.
+      const expectedObservationSeq = freshSeq === observedSeq
+        ? observedSeq
+        : ticket > committed && order?.seq === freshSeq ? freshSeq : null;
+      if (expectedObservationSeq === null) return fresh;
+      const recorded = await options.store.updateConversationIfCurrent(conversationId, observedEpoch, patch, {
+        observation: true,
+        expectedObservationSeq,
+      });
+      if (recorded?.applied) {
+        if (order) {
+          order.committed = ticket;
+          order.seq = observationSeqOf(recorded.conversation);
+        }
+        return recorded.conversation;
+      }
+    }
+    return (await options.store.getConversation(conversationId)) ?? null;
+  }
+
   async function refresh(conversationId: string): Promise<Conversation | null> {
     const conversation = await options.store.getConversation(conversationId);
     if (!conversation) return null;
+    // Taken with the row, before any probe: this is the fact that orders this
+    // snapshot against every other refresh of the same conversation.
+    const ticket = takeObservationTicket(conversationId);
     // The epoch this refresh will speak for. It is read before the probes and
     // presented at commit: an observation is evidence about one life, and a
     // launch or stop that opened a new one while we probed makes this result
@@ -339,13 +422,9 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
     // same reason but a narrower one: two refreshes of the *same* life can be in
     // flight at once (the epoch does not move for a model-only change), and the
     // one that started first can finish last. Presenting the revision it read
-    // makes the store drop the older result instead of letting it repaint the
-    // newer one.
+    // makes the store drop an older result instead of letting it repaint a newer
+    // one — with the ticket deciding which of two same-revision captures is older.
     const observedSeq = observationSeqOf(conversation);
-    // Every commit below is a routine observation, so it carries both markers; a
-    // launch reservation held meanwhile drops it outright (the launch owns the
-    // row in that window) and a newer applied change refuses it as stale.
-    const observationWrite = { observation: true as const, expectedObservationSeq: observedSeq };
     const observations = await observationsFor(conversation);
     const verdict: StateVerdict = evaluateState(observations);
     // A launch that was refused never started a process, so there is nothing to
@@ -356,7 +435,7 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
       // Refused launches leave the recorded failure standing; no probe may
       // resurrect it as a ghost launch. The read still goes through the epoch
       // gate so a newer life's row is what the caller sees.
-      return (await options.store.updateConversationIfCurrent(conversationId, observedEpoch, {}, observationWrite))?.conversation ?? null;
+      return commitObservation(conversationId, ticket, observedEpoch, observedSeq, {});
     }
 
     // Compute the patch once and use those same values for the comparison and the
@@ -399,15 +478,19 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
       patch.hostGeneration = null;
     }
     const changed = (Object.keys(patch) as Array<keyof Conversation>).some((key) => conversation[key] !== patch[key]);
-    if (!changed) return conversation;
+    // An unchanged refresh still records its capture order before returning. A
+    // later capture that found nothing to write is still *newer* than an earlier
+    // one that did: without claiming, the earlier capture would commit its older
+    // host/model over what this one already observed.
+    if (!changed) return commitObservation(conversationId, ticket, observedEpoch, observedSeq, {});
 
     // Conditional commit: if a newer life began while we probed, this patch
     // describes a process that is already gone, so it is dropped and the newer
     // row is returned instead. A refresh that writes nothing is fine; a stale
     // refresh overwriting a new host/model/state is not. The same conditional
-    // shape covers a *same-life* race — the revision read before probing refuses
-    // an older refresh landing after a newer one already committed.
-    return (await options.store.updateConversationIfCurrent(conversationId, observedEpoch, patch, observationWrite))?.conversation ?? null;
+    // shape covers a *same-life* race — `commitObservation` presents the revision
+    // the row stands at, or refuses outright when a later capture already won.
+    return commitObservation(conversationId, ticket, observedEpoch, observedSeq, patch);
   }
 
   /** Record the runtime facts we can only learn from the machine. */
