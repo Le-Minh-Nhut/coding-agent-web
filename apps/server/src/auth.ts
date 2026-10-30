@@ -213,9 +213,19 @@ export function createAuthenticationService(options: { stateDir: string; ttlHour
         if (await matchesPendingToken(password)) return "matches_pending_token";
         const salt = randomBytes(16);
         await persistRecord({ kind: "password", salt: salt.toString("hex"), hash: (await derive(password, salt)).toString("hex") });
-        sessions.clear();
-        session.passwordSetupRequired = false;
-        sessions.set(key, session);
+        // Deriving and persisting the credential is an await window. A logout
+        // (`revokeAll`) or a reset that lands inside it clears the map, and
+        // re-setting the captured object afterwards would resurrect a session the
+        // owner already revoked. Keep the session only when the map still holds
+        // that exact object (the same token key, never replaced) and it has not
+        // expired since; the new credential is already on disk either way. When it
+        // is gone the change still reports success and the client simply gets 401
+        // on the next call, which is the honest answer.
+        if (sessions.get(key) === session && session.expiresAt > now()) {
+          sessions.clear();
+          session.passwordSetupRequired = false;
+          sessions.set(key, session);
+        }
         return "changed";
       } finally {
         credentialWriteInProgress = false;
@@ -230,8 +240,13 @@ export function createAuthenticationService(options: { stateDir: string; ttlHour
         if (!(await verifyPasswordOnly(currentPassword, ip))) return false;
         const salt = randomBytes(16);
         await persistRecord({ kind: "password", salt: salt.toString("hex"), hash: (await derive(newPassword, salt)).toString("hex") });
-        sessions.clear();
-        sessions.set(key, session);
+        // Same revocation window as completePasswordSetup: a logout or reset that
+        // revoked this session while the new credential was being derived and
+        // persisted must not be undone by reinstating the captured object.
+        if (sessions.get(key) === session && session.expiresAt > now()) {
+          sessions.clear();
+          sessions.set(key, session);
+        }
         return true;
       } finally {
         credentialWriteInProgress = false;
