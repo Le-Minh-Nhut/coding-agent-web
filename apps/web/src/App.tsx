@@ -3,7 +3,7 @@ import { api } from "./api.js";
 import { LoginView } from "./components/LoginView.js";
 import { ProjectsView } from "./components/ProjectsView.js";
 import { ProjectDetailView } from "./components/ProjectDetailView.js";
-import { ConversationView } from "./components/ConversationView.js";
+import { ConversationView, type RefusedRecovery } from "./components/ConversationView.js";
 import { SettingsView } from "./components/SettingsView.js";
 
 type View = "projects" | "project-detail" | "conversation" | "settings";
@@ -16,6 +16,7 @@ export function App() {
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [selectedConversationId, setSelectedConversationId] = useState<string | null>(null);
   const [conversationDrafts, setConversationDrafts] = useState<Record<string, string>>({});
+  const [refusedRecoveries, setRefusedRecoveries] = useState<Record<string, RefusedRecovery[]>>({});
 
   useEffect(() => {
     void (async () => {
@@ -106,6 +107,10 @@ export function App() {
           draft={conversationDrafts[selectedConversationId] ?? ""}
           onDraftChange={(draft) => {
             setConversationDrafts((prev) => ({ ...prev, [selectedConversationId]: draft }));
+          }}
+          refusedRecoveries={refusedRecoveries[selectedConversationId] ?? []}
+          onRefusedRecoveriesChange={(next) => {
+            setRefusedRecoveries((prev) => ({ ...prev, [selectedConversationId]: next }));
           }}
           onBack={() => {
             setSelectedConversationId(null);

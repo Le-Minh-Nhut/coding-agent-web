@@ -132,18 +132,21 @@ describe("V17-02 refused prompt recovery", () => {
     expect(screen.getByRole("button", { name: "Copy failed" })).not.toBeNull();
   });
 
-  it("shows only the newest refused prompt when a second refusal arrives", async () => {
+  it("keeps every refused prompt when a second refusal arrives", async () => {
     const { view, composer } = await mountConversation();
     await refuseTypingDraft(composer);
     expect(view.container.querySelector(".refused-prompt")?.textContent).toContain("PROMPT_B");
     // Send the draft: it is accepted, the composer clears, then it too is refused
-    // while newer content is typed. The single affordance must now carry C.
+    // while newer content is typed. A later refusal appends; it never replaces the
+    // recovery copy of an earlier one.
     await act(async () => { fireEvent.submit(composer().closest("form")!); });
     fireEvent.change(composer(), { target: { value: "DRAFT_D" } });
     await act(async () => { socket!.onFrame?.({ t: "error", message: REFUSAL }, 0); });
     expect(composer().value).toBe("DRAFT_D");
-    expect(view.container.querySelector(".refused-prompt")?.textContent).toContain("DRAFT_C");
-    expect(view.container.querySelector(".refused-prompt")?.textContent).not.toContain("PROMPT_B");
+    const strips = [...view.container.querySelectorAll(".refused-prompt")].map((strip) => strip.textContent ?? "");
+    expect(strips.join("\n")).toContain("PROMPT_B");
+    expect(strips.join("\n")).toContain("DRAFT_C");
+    expect(strips).toHaveLength(2);
   });
 
   it("drops a stale refusal when the conversation changes", async () => {

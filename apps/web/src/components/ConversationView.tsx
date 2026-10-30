@@ -14,11 +14,20 @@ import {
 import { clearTranscriptRequests, createTranscriptState, forgetTranscriptRequest, reduceHostFrame, setConnectionStatus, trackTranscriptRequest, transcriptMessagesFromEntries, type TranscriptMessage, type TranscriptReply, type TranscriptState } from "../transcript.js";
 import { findSlashCommand, slashCommands, type SlashCommand } from "../commands.js";
 import type { AttachInstructions, Conversation } from "@caw/contracts";
+/** A prompt the host refused, kept per conversation so Back/reopen cannot lose it. */
+export interface RefusedRecovery {
+  id: number;
+  text: string;
+}
+
 interface ConversationViewProps {
   conversationId: string;
   draft?: string;
   onDraftChange?: (draft: string) => void;
   onBack: () => void;
+  /** App-owned recovery list for this conversation; omit to use per-mount internal state. */
+  refusedRecoveries?: RefusedRecovery[];
+  onRefusedRecoveriesChange?: (next: RefusedRecovery[]) => void;
 }
 
 interface DisplayMessage {
@@ -41,6 +50,12 @@ interface PendingPrompt {
   draftVersion: number;
   /** Physical connection the prompt was sent on; a refusal only matches prompts from the current one. */
   physicalConnection: number;
+  /**
+   * True when the send happened while the bootstrap snapshot was still in flight.
+   * Snapshot rows are a historical baseline, never this prompt's receipt, so a
+   * completing snapshot must not acknowledge it.
+   */
+  preSnapshot: boolean;
   token: object;
 }
 
@@ -89,7 +104,7 @@ const MessageRow = memo(function MessageRow({ message }: { message: DisplayMessa
 
 export type ConnectionStatus = "connecting" | "idle" | "running" | "reconnecting" | "disconnected" | "unknown";
 
-export function ConversationView({ conversationId, draft = "", onDraftChange, onBack }: ConversationViewProps) {
+export function ConversationView({ conversationId, draft = "", onDraftChange, onBack, refusedRecoveries: refusedRecoveriesProp, onRefusedRecoveriesChange }: ConversationViewProps) {
 
 
   const [conversation, setConversation] = useState<Conversation | null>(null);
@@ -125,13 +140,35 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
   const [historyRetryEpoch, setHistoryRetryEpoch] = useState(0);
   const [uiEditorValue, setUiEditorValue] = useState("");
   /**
-   * The newest refused prompt the composer did not take back. A refusal only
-   * restores itself when the composer is untouched; if the user has typed newer
-   * content, the refused text lives here behind an explicit Recover/Copy strip so
-   * neither draft is destroyed. Only the most recent one is kept.
+   * Refused prompts the composer did not take back. A refusal only restores
+   * itself when the composer is untouched; otherwise the refused text lives here
+   * behind an explicit Recover/Copy strip so neither draft is destroyed. The list
+   * is per conversation and survives Back/reopen when the App owns it.
    */
-  const [refusedPrompt, setRefusedPrompt] = useState<string | null>(null);
-  const [refusedCopyState, setRefusedCopyState] = useState<"idle" | "copied" | "failed">("idle");
+  const [internalRefusedRecoveries, setInternalRefusedRecoveries] = useState<RefusedRecovery[]>([]);
+  const [refusedCopyState, setRefusedCopyState] = useState<{ id: number; state: "copied" | "failed" } | null>(null);
+  const refusedRecoveries = refusedRecoveriesProp ?? internalRefusedRecoveries;
+  const setRefusedRecoveries = (next: RefusedRecovery[]): void => {
+    if (onRefusedRecoveriesChange) onRefusedRecoveriesChange(next);
+    else setInternalRefusedRecoveries(next);
+  };
+  const refusedRecoveriesRef = useRef(refusedRecoveries);
+  refusedRecoveriesRef.current = refusedRecoveries;
+  const refusedIdRef = useRef(0);
+  const appendRefusedRecovery = (text: string): void => {
+    const list = refusedRecoveriesRef.current;
+    // Seed from the list so a caller-supplied list keeps unique ids across remounts.
+    if (refusedIdRef.current === 0) refusedIdRef.current = list.reduce((max, item) => Math.max(max, item.id), 0);
+    const next = [...list, { id: ++refusedIdRef.current, text }];
+    refusedRecoveriesRef.current = next;
+    setRefusedRecoveries(next);
+  };
+  const removeRefusedRecovery = (id: number): void => {
+    const next = refusedRecoveriesRef.current.filter((item) => item.id !== id);
+    refusedRecoveriesRef.current = next;
+    setRefusedRecoveries(next);
+    setRefusedCopyState((previous) => (previous?.id === id ? null : previous));
+  };
 
   const inputValueRef = useRef(draft);
   const messagesScrollRef = useRef<HTMLDivElement | null>(null);
@@ -163,6 +200,8 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
   const physicalConnectionRef = useRef(0);
   const conversationIdRef = useRef(conversationId);
   conversationIdRef.current = conversationId;
+  const modelDraftRef = useRef(modelDraft);
+  modelDraftRef.current = modelDraft;
   const watchedTranscriptAgentRef = useRef<string | null>(null);
   const reqIdCounterRef = useRef(1);
   const transcriptRequestsRef = useRef(new Map<number, { agentId: string; fromByte: number; timer: ReturnType<typeof setTimeout> }>());
@@ -207,6 +246,19 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
       ...optimisticMessages.filter((pending) => (hostCounts.get(pending.text) ?? 0) <= (pending.hostEchoCount ?? 0)),
     ];
   }, [transcript.messages, optimisticMessages]);
+  /**
+   * Saved mode has exactly one transcript source (the journal). Prompts the host
+   * never acknowledged would otherwise vanish, so they stay visible under the same
+   * allowance rule, counted against the saved user rows instead of the live ones.
+   */
+  const savedModeOptimistic = useMemo(() => {
+    if (!savedHistory) return [];
+    const hostCounts = new Map<string, number>();
+    for (const message of savedHistory.messages) {
+      if (message.role === "user") hostCounts.set(message.text, (hostCounts.get(message.text) ?? 0) + 1);
+    }
+    return optimisticMessages.filter((pending) => (hostCounts.get(pending.text) ?? 0) <= (pending.hostEchoCount ?? 0));
+  }, [savedHistory, optimisticMessages]);
   useEffect(() => {
     const hostCounts = new Map<string, number>();
     for (const message of transcript.messages) {
@@ -223,13 +275,11 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     if (prompt.optimisticId) setOptimisticMessages((previous) => previous.filter((message) => message.id !== prompt.optimisticId));
     if (sendVersionRef.current !== prompt.draftVersion) {
       // The user has typed newer content since sending: overwriting it would destroy
-      // that work and dropping the refused prompt would lose it entirely. Keep the
-      // newest refused prompt behind an explicit affordance instead of the composer.
-      setRefusedCopyState("idle");
-      setRefusedPrompt(prompt.text);
+      // that work and dropping the refused prompt would lose it entirely. Append the
+      // refused text behind an explicit affordance instead of the composer.
+      appendRefusedRecovery(prompt.text);
       return;
     }
-    setRefusedPrompt(null);
     inputValueRef.current = prompt.text;
     setInputText(prompt.text);
     onDraftChange?.(prompt.text);
@@ -240,6 +290,26 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
       if (message.role === "user") hostCounts.set(message.text, (hostCounts.get(message.text) ?? 0) + 1);
     }
     pendingPromptRef.current = pendingPromptRef.current.filter((prompt) => (hostCounts.get(prompt.submitted) ?? 0) <= prompt.hostEchoCount);
+  };
+  /**
+   * A snapshot that completes the bootstrap is historical baseline, not a receipt
+   * for a prompt sent while it was in flight. Raise those prompts' echo allowance
+   * to the count the snapshot published so its rows cannot acknowledge them; their
+   * real echo can only arrive in later frames, which then exceed the allowance.
+   */
+  const rebasePendingAfterBootstrap = (): void => {
+    const hostCounts = new Map<string, number>();
+    for (const message of transcriptRef.current.messages) {
+      if (message.role === "user") hostCounts.set(message.text, (hostCounts.get(message.text) ?? 0) + 1);
+    }
+    const bumped = new Map<string, number>();
+    for (const prompt of pendingPromptRef.current) {
+      if (!prompt.preSnapshot) continue;
+      prompt.hostEchoCount = Math.max(prompt.hostEchoCount, hostCounts.get(prompt.submitted) ?? 0);
+      if (prompt.optimisticId) bumped.set(prompt.optimisticId, prompt.hostEchoCount);
+    }
+    if (bumped.size === 0) return;
+    setOptimisticMessages((previous) => previous.map((message) => bumped.has(message.id) ? { ...message, hostEchoCount: bumped.get(message.id)! } : message));
   };
 
   const updateTranscript = (frame: HostFrame): void => {
@@ -271,7 +341,9 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
       return;
     }
     flushPendingStream();
+    const hadPendingSnapshot = transcriptRef.current.pendingSnapshot !== null;
     updateTranscript(frame);
+    if (hadPendingSnapshot && transcriptRef.current.pendingSnapshot === null) rebasePendingAfterBootstrap();
     if (frame.t === "entry" || frame.t === "snapshot-chunk" || (frame.t === "event" && frame.event.type === "message_end" && frame.event.message.role === "user")) removeAcknowledgedPrompts();
     if (frame.t === "error") {
       if (frame.message === STARTUP_PROMPT_REFUSAL) {
@@ -382,8 +454,13 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     sendVersionRef.current++;
     pendingPromptRef.current = [];
     setSendError(null);
-    setRefusedPrompt(null);
-    setRefusedCopyState("idle");
+    // An App-owned list belongs to the conversation key it was stored under, so it
+    // survives Back/reopen. Only the per-mount fallback is dropped here.
+    if (!refusedRecoveriesProp) {
+      refusedRecoveriesRef.current = [];
+      setInternalRefusedRecoveries([]);
+    }
+    setRefusedCopyState(null);
     sendingPromptTextsRef.current.clear();
     const currentId = conversationId;
     api.getConversation(conversationId).then((res) => {
@@ -615,6 +692,7 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
       refusalMessage: undefined,
       draftVersion,
       physicalConnection,
+      preSnapshot: transcriptRef.current.pendingSnapshot !== null,
       token: sendToken,
     };
     pendingPromptRef.current.push(pendingPrompt);
@@ -675,24 +753,21 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
    * otherwise unreachable. The draft they had is left in place until this replaces
    * it — the strip is the only path back to the refused prompt, so it stays until use.
    */
-  const recoverRefusedPromptText = (): void => {
-    if (refusedPrompt === null) return;
-    updateDraft(refusedPrompt);
-    setRefusedPrompt(null);
-    setRefusedCopyState("idle");
+  const recoverRefusedPromptText = (item: RefusedRecovery): void => {
+    updateDraft(item.text);
+    removeRefusedRecovery(item.id);
     composerRef.current?.focus();
   };
 
   // Same clipboard contract as the code-block copy control: report failure rather
   // than silently doing nothing when the browser exposes no clipboard.
-  const copyRefusedPromptText = async (): Promise<void> => {
-    if (refusedPrompt === null) return;
+  const copyRefusedPromptText = async (item: RefusedRecovery): Promise<void> => {
     try {
       if (!navigator.clipboard?.writeText) throw new Error("Clipboard unavailable");
-      await navigator.clipboard.writeText(refusedPrompt);
-      setRefusedCopyState("copied");
+      await navigator.clipboard.writeText(item.text);
+      setRefusedCopyState({ id: item.id, state: "copied" });
     } catch {
-      setRefusedCopyState("failed");
+      setRefusedCopyState({ id: item.id, state: "failed" });
     }
   };
 
@@ -743,9 +818,10 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     if (!window.confirm("Save this model preference and restart the agent now? The running session may be interrupted.")) return;
     const operationGeneration = operationGenerationRef.current;
     const conversationAtRestart = conversationIdRef.current;
+    const submittedDraft = modelDraft;
     setModelBusy(true);
     setModelMessage("");
-    const saved = await api.setConversationModel(conversationId, modelDraft);
+    const saved = await api.setConversationModel(conversationId, submittedDraft);
     if (!viewActiveRef.current || operationGenerationRef.current !== operationGeneration || conversationIdRef.current !== conversationAtRestart) return;
     if (!saved.ok) {
       setModelBusy(false);
@@ -758,7 +834,9 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     setModelBusy(false);
     if (result.ok) {
       setConversation(result.data);
-      setModelDraft(result.data.modelPreference ?? result.data.model ?? "");
+      // Only adopt the server's value when the user has not edited the draft while
+      // the restart was pending; a newer unsaved choice must not be clobbered.
+      if (modelDraftRef.current === submittedDraft) setModelDraft(result.data.modelPreference ?? result.data.model ?? "");
       setModelMessage("Agent restarted.");
       socketRef.current?.close();
       socketRef.current = null;
@@ -972,6 +1050,7 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
             {savedHistory.messages.map((message) => (
               <MessageRow key={message.id} message={{ id: message.id, role: message.role, text: message.text, ...(message.toolName ? { toolName: message.toolName } : {}), ...(message.isError ? { isError: true } : {}) }} />
             ))}
+            {savedModeOptimistic.map((message) => <MessageRow key={message.id} message={message} />)}
           </>
         ) : linkUnavailable ? (
           <div className="card" style={{ borderColor: "var(--warning)", backgroundColor: "#1e180d" }}>
@@ -1014,7 +1093,7 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
           </div>
         )}
 
-        {messages.map((message) => <MessageRow key={message.id} message={message} />)}
+        {!isShowingSavedHistory && messages.map((message) => <MessageRow key={message.id} message={message} />)}
 
         {/* Streaming assistant message */}
         {streamingText && (
@@ -1104,19 +1183,19 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
           <button type="button" className="ghost" onClick={() => setInterceptedCommand(null)}>Cancel</button>
         </div>
       )}
-      {refusedPrompt && canWriteToHost && (
-        <div className="banner warning refused-prompt" role="status">
-          <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={refusedPrompt}>
-            Refused — {refusedPrompt}
+      {canWriteToHost && refusedRecoveries.map((item) => (
+        <div key={item.id} className="banner warning refused-prompt" role="status">
+          <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={item.text}>
+            Refused — {item.text}
           </span>
           <span style={{ display: "flex", gap: "8px", flexShrink: 0 }}>
-            <button type="button" className="ghost" onClick={recoverRefusedPromptText}>Recover</button>
-            <button type="button" className="ghost" onClick={() => void copyRefusedPromptText()}>
-              {refusedCopyState === "copied" ? "Copied" : refusedCopyState === "failed" ? "Copy failed" : "Copy"}
+            <button type="button" className="ghost" onClick={() => recoverRefusedPromptText(item)}>Recover</button>
+            <button type="button" className="ghost" onClick={() => void copyRefusedPromptText(item)}>
+              {refusedCopyState?.id === item.id ? (refusedCopyState.state === "copied" ? "Copied" : "Copy failed") : "Copy"}
             </button>
           </span>
         </div>
-      )}
+      ))}
       {canWriteToHost && !linkUnavailable && !isShowingSavedHistory && !historyLive && (
       <form onSubmit={handleSendPrompt} className="composer-container">
         <textarea
