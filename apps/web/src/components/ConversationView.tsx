@@ -91,6 +91,12 @@ function userEchoText(frame: HostFrame): string | null {
   if (frame.t === "entry" && frame.entry.type === "message" && frame.entry.message.role === "user") {
     return textFromContent(frame.entry.message.content);
   }
+  // The real wire shape for a web prompt accepted by the host: OMP journals it as
+  // custom_message/collab-prompt, and transcript.ts maps that to a user row. Without
+  // this branch every genuine web echo is invisible to the ack paths (V20-02/V19-fix8).
+  if (frame.t === "entry" && frame.entry.type === "custom_message" && frame.entry.customType === "collab-prompt") {
+    return textFromContent(frame.entry.content);
+  }
   if (frame.t === "event" && frame.event.type === "message_end" && frame.event.message.role === "user") {
     return textFromContent(frame.event.message.content);
   }
@@ -354,11 +360,13 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
    *   published it. Skipped; the ack pass right after reads the post-reduce rows
    *   and settles it by count.
    * - the host journaled the prompt before cutting the dump and delivered it only
-   *   inside the dump, so no live frame exists. A same-text user row whose
-   *   `message.timestamp` (ms epoch, `packages/collab-protocol/src/types.ts`) is at
-   *   or after this prompt's send time is that echo, not baseline. Skipped too, so
-   *   the same ack pass acknowledges it and the later refusal lands on the next
-   *   prompt instead of being misattributed to a prompt that was accepted.
+   *   inside the dump, so no live frame exists. A same-text user row whose timestamp
+   *   is at or after this prompt's send time is that echo, not baseline. `message`
+   *   rows carry ms directly; `custom_message`/`collab-prompt` rows (the real wire
+   *   shape for a web prompt) carry an ISO outer timestamp parsed to ms, and an
+   *   unparseable one is never treated as an echo. Skipped too, so the same ack pass
+   *   acknowledges it and the later refusal lands on the next prompt instead of being
+   *   misattributed to a prompt that was accepted.
    *   Older same-text rows still bump the allowance: V19-01 protection.
    *
    * ponytail: the discriminator is wall-clock, so a host clock AHEAD of the browser
@@ -378,9 +386,21 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     }
     const dumpedEchoes = new Map<string, number>();
     for (const entry of transcriptRef.current.entries) {
-      if (entry.type !== "message" || entry.message.role !== "user") continue;
-      const text = textFromContent(entry.message.content);
-      dumpedEchoes.set(text, Math.max(dumpedEchoes.get(text) ?? 0, entry.message.timestamp));
+      if (entry.type === "message" && entry.message.role === "user") {
+        const text = textFromContent(entry.message.content);
+        dumpedEchoes.set(text, Math.max(dumpedEchoes.get(text) ?? 0, entry.message.timestamp));
+        continue;
+      }
+      // A web prompt the host journaled before cutting the dump appears as
+      // custom_message/collab-prompt. CustomMessageEntry only carries an ISO outer
+      // timestamp, so convert it; an unparseable one is treated as unknown (never an
+      // echo) rather than guessed — that keeps the V19-01 baseline protection.
+      if (entry.type === "custom_message" && entry.customType === "collab-prompt") {
+        const ms = Date.parse(entry.timestamp);
+        if (Number.isNaN(ms)) continue;
+        const text = textFromContent(entry.content);
+        dumpedEchoes.set(text, Math.max(dumpedEchoes.get(text) ?? 0, ms));
+      }
     }
     const bumped = new Map<string, number>();
     const ordinalByText = new Map<string, number>();

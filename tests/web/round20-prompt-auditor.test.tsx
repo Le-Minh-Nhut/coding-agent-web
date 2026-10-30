@@ -112,3 +112,39 @@ it("V20 an unrelated host error does not falsely refuse the pending prompt",asyn
  await f.emit({t:"error",message:"agent control is disabled on a read-only link"});
  expect(f.recovery()).toBe("");expect(f.input().value).toBe("NEW_UNSENT_B");
 });
+
+// The real wire echo for a web prompt is custom_message/collab-prompt, not
+// message/role=user. These two cases pin the echo-shape classification: without it
+// every genuine collab echo stays invisible to the ack paths, so the strip item never
+// clears and the dump discriminator goes inert.
+it("V20 a real collab-prompt entry echo clears an unconfirmed strip item",async()=>{
+ const f=await fixture(0,true);
+ await f.send("UNCONFIRMED_PROMPT_A");
+ f.type("UNSENT_DRAFT_B");
+ fireEvent.click(screen.getByTitle("Back"));
+ fireEvent.click(await screen.findByText("Chat"));
+ await waitFor(()=>expect(f.sockets).toHaveLength(2));
+ await f.emit(welcome(0));
+ const promoted=f.recovery();
+ await f.emit({t:"entry",entry:collabRow("echo-collab-real","UNCONFIRMED_PROMPT_A")});
+ const afterEcho=f.recovery();
+ console.log("AUDIT20 collab echo ack",JSON.stringify({promoted,afterEcho}));
+ expect(promoted).toContain("UNCONFIRMED_PROMPT_A");
+ expect(afterEcho).toBe("");
+});
+
+it("V20 a collab-prompt row inside the bootstrap dump is its own echo, not baseline",async()=>{
+ const f=await fixture(2);
+ await f.send("A_COLLAB_DUMPED");
+ // Journaled by the host before it cut the dump, so no live frame exists: the row is
+ // the prompt's own receipt and must acknowledge it exactly once.
+ await f.emit({t:"snapshot-chunk",entries:[row("old","OLD_HISTORY"),collabRow("echo-dumped","A_COLLAB_DUMPED")],final:true});
+ const aRows=f.view.getAllByText("A_COLLAB_DUMPED").length;
+ await f.send("B_COLLAB_REFUSED");f.type("my newer draft");
+ await f.emit(refusal);
+ const recovered=f.recovery();
+ console.log("AUDIT20 collab dump discriminator",JSON.stringify({aRows,recovered,draft:f.input().value}));
+ expect(aRows).toBe(1);
+ expect(recovered).toContain("B_COLLAB_REFUSED");
+ expect(recovered).not.toContain("A_COLLAB_DUMPED");
+});

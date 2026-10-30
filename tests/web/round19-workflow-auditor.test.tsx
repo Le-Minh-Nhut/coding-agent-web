@@ -223,7 +223,7 @@ it("V19 dropdown edit during restart is preserved too",async()=>{
  * pending so the LATER refusal was misattributed to it (find() picks the first
  * pending prompt).
  */
-it.each(["entry","message_end"] as const)("V19-fix1 a live echo during bootstrap is acknowledged, not rebased (%s)",async(kind)=>{
+it.each(["entry","message_end","collab"] as const)("V19-fix1 a live echo during bootstrap is acknowledged, not rebased (%s)",async(kind)=>{
  const f=await fixture(1);
  const composer=f.view.container.querySelector("textarea")!;
  fireEvent.change(composer,{target:{value:"A_ACCEPTED"}});
@@ -231,9 +231,11 @@ it.each(["entry","message_end"] as const)("V19-fix1 a live echo during bootstrap
  expect(composer.value).toBe("");
  // The real echo for A_ACCEPTED arrives as a live frame while the snapshot is in
  // flight; the reducer queues it into pendingSnapshot.live and the completing
- // snapshot replays it.
+ // snapshot replays it. "collab" is the real wire shape for a web prompt.
  const liveA:HostFrame=kind==="entry"
   ?{t:"entry",entry:{type:"message",id:"live-a",parentId:null,timestamp:"2026-01-01T00:00:00Z",message:{role:"user",content:"A_ACCEPTED",timestamp:1}} as any}
+  :kind==="collab"
+  ?{t:"entry",entry:{type:"custom_message",id:"live-a",parentId:null,timestamp:new Date().toISOString(),customType:"collab-prompt",content:"A_ACCEPTED",display:true} as any}
   :{t:"event",event:{type:"message_end",message:{role:"user",content:"A_ACCEPTED",timestamp:1} as any}};
  await f.emit(liveA);
  const oldEntry:any={type:"message",id:"old-history",parentId:null,timestamp:"2026-01-01T00:00:00Z",message:{role:"user",content:"OLD_HISTORY",timestamp:1}};
