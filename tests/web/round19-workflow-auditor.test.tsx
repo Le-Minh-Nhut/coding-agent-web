@@ -210,3 +210,71 @@ it("V19 dropdown edit during restart is preserved too",async()=>{
  expect(input.value).toBe("model-c");
  expect(input.disabled).toBe(false);
 });
+
+// ── Round-19 post-fix regressions (reviewer findings 1 and 6) ────────────────
+
+/**
+ * Finding 1: a pre-snapshot prompt whose echo arrived as a GENUINE live frame
+ * during the bootstrap snapshot. The replay applies that echo, so the prompt is
+ * genuinely acknowledged — the rebase must not raise its allowance and block it.
+ *
+ * Old behaviour: the rebase set hostEchoCount to the replay-published count, the
+ * optimistic row survived the allowance filter (duplicate), and the prompt stayed
+ * pending so the LATER refusal was misattributed to it (find() picks the first
+ * pending prompt).
+ */
+it.each(["entry","message_end"] as const)("V19-fix1 a live echo during bootstrap is acknowledged, not rebased (%s)",async(kind)=>{
+ const f=await fixture(1);
+ const composer=f.view.container.querySelector("textarea")!;
+ fireEvent.change(composer,{target:{value:"A_ACCEPTED"}});
+ await act(async()=>fireEvent.click(f.view.getByRole("button",{name:"Send"})));
+ expect(composer.value).toBe("");
+ // The real echo for A_ACCEPTED arrives as a live frame while the snapshot is in
+ // flight; the reducer queues it into pendingSnapshot.live and the completing
+ // snapshot replays it.
+ const liveA:HostFrame=kind==="entry"
+  ?{t:"entry",entry:{type:"message",id:"live-a",parentId:null,timestamp:"2026-01-01T00:00:00Z",message:{role:"user",content:"A_ACCEPTED",timestamp:1}} as any}
+  :{t:"event",event:{type:"message_end",message:{role:"user",content:"A_ACCEPTED",timestamp:1} as any}};
+ await f.emit(liveA);
+ const oldEntry:any={type:"message",id:"old-history",parentId:null,timestamp:"2026-01-01T00:00:00Z",message:{role:"user",content:"OLD_HISTORY",timestamp:1}};
+ await f.emit({t:"snapshot-chunk",entries:[oldEntry],final:true});
+ const aRows=f.view.getAllByText("A_ACCEPTED").length;
+ console.log("AUDIT19-fix1 live echo during bootstrap",JSON.stringify({kind,aRows}));
+ expect(aRows).toBe(1);
+ // A is genuinely acknowledged: the NEXT refusal belongs to B, not to A.
+ fireEvent.change(composer,{target:{value:"B_REFUSED"}});
+ await act(async()=>fireEvent.click(f.view.getByRole("button",{name:"Send"})));
+ fireEvent.change(composer,{target:{value:"my newer draft"}});
+ await f.emit({t:"error",message:"prompting is unavailable until the host finishes starting up"});
+ const recovery=f.view.container.querySelector(".refused-prompt")?.textContent??"";
+ console.log("AUDIT19-fix1 refusal attribution",JSON.stringify({kind,recovery,draft:composer.value,aRows:f.view.getAllByText("A_ACCEPTED").length}));
+ expect(recovery).toContain("B_REFUSED");
+ expect(recovery).not.toContain("A_ACCEPTED");
+ expect(composer.value).toBe("my newer draft");
+ expect(f.view.getAllByText("A_ACCEPTED")).toHaveLength(1);
+});
+
+/**
+ * Finding 6: the live streaming assistant bubble must not render in saved mode,
+ * where the journal is the only transcript source.
+ */
+it("V19-fix6 a live streaming bubble does not persist into saved mode",async()=>{
+ // entryCount 0: the assistant stream must be applied live (not queued behind a
+ // bootstrap snapshot) for the bubble to exist before the fallback.
+ const f=await fixture(0);
+ const stream={t:"event",event:{type:"message_start",message:{role:"assistant",content:[{type:"text",text:"STREAMING_PARTIAL"}],model:"model-a",usage:{input:0,output:0,cacheRead:0,cacheWrite:0,totalTokens:0,cost:{total:0}},stopReason:"stop",timestamp:1}}} as HostFrame;
+ await f.emit(stream);
+ expect(f.view.getByText("Assistant (streaming…)")).toBeTruthy();
+ expect(f.view.getByText("STREAMING_PARTIAL")).toBeTruthy();
+ await f.disconnect();
+ vi.mocked(api.getConversationLink).mockResolvedValue({ok:false,error:{code:"link_unavailable",message:"Agent stopped"}});
+ vi.mocked(api.getConversationHistory).mockResolvedValue({ok:true,data:{header:{sessionId:"native-A",cwd:"/work",timestamp:null,version:3,title:"History"},entries:[],truncated:false,truncatedByBytes:false,truncatedByEntries:false,skippedOversized:false,hasOlder:false,nextCursor:null}} as any);
+ await act(async()=>fireEvent.click(f.view.getByRole("button",{name:"Retry"})));
+ await f.view.findByText(/Saved transcript —/);
+ const streamingBubble=f.view.queryByText("Assistant (streaming…)");
+ const partial=f.view.queryByText("STREAMING_PARTIAL");
+ console.log("AUDIT19-fix6 saved mode streaming",JSON.stringify({streamingBubble:streamingBubble!==null,partial:partial!==null}));
+ expect(streamingBubble).toBeNull();
+ expect(partial).toBeNull();
+});
+

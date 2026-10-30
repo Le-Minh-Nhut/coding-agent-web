@@ -11,7 +11,7 @@ import {
   type HostFrame,
   type SessionEntry,
 } from "@caw/collab-protocol";
-import { clearTranscriptRequests, createTranscriptState, forgetTranscriptRequest, reduceHostFrame, setConnectionStatus, trackTranscriptRequest, transcriptMessagesFromEntries, type TranscriptMessage, type TranscriptReply, type TranscriptState } from "../transcript.js";
+import { clearTranscriptRequests, createTranscriptState, forgetTranscriptRequest, reduceHostFrame, setConnectionStatus, textFromContent, trackTranscriptRequest, transcriptMessagesFromEntries, type TranscriptMessage, type TranscriptReply, type TranscriptState } from "../transcript.js";
 import { findSlashCommand, slashCommands, type SlashCommand } from "../commands.js";
 import type { AttachInstructions, Conversation } from "@caw/contracts";
 /** A prompt the host refused, kept per conversation so Back/reopen cannot lose it. */
@@ -296,8 +296,25 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
    * for a prompt sent while it was in flight. Raise those prompts' echo allowance
    * to the count the snapshot published so its rows cannot acknowledge them; their
    * real echo can only arrive in later frames, which then exceed the allowance.
+   *
+   * Exception: a pre-snapshot prompt whose echo arrived as a *live* frame during
+   * the snapshot was already acked by the replay and must not be blocked — the ack
+   * pass right after (`removeAcknowledgedPrompts`, reading the post-reduce rows)
+   * settles it by count. Only the queued frames count as evidence: a snapshot's own
+   * rows are baseline, never a receipt, even when the text matches.
+   *
+   * ponytail: the skip is keyed on text, so a same-text pre-snapshot send is skipped
+   * too; prompts are text-keyed throughout (an identity key would be the upgrade).
    */
-  const rebasePendingAfterBootstrap = (): void => {
+  const rebasePendingAfterBootstrap = (liveFrames: readonly HostFrame[]): void => {
+    const genuinelyEchoed = new Set<string>();
+    for (const liveFrame of liveFrames) {
+      if (liveFrame.t === "entry" && liveFrame.entry.type === "message" && liveFrame.entry.message.role === "user") {
+        genuinelyEchoed.add(textFromContent(liveFrame.entry.message.content));
+      } else if (liveFrame.t === "event" && liveFrame.event.type === "message_end" && liveFrame.event.message.role === "user") {
+        genuinelyEchoed.add(textFromContent(liveFrame.event.message.content));
+      }
+    }
     const hostCounts = new Map<string, number>();
     for (const message of transcriptRef.current.messages) {
       if (message.role === "user") hostCounts.set(message.text, (hostCounts.get(message.text) ?? 0) + 1);
@@ -305,6 +322,7 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     const bumped = new Map<string, number>();
     for (const prompt of pendingPromptRef.current) {
       if (!prompt.preSnapshot) continue;
+      if (genuinelyEchoed.has(prompt.submitted)) continue;
       prompt.hostEchoCount = Math.max(prompt.hostEchoCount, hostCounts.get(prompt.submitted) ?? 0);
       if (prompt.optimisticId) bumped.set(prompt.optimisticId, prompt.hostEchoCount);
     }
@@ -342,8 +360,12 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     }
     flushPendingStream();
     const hadPendingSnapshot = transcriptRef.current.pendingSnapshot !== null;
+    // The queued live frames are gone once the completing snapshot is reduced, so
+    // capture them first: a pre-snapshot prompt whose echo arrived live was already
+    // applied by the replay below and must not be rebased into unacknowledgeable.
+    const liveFrames = transcriptRef.current.pendingSnapshot?.live ?? [];
     updateTranscript(frame);
-    if (hadPendingSnapshot && transcriptRef.current.pendingSnapshot === null) rebasePendingAfterBootstrap();
+    if (hadPendingSnapshot && transcriptRef.current.pendingSnapshot === null) rebasePendingAfterBootstrap(liveFrames);
     if (frame.t === "entry" || frame.t === "snapshot-chunk" || (frame.t === "event" && frame.event.type === "message_end" && frame.event.message.role === "user")) removeAcknowledgedPrompts();
     if (frame.t === "error") {
       if (frame.message === STARTUP_PROMPT_REFUSAL) {
@@ -1095,8 +1117,9 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
 
         {!isShowingSavedHistory && messages.map((message) => <MessageRow key={message.id} message={message} />)}
 
-        {/* Streaming assistant message */}
-        {streamingText && (
+        {/* Streaming assistant message. Never in saved mode: the saved transcript is
+            the single source of truth there, and a live stream is not its content. */}
+        {streamingText && !isShowingSavedHistory && (
           <div className="message-card assistant">
             <div style={{ fontSize: "0.75rem", color: "var(--primary)", marginBottom: "4px" }}>
               Assistant (streaming…)
