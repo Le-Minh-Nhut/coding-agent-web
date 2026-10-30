@@ -80,11 +80,12 @@ for (let index = 1; index <= 205; index++) {
  * Seed one project and one conversation so the specs can *open* a conversation
  * without creating one.
  *
- * Creating a conversation goes through the real supervisor and would launch an
- * `omp` process in tmux — and `omp` is resolved as a bare command name, so a
- * running tmux server would find the owner's real binary and spend credits. The
- * harness must never do that (see tests/e2e/README.md), which is why the state
- * the browser needs is written here instead of produced through the UI.
+ * Creating a conversation goes through the real supervisor and does launch a
+ * process in tmux — but that process is the recorder stub `CAW_OMP_BINARY_PATH`
+ * pins, so it exits immediately and starts no agent. The seeded pair still lets a
+ * spec *open* a conversation without depending on a launch having happened; see
+ * `tests/e2e/no-launch-guard.spec.ts` for the spec that does create one and
+ * asserts, from the recorder log, that only the stub ever ran.
  */
 const seededProject = {
   id: "e2e00000-0000-4000-8000-000000000001",
@@ -136,34 +137,72 @@ writeFileSync(passwordFile, JSON.stringify({ salt: salt.toString("hex"), hash: h
 chmodSync(passwordFile, 0o600);
 
 // ── 4. Runtime configuration ───────────────────────────────────────────────
-// The Collab registry is read by shelling out to `omp collab list --json`, and a
-// CI runner has no OMP. Two layers keep that from turning into a 500 on
-// /api/projects/:id/sessions (which every spec that opens a conversation would
-// see as a console error it never asked for):
-//   1. the product answers `[]` on its own when the registry *directory* is
-//      absent, because no directory means no host has ever published — so a
-//      runner whose state dir never existed needs no `omp` at all;
-//   2. this stub covers the remaining case, a registry directory that *does*
-//      exist (a developer machine, a runner that has run OMP before) where the
-//      real binary is missing or answers oddly.
-// The harness therefore hands the server its own `omp`, which answers that one
-// call with an empty host list and refuses everything else. The app code stays
-// real and the registry stays hermetic (it reads no host state, spawns no
-// agent), so the route answers 200 with zero hosts anywhere. Only the *registry*
-// is pinned this way — see the README (`## The launcher`) for why `CAW_OMP_PATH`
-// below is not the no-launch guard it looks like.
+// This harness must never start a real agent. `omp` IS installed on a developer
+// machine, so a create-chat that reaches the launch path would spawn the owner's
+// real binary inside tmux — their config, their session, their credits.
+//
+// The guard is now product-level, not an absent binary:
+//   1. `CAW_OMP_BINARY_PATH` pins `config.ompBinaryPath`, and that one value is
+//      the binary every `omp` invocation the server makes resolves to — the
+//      Collab registry read, the model catalog, the capability probe *and* the
+//      command tmux is asked to launch. A launched "agent" is therefore this
+//      stub, which dies immediately and stays harmless.
+//   2. The stub appends every argv it receives to `CAW_E2E_OMP_STUB_LOG`, which is
+//      how a spec proves after the fact which binary was executed.
+//   3. A canary directory holds an executable named `omp` and is prepended to
+//      PATH. It appends to `CAW_E2E_OMP_CANARY_LOG` and exits 1, so any code path
+//      that still resolves a bare `omp` leaves evidence there. The spec asserts
+//      that log is empty.
+//
+// Two extra layers keep the *registry* route clean on a runner with no OMP:
+// first, the product answers `[]` on its own when the registry directory is
+// absent (no directory means no host has ever published); second, the pinned
+// stub answers `collab list` with an empty host list. The registry directory is
+// pointed at the harness temp tree through `XDG_STATE_HOME` so the *populated
+// directory* case is exercised hermetically — the owner's real
+// `~/.omp/run/collab-hosts` is never read by a test.
 const stubBinDir = join(tempRoot, "stub-bin");
 mkdirSync(stubBinDir, { recursive: true });
 const stubOmp = join(stubBinDir, "omp");
+const stubLog = join(tempRoot, "omp-stub-argv.jsonl");
+const canaryDir = join(tempRoot, "canary-bin");
+mkdirSync(canaryDir, { recursive: true });
+const canaryLog = join(tempRoot, "omp-canary.jsonl");
+const xdgStateHome = join(tempRoot, "xdg-state");
+const registryDir = join(xdgStateHome, "omp", "run", "collab-hosts");
+mkdirSync(registryDir, { recursive: true });
 writeFileSync(
   stubOmp,
   [
+    `#!${process.execPath}`,
+    "// Test double for `omp`: never a real agent. It answers the one registry read",
+    "// the server makes, records every other invocation, and refuses it, so a",
+    "// launched 'agent' dies in milliseconds.",
+    'const { appendFileSync } = require("node:fs");',
+    "const argv = process.argv.slice(2);",
+    'if (argv[0] === "collab" && argv[1] === "list") {',
+    '  process.stdout.write(\'{"version":1,"hosts":[]}\\n\');',
+    "  process.exit(0);",
+    "}",
+    // `process.argv[1]` is this script, i.e. the path tmux was handed; recording it
+    // lets a spec assert which binary was executed, not merely that one was.
+    "const record = JSON.stringify({ exe: process.argv[1], argv });",
+    `const log = process.env.CAW_E2E_OMP_STUB_LOG || ${JSON.stringify(stubLog)};`,
+    "try { appendFileSync(log, `${record}\\n`); } catch {}",
+    'process.stderr.write(`e2e stub omp: unsupported call: ${argv.join(" ")}\\n`);',
+    "process.exit(1);",
+    "",
+  ].join("\n"),
+  { mode: 0o755 },
+);
+writeFileSync(
+  join(canaryDir, "omp"),
+  [
     "#!/bin/sh",
-    "# Test double: the only call the server makes here is `collab list --json`.",
-    'case "$1 $2" in',
-    '  "collab list") printf \'%s\\n\' \'{"version":1,"hosts":[]}\'; exit 0 ;;',
-    "esac",
-    'echo "e2e stub omp: unsupported call: $*" >&2',
+    "# PATH canary. Any code path that still resolves a bare `omp` lands here and",
+    "# leaves a line in the canary log, which the no-launch spec asserts is absent.",
+    'printf \'%s\\n\' "[canary] $*" >> "$CAW_E2E_OMP_CANARY_LOG"',
+    'echo "e2e canary omp: not an agent." >&2',
     "exit 1",
     "",
   ].join("\n"),
@@ -176,16 +215,19 @@ const env = {
   CAW_PORT: process.env.CAW_E2E_PORT ?? "4399",
   CAW_STATE_DIR: stateDir,
   CAW_ALLOWED_ROOTS: `${rootsDir},${secondaryRootsDir}`,
-  // `maxActiveAgents` refuses to go below 1, and nothing else here stops a launch
-  // (there is no CAW_OMP_PATH consumer in the server, and the tmux adapter runs
-  // the bare resolved `omp`), so the free-load guarantee comes from omp being
-  // absent from PATH on the machine running the specs. That is a real gap in the
-  // harness, not something this env block closes; the registry stub above is
-  // deliberately NOT on PATH so it cannot become a launchable agent.
-  // The owner's credits are never at risk from this harness in CI, where omp is
-  // not installed at all.
-  CAW_OMP_PATH: join(tempRoot, "no-agent-binary"),
+  // See the block above: this single value pins every omp call the server makes,
+  // launch included. `CAW_OMP_PATH` is deliberately gone — nothing ever read it.
   CAW_OMP_BINARY_PATH: stubOmp,
+  CAW_E2E_OMP_STUB_LOG: stubLog,
+  CAW_E2E_OMP_CANARY_LOG: canaryLog,
+  // Collab registry directory (and the session-lease owner dir) live in the harness
+  // temp tree, so the "directory exists" branch is exercised without reading the
+  // owner's real ~/.omp state.
+  XDG_STATE_HOME: xdgStateHome,
+  // Canary first: if any code path still runs a bare `omp`, it lands here and the
+  // no-launch spec fails on a non-empty canary log instead of quietly paying for a
+  // real agent.
+  PATH: `${canaryDir}:${process.env.PATH ?? ""}`,
   CAW_MAX_ACTIVE_AGENTS: "1",
   CAW_LOG_LEVEL: process.env.CAW_LOG_LEVEL ?? "warn",
 };
@@ -239,6 +281,12 @@ writeFileSync(
       pid: process.pid,
       seededProjectId: seededProject.id,
       seededConversationId: seededConversation.id,
+      // Proof surface for the no-launch guard: the binary every omp call is pinned
+      // to, and the two logs the specs read after exercising a create.
+      stubOmpPath: stubOmp,
+      stubLogPath: stubLog,
+      canaryLogPath: canaryLog,
+      registryDir,
     },
     null,
     2,

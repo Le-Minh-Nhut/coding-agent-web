@@ -1,8 +1,9 @@
 # Browser E2E harness
 
 Playwright, Chromium at an iPhone-sized viewport (390x844, DPR 2, touch), driving
-the real server and the real web bundle. Nothing here launches an LLM-backed
-agent, so a full run is free.
+the real server and the real web bundle. The `omp` binary is pinned to a recorder
+stub, so nothing here launches an LLM-backed agent and a full run is free — see
+`## The launcher` for the two layers that guarantee it.
 
 ## Running
 
@@ -45,32 +46,41 @@ afterwards:
   (hex salt + 64-byte `scrypt(password, salt)`) before the server starts, so
   nothing has to scrape the first-run setup-token message. The file format is the
   one `apps/server/src/auth.ts` validates.
-- **Specs must not rely on a launch being refused.** The state dir is pre-seeded
-  with one project and one `stopped` conversation, so most specs *open* a
-  conversation instead of creating one. That distinction matters: the tmux
-  service resolves `omp` from `PATH` and runs it (`omp --config=…`) inside a new
-  tmux session, so on a machine that has OMP installed a spec that creates a chat
-  *does* start that binary. `CAW_OMP_PATH` in the launcher env is **not** a guard
-  — nothing in the server reads it. In CI, where OMP is absent, the tmux session
-  is created and its pane's shell exits immediately on `command not found`: no
-  agent runs and no credits are spent, which is the case these specs are written
-  against. Running the suite locally against an installed OMP is at your own
-  cost.
+- **No real agent can start. Two independent layers guarantee it.**
+  1. *Product-level pin.* `CAW_OMP_BINARY_PATH` sets `config.ompBinaryPath`, and
+     that one value is the binary **every** `omp` invocation the server makes
+     resolves to: the Collab registry read, the model catalog, the capability
+     probe, **and the command tmux is asked to launch**. The launcher points it at
+     its own stub, so a create-chat spawns the stub — never the owner's OMP.
+     Leaving the variable unset keeps the real-workload default (`omp` from PATH),
+     unchanged for deployments.
+  2. *Recorder + PATH canary.* The stub appends `{exe, argv}` to a log for every
+     invocation that is not the registry read, so a spec asserts *which* binary was
+     executed. A canary directory holding another executable named `omp` is
+     prepended to `PATH`; any code path that regressed to bare-name resolution would
+     land there and write to the canary log instead of starting an agent.
+     `tests/e2e/no-launch-guard.spec.ts` asserts every recorded invocation was the
+     stub and that the canary log is empty.
+
+  The stub never runs a model: it answers `collab list` with an empty host list,
+  records anything else, and exits 1. A launched "agent" therefore dies within
+  milliseconds, and a created conversation settles as a failure (never `running`).
+  `tests/server/round19-harness-record-auditor.test.ts` covers the same wiring
+  without a tmux server at all.
+- **Specs still prefer *opening* a conversation.** The state dir is pre-seeded with
+  one project and one `stopped` conversation, so most specs open a conversation
+  instead of creating one. That keeps runs fast and independent of tmux; it is no
+  longer what keeps an agent from starting — the pin above does that.
 - **The Collab registry needs no OMP, in two layers.** The server reads it by
   running `omp collab list --json`, which is ENOENT on a runner with no OMP.
   Layer 1 is the product: when the registry *directory* is itself absent,
   `DefaultCollabRegistryService.list()` answers `[]` without spawning anything —
   no directory means no host has ever published, so the empty list is a
   confirmed fact (proved by `tests/adapter/collab-registry.test.ts`). Layer 2 is
-  the launcher stub: for a machine where the directory *exists* but `omp` is
-  absent or answers oddly, `scripts/e2e-server.mjs` writes a stub `omp` into the
-  harness temp dir and points the server at it with `CAW_OMP_BINARY_PATH`. The
-  stub answers that one call with an empty host list and refuses everything
-  else, so `/api/projects/:id/sessions` answers `200` with zero hosts on any
-  machine. Either layer alone is enough on a directory that never existed; the
-  stub is what keeps a *populated* directory from being read by a foreign `omp`.
-  The stub is deliberately *not* on `PATH`; only the registry binary is pinned,
-  and the launch path is untouched.
+  the pinned stub, which answers that call with an empty host list. The launcher
+  also sets `XDG_STATE_HOME` to the harness temp dir, so the registry directory
+  *exists* under the harness (the "populated directory" branch is what gets
+  exercised) and the owner's real `~/.omp/run/collab-hosts` is never read.
 - The server is started as `tsx apps/server/src/server.ts` (via the workspace's
   own `node_modules/.bin/tsx`, overridable with `CAW_E2E_TSX`) rather than a
   TypeScript build, so the suite exercises current source.

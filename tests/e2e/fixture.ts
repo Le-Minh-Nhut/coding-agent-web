@@ -45,6 +45,15 @@ export interface HarnessFixture {
   /** Pre-seeded so a conversation can be opened without launching an agent. */
   seededProjectId: string;
   seededConversationId: string;
+  /**
+   * No-launch guard proof surface: the stub every omp call is pinned to, the log
+   * of invocations the stub recorded (with the executable path), the PATH canary
+   * log that must stay empty, and the hermetic registry directory.
+   */
+  stubOmpPath: string;
+  stubLogPath: string;
+  canaryLogPath: string;
+  registryDir: string;
 }
 
 /** Written by the launcher; the specs need exact fixture paths, not parsed JSON. */
@@ -64,6 +73,10 @@ export function harnessFixture(): HarnessFixture {
     pid: Number(raw.pid),
     seededProjectId: asString(raw, "seededProjectId", "harness fixture"),
     seededConversationId: asString(raw, "seededConversationId", "harness fixture"),
+    stubOmpPath: asString(raw, "stubOmpPath", "harness fixture"),
+    stubLogPath: asString(raw, "stubLogPath", "harness fixture"),
+    canaryLogPath: asString(raw, "canaryLogPath", "harness fixture"),
+    registryDir: asString(raw, "registryDir", "harness fixture"),
   };
 }
 

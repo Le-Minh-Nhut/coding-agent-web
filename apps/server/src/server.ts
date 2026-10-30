@@ -24,7 +24,6 @@ import {
   DefaultModelCatalogService,
   DefaultNativeSessionCatalog,
   DefaultSessionLeaseProbe,
-  DefaultTmuxService,
   StaleGenerationError,
 } from "@caw/omp-adapter";
 import { createSupervisor, RuntimeError } from "@caw/runtime";
@@ -32,6 +31,7 @@ import { createRelay } from "@caw/relay";
 import type { CollabLinkResponse, Conversation, NativeSessionSummary } from "@caw/contracts";
 import type { NativeSessionHeader } from "@caw/omp-adapter";
 import { loadConfig } from "./config.js";
+import { createPrivateTmuxService, privateTmuxSocketPath } from "./tmux-service.js";
 import { createAuthenticationService } from "./auth.js";
 import { buildApp } from "./app.js";
 import { WorkspacePathPolicy } from "./path-policy.js";
@@ -325,29 +325,16 @@ await store.listProjects();
 
 // ── Adapters ────────────────────────────────────────────────────────────────
 const lease = new DefaultSessionLeaseProbe();
-const catalog = new DefaultNativeSessionCatalog({ leaseProbe: lease });
 /**
- * tmux server this app owns, addressed by its own socket.
- *
- * Two reasons this is not the default server:
- *
- *  1. The owner's own tmux work stays untouched — we never list, adopt or kill a
- *     session we did not create, and our names cannot collide with theirs.
- *  2. A conversation's recorded tmux session id (`$N`) is only unique within one
- *     tmux server lifetime. Binding identity to a server we own, and recording
- *     that server's identity (`#{start_time}`) alongside the id, is what makes
- *     "is `$3` still my agent?" answerable after a restart. On the shared default
- *     server, `$3` could be anything.
+ * `config.ompBinaryPath` is the one knob for the `omp` binary this process runs.
+ * Unset (a real deployment) every service falls back to `omp` on PATH; set, it
+ * pins the registry read, the model catalog, the capability probe and the agent
+ * command tmux launches alike.
  */
-const tmuxSocketPath = join(config.stateDir, "tmux.sock");
-const tmux = new DefaultTmuxService({ socketPath: tmuxSocketPath });
-// Only the registry is pinned to `config.ompBinaryPath`: it is the one `omp`
-// call the server makes on a plain page load (`omp collab list`), so a host with
-// no OMP installed still answers that route instead of 500ing. The launch path
-// keeps resolving `omp` on PATH, where a missing binary is a refused launch and
-// not a broken read.
+const catalog = new DefaultNativeSessionCatalog({ leaseProbe: lease });
+const tmux = createPrivateTmuxService(config);
 const registry = new DefaultCollabRegistryService({ ompBinary: config.ompBinaryPath });
-const modelCatalog = new DefaultModelCatalogService();
+const modelCatalog = new DefaultModelCatalogService({ ompBinary: config.ompBinaryPath });
 const paths = new WorkspacePathPolicy(config.allowedRoots, async (canonicalPath) => (await store.listProjects()).some((project) => project.path === canonicalPath));
 
 /**
@@ -361,6 +348,9 @@ await mkdir(overlayDir, { recursive: true, mode: 0o700 });
 // ── Private relay & capabilities ───────────────────────────────────────────
 
 const capabilityService = new DefaultCapabilityService({
+  // The same pinned binary as every other omp call, so a pinned harness reports
+  // the stub's capabilities instead of whatever `omp` PATH happens to hold.
+  ompBinaryPath: config.ompBinaryPath,
   relayConfig: {
     configured: true,
     origin: config.publicOrigin
@@ -512,7 +502,7 @@ const app = buildApp({
   readNativeHistory: (sessionId, expectedCwd, options) => catalog.readHistory(sessionId, expectedCwd, options),
   listCollabHosts: () => registry.list(),
   findLiveHost: (sessionId) => registry.findBySessionId(sessionId),
-  tmuxSocketPath,
+  tmuxSocketPath: privateTmuxSocketPath(config),
   tmuxServerIdentity: () => tmux.serverIdentity(),
 });
 await app.ready();

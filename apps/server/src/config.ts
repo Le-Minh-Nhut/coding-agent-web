@@ -26,11 +26,14 @@ const schema = z.object({
   insecureCookies: z.boolean().default(false),
   publicOrigin: z.string().optional(),
   /**
-   * The `omp` binary the Collab *registry* is read through (`omp collab list`).
-   * It is separate from the launch path, which resolves `omp` on PATH: a host
-   * with no OMP installed can still serve its own conversations, and the browser
-   * E2E harness points this at a stub so the registry answers "no hosts" without
-   * a real OMP present. Defaults to `omp` on PATH.
+   * The ONE `omp` binary this server runs: the Collab registry read (`omp collab
+   * list`), the model catalog (`omp models`), the capability probe and — the part
+   * that matters — the agent command tmux is asked to launch.
+   *
+   * Unset means `omp` from PATH, which is what a real deployment wants. Pinning it
+   * therefore also pins the launch, which is how the browser E2E harness
+   * guarantees no real agent can start: set it to a recorder stub and a create-chat
+   * spawns the stub, not a paid agent belonging to whoever owns the machine.
    */
   ompBinaryPath: z.string().min(1).optional(),
 });
