@@ -32,7 +32,9 @@ const renameFlights = new Map<string, { desired: string; pending: { label: strin
  * rewind the value the user asked for. Sharing the flight keeps the follow-up
  * (the write that makes the last click win) attached to the write in flight
  * instead of a new mount firing a competing PATCH. Only wire bookkeeping lives
- * here; the star column on screen is view state and stays with the mount.
+ * here: the star column on screen belongs to whichever view is mounted when the
+ * response lands, and the write applies it through that view's bridge
+ * (liveProjectsFeedback) rather than through the closure that submitted it.
  */
 const favoriteFlights = new Map<string, { desired: boolean; base: boolean; pending: boolean | null }>();
 
@@ -72,6 +74,13 @@ interface LiveProjectsFeedback {
   refresh: () => void;
   /** Report a failed write on its alert region. */
   reportError: (message: string) => void;
+  /**
+   * Apply an accepted star value to its list: bump the epoch a list request in
+   * flight compares against, record the value so a stale snapshot keeps the fresh
+   * star column, and repaint the card. Same setters the submitting mount used, so
+   * a write that settles while its own view is still mounted behaves identically.
+   */
+  applyFavorite: (projectId: string, favorite: boolean) => void;
 }
 
 const liveProjectsFeedback: { current: LiveProjectsFeedback | null } = { current: null };
@@ -187,6 +196,11 @@ export function ProjectsView({ onSelectProject, onOpenSettings }: ProjectsViewPr
       closeDialog: () => setEditingProject(null),
       refresh: () => void loadProjects(),
       reportError: (message: string) => setError(message),
+      applyFavorite: (projectId: string, favorite: boolean) => {
+        favoriteEpochRef.current++;
+        favoriteValueRef.current.set(projectId, favorite);
+        setProjects((prev) => prev.map((p) => (p.id === projectId ? { ...p, favorite } : p)));
+      },
     };
     liveProjectsFeedback.current = bridge;
     // Only clear our own registration: a newer mount may already have replaced it.
@@ -204,18 +218,25 @@ export function ProjectsView({ onSelectProject, onOpenSettings }: ProjectsViewPr
    * recorded while it was open. The chain is what makes the last click win on the
    * server: a value the user asked for after this write started cannot be left
    * unsent just because this one settled first.
+   *
+   * The star column is applied through `liveProjectsFeedback` — the ProjectsView
+   * mounted now — for the same reason the rename path is: a write issued before
+   * Back/Settings can settle after the view that submitted it is gone, and the
+   * list on screen then belongs to the reopened view, whose own read may predate
+   * this write. With no view mounted there is no star column to correct and no
+   * epoch overlay to extend: the next mount reads the list fresh from the server,
+   * which already carries the accepted value. (V25-01 feedback path)
    */
   const writeFavorite = async (projectId: string, record: { desired: boolean; base: boolean; pending: boolean | null }): Promise<void> => {
     // Chained on the project key like the rename path (V25-01): submission order
     // becomes arrival order, so a star PATCH that outlived its view cannot land
     // after a newer one from the reopened view and rewind the stored flag.
     const res = await chainMutation(`project-favorite:${projectId}`, () => api.updateProject(projectId, { favorite: record.desired }));
+    const live = liveProjectsFeedback.current;
     if (res.ok) {
-      favoriteEpochRef.current++;
-      favoriteValueRef.current.set(projectId, res.data.favorite);
-      setProjects((prev) => prev.map((p) => (p.id === projectId ? { ...p, favorite: res.data.favorite } : p)));
-    } else {
-      setError(res.error.message);
+      if (live) live.applyFavorite(projectId, res.data.favorite);
+    } else if (live) {
+      live.reportError(res.error.message);
     }
     // The newest intent differs from what this write asked for: send exactly one
     // follow-up so the server converges on the user's last click. A double-tap
