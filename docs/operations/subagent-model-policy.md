@@ -5,29 +5,36 @@ several times during the project and an unrecorded reversal gets re-litigated.
 
 ## Current priority
 
-**Temporary policy (2026-10-30): every lane routes to `cx-cap/wdb/deepseek-ai/DeepSeek-V4.1-Flash:high`.**
-Banned models may remain listed in the catalog/`models.yml` and as
-`retry.fallbackChains` keys, but nothing routes to them — every fallback target
-is `cx-cap/…` or `wdb/…` DeepSeek. Revert path: `~/.omp/agent/config.yml.bak-20261029-r17`
-(previous state) or `-r14` (older).
+**Policy (2026-10-31): every lane routes to `cx/wdb/deepseek-ai/DeepSeek-V4.1-Flash:high`.**
+The provider restored the full 1M context window, so the temporary 200k `cx-cap`
+alias was removed from `models.yml`; `cx/wdb/…` now reports
+`contextWindow: 1048576, maxTokens: 384000` (verified via `omp models cx`). Every
+fallback target is `cx/…` DeepSeek. `modelRoles.default` is
+`9router/wdb/deepseek-ai/DeepSeek-V4.1-Flash:max` (interactive default only).
 
 | Priority | Agent definition | Model | Use for |
 | --- | --- | --- | --- |
-| 1 | all delegated agents | `cx-cap/wdb/deepseek-ai/DeepSeek-V4.1-Flash:high` | Everything except image reading. |
+| 1 | all delegated agents | `cx/wdb/deepseek-ai/DeepSeek-V4.1-Flash:high` | Everything except image reading. |
 | 2 | `caw-gemini`, `caw-luna` lanes | — | Prohibited this round; quota exhausted. |
 
 ### Why all lanes are DeepSeek (temporary)
 
 The owner's Gemini quota is exhausted and GPT/Gemini lanes are banned this round.
-Everything — including bulk reading — routes to the `cx-cap` DeepSeek lane.
-Revert when the owner restores quota (see revert path above).
+Everything — including bulk reading — routes to the `cx` DeepSeek lane.
+The `cx-cap` cap doc (`docs/operations/deepseek-context-cap.md`) records how the
+200k alias was built and removed, if it ever needs restoring.
 
-## Image reading: NOT RUN this round
+## Image reading
 
-Visual/image reading is **not run** this round (owner-deferred). No lane may read
-images — no OCR, no vision calls — regardless of which model the lane resolves to.
-DOM/geometry assertions in the specs are the substitute for screenshot inspection:
-layout claims are verified from the live DOM, not from image bytes.
+The main agent never puts image bytes in its own context: once image data enters
+the main lane, every later turn in that session fails with a multimodal error.
+Delegate the read to a subagent running a vision-capable DeepSeek lane; the
+subagent reports what it sees as text.
+
+Owner note (2026-10-31): reading an opened screenshot belongs on the free
+`cbai/deepseek-v4.1-flash` lane (prefix `cbai/`), not on the paid `wdb` route.
+Whether image reading runs at all is a per-round owner decision — this session's
+r26 round was authorised for it; do not assume it for other rounds.
 
 
 ## Effort: never pass the coarse `effort` hint
@@ -40,14 +47,14 @@ range is `minimal,low,medium,high`, `effort: "med"` resolves to index
 `(4-1)>>1 = 1` = **`low`**. So a "medium" hint silently downgrades a worker to its
 lowest thinking level — observed in a session journal as `"thinkingLevel":"low"`.
 
-State the level in the model id (`cx-cap/wdb/deepseek-ai/DeepSeek-V4.1-Flash:high`) and do not pass `effort`.
+State the level in the model id (`cx/wdb/deepseek-ai/DeepSeek-V4.1-Flash:high`) and do not pass `effort`.
 
-Owner ruling (2026-10-30): all subagent/vision/delegated lanes route to
-`cx-cap/wdb/deepseek-ai/DeepSeek-V4.1-Flash:high` at `:high`; GPT (`gpt-6-luna`) and
+Owner ruling (2026-10-31): all subagent/delegated lanes route to
+`cx/wdb/deepseek-ai/DeepSeek-V4.1-Flash:high` at `:high`; GPT (`gpt-6-luna`) and
 Gemini lanes are prohibited this round (quota exhausted). Delegated workers
 resolve to `modelRoles.task`; never `:xhigh`/`:max`.
 
 ## History
 
 History: Gemini-first → Luna-first → Gemini-first again → Luna-first again →
-Luna-default with DeepSeek on bulk review → owner ruling (2026-10-29): GPT subagents and vision at `:high`; Gemini prohibited; delegated workers resolve to `modelRoles.task` → **owner ruling (2026-10-30): temporary all-DeepSeek (`cx-cap`) policy; GPT and Gemini lanes banned; revert via `config.yml.bak-20261029-r17` / `-r14`.**
+Luna-default with DeepSeek on bulk review → owner ruling (2026-10-29): GPT subagents and vision at `:high`; Gemini prohibited; delegated workers resolve to `modelRoles.task` → owner ruling (2026-10-30): temporary all-DeepSeek (`cx-cap`) policy; GPT and Gemini lanes banned; revert via `config.yml.bak-20261029-r17` / `-r14` → **owner ruling (2026-10-31): provider restored the 1M window; `cx-cap` provider removed from `models.yml`; every lane → `cx/wdb/deepseek-ai/DeepSeek-V4.1-Flash:high` (still DeepSeek-only, GPT/Gemini banned).**
