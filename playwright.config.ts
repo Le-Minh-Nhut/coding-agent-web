@@ -28,8 +28,11 @@ const BASE_URL = process.env.CAW_E2E_BASE_URL ?? (REUSE_PORT ? `http://127.0.0.1
 
 /**
  * Where the launcher publishes the fixture paths (temp roots tree, seeded ids).
- * The test process and the launcher must agree on this path, so it is pinned here
- * and handed to both; specs skip with a clear reason when it is missing.
+ * The launcher owns the file and removes it on shutdown; the default below is
+ * only this config's fallback (a `--list` run, or a developer-started server),
+ * and the launcher's own default is the same path — the two must match so a
+ * direct `node scripts/e2e-server.mjs` and a Playwright run agree. Specs skip
+ * with a clear reason when it is missing.
  */
 const FIXTURE_FILE = process.env.CAW_E2E_FIXTURE ?? join(tmpdir(), "caw-e2e-fixture.json");
 process.env.CAW_E2E_FIXTURE = FIXTURE_FILE;

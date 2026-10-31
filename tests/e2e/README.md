@@ -85,7 +85,11 @@ afterwards:
   own `node_modules/.bin/tsx`, overridable with `CAW_E2E_TSX`) rather than a
   TypeScript build, so the suite exercises current source.
 - The resolved URL and fixture paths are written to the manifest file the test
-  process reads, and printed on stdout.
+  process reads, and printed on stdout. `playwright.config.ts` resolves
+  `CAW_E2E_FIXTURE` to the same default path (`<tmp>/caw-e2e-fixture.json`) and
+  passes it to the launcher, so both agree; the launcher removes the manifest and
+  the temp tree when it exits on the shutdown path, so an ordinary run — SIGTERM
+  from Playwright included — leaves neither behind.
 
 ## Unexpected browser errors
 

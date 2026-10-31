@@ -269,29 +269,42 @@ function reapTmuxServer() {
  * Playwright's webServer teardown contract: on SIGTERM it waits up to
  * `gracefulShutdown.timeout` (10s), then SIGKILLs the process group. The group
  * dies the moment this parent dies, so the handler must not exit: it reaps the
- * app's tmux daemon by socket and stays alive. The daemon outlives the group
- * (tmux daemonizes), which is exactly why the reap is needed on every path.
- * SIGINT also removes the temp tree first — its socket is about to disappear
- * with it, which is why the reap runs *before* the `rmSync`.
+ * app's tmux daemon by socket. The daemon outlives the group (tmux daemonizes),
+ * which is exactly why the reap is needed on every path.
+ *
+ * Both handlers then stop the `tsx` child and let the *`exit` handler above*
+ * clean the temp tree: this process must not `exit` before Playwright's SIGKILL
+ * (that is what keeps the group's SIGKILL the final word), and a direct `rmSync`
+ * here would race a child that is still alive and can recreate files. The child
+ * holds no work of its own — a launcher SIGINT/SIGTERM during startup is already
+ * fatal — so stopping it costs nothing.
  */
 process.on("SIGINT", () => {
   reapTmuxServer(true);
-  rmSync(tempRoot, { recursive: true, force: true });
   child.kill("SIGINT");
-  process.exitCode = 0;
 });
-// Synchronous so it beats the SIGKILL escalation; Playwright then SIGKILLs the
-// group (taking the `tsx` child with it, since stdio is inherited and it does not
-// daemonize). No `exit`: staying alive is what keeps the group's SIGKILL the
-// final word rather than this handler's own exit.
-process.on("SIGTERM", () => reapTmuxServer(true));
+// Playwright's teardown signal: reap, stop the child, and let its exit handler
+// remove tempRoot. Without the kill the child keeps running, the exit handler
+// never fires, and every ordinary `pnpm test:e2e` leaves its temp tree behind.
+process.on("SIGTERM", () => {
+  reapTmuxServer(true);
+  child.kill("SIGTERM");
+});
 
 child.on("exit", (code) => {
-  // The server ended on its own (crash, or an external stop). Reap its tmux
-  // server, remove the temp tree, and mirror the exit so Playwright reports the
-  // real failure.
+  // The server ended: reaped by one of the signal handlers, or on its own
+  // (crash, or an external stop). Reap its tmux server, remove the temp tree and
+  // the default manifest, then mirror the exit so Playwright reports the real
+  // failure.
   reapTmuxServer(true);
   rmSync(tempRoot, { recursive: true, force: true });
+  try {
+    // The manifest we wrote; with the default it sits in tmpdir() and would
+    // otherwise accumulate across runs and be read stale by the next one.
+    rmSync(manifestFile, { force: true });
+  } catch {
+    /* already gone, or unwritable: nothing left to clean. */
+  }
   process.exit(code ?? 0);
 });
 
@@ -299,8 +312,12 @@ const port = env.CAW_PORT;
 
 // The specs need the exact fixture paths for their filesystem assertions, and
 // reading them back out of API responses would mean casting unvalidated JSON.
-// A fixed manifest in the temp dir is simpler and keeps the paths in one place.
-const manifestFile = process.env.CAW_E2E_FIXTURE ?? join(tempRoot, "fixture.json");
+// A manifest in the temp dir is simpler and keeps the paths in one place. The
+// default path is the one `tests/e2e/fixture.ts` and `playwright.config.ts`
+// fall back to, so a hand-started launcher and a Playwright run agree; the file
+// is removed again on the shutdown path below.
+const defaultManifestFile = join(tmpdir(), "caw-e2e-fixture.json");
+const manifestFile = process.env.CAW_E2E_FIXTURE ?? defaultManifestFile;
 writeFileSync(
   manifestFile,
   JSON.stringify(

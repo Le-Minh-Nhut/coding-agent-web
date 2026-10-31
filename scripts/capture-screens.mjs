@@ -11,4 +11,11 @@ const result = spawnSync("npx", ["playwright", "test", "tests/e2e/screens.spec.t
   env: process.env,
 });
 
-process.exit(result.status ?? 0);
+// A launch failure (`npx` missing, ENOENT) leaves `status` null; without this
+// guard that silently reports success for a run that never happened.
+if (result.error) {
+  console.error(`capture-screens: could not launch playwright: ${result.error.message}`);
+  process.exit(1);
+}
+
+process.exit(result.status ?? 1);
