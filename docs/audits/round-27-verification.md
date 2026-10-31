@@ -9,11 +9,11 @@ và `/home/heheboiz/data/caw-audit-r27/findings/F-series.md`. Không có số n�
 
 > **Bản này đã được cập nhật theo cây đã sửa.** Bản đầu viết trước vòng 2 và vòng 3 và trước
 > `ca9a7be`; nó còn ghi `API-01`/`STATIC-01` là không có fix và trích cổng lần chạy đầu
-> (`127 file / 878 test`, `76/76`). Bản cập nhật này (commit `58a1c82`, `HEAD == origin/main`) đối
-> chiếu với cây cuối `ca9a7be` — commit code cuối cùng, `HEAD` trước bản sửa tài liệu này — nơi cả
-> hai fix đã có; mọi số dưới đây giờ lấy từ `audit/final-gates.md`, `audit/playwright-results.md`,
-> `audit/fixes.md` và CI run `41183496042`. Bản thân `58a1c82` chỉ sửa tài liệu, không chạm code hay
-> test.
+> (`127 file / 878 test`, `76/76`). Bản cập nhật đó (commit `58a1c82`, khi đó `HEAD == origin/main`)
+> đối chiếu với cây cuối `ca9a7be`. Kể từ đó repo đã tiến thêm: `e75ba85` (fix harness E2E) là
+> commit code & repo cuối cùng hiện tại, CI run `41219391961` = `success`. Bản thân `58a1c82` và hai
+> commit tài liệu sau đó chỉ sửa tài liệu, không chạm code hay test; `e75ba85` là commit code duy
+> nhất sau `ca9a7be`.
 
 > **Tuyên bố phạm vi, đọc trước khi trích dẫn.** Không agent nào khẳng định repo không còn lỗi. Hai
 > agent báo cáo không có P0/P1 trong phạm vi của họ — đó là phát biểu về những gì họ đọc, không phải
