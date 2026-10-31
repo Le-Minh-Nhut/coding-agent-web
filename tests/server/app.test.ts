@@ -867,6 +867,39 @@ describe("project deletion guard", () => {
 });
 
 describe("refused conversation creation", () => {
+  it("refuses a literal null body instead of starting a fresh conversation", async () => {
+    // `request.body ?? {}` maps an explicit JSON `null` onto the same value as an
+    // absent body, so a body the strict schema rejects was accepted — and started a
+    // fresh launch. An explicit `null` is a caller saying something we are not
+    // listening to, exactly like an unknown field.
+    const supervisor = { start: async (id: string) => ({ id }) } as unknown as Supervisor;
+    const { app, headers, dir, store } = await fixture({ supervisor, runtimeSpec: () => ({} as RuntimeLaunchSpec) });
+    const project = await store.createProject({ path: dir });
+    const response = await app.inject({
+      method: "POST", url: `/api/projects/${project.id}/conversations`,
+      headers: { ...headers, "content-type": "application/json" },
+      payload: "null",
+    });
+    expect(response.statusCode).toBe(400);
+    expect((await store.listConversations(project.id)).length).toBe(0);
+    await app.close();
+  });
+
+  it("still starts a conversation from an absent body and from an empty object", async () => {
+    const supervisor = { start: async (id: string) => ({ id }) } as unknown as Supervisor;
+    const { app, headers, dir, store } = await fixture({ supervisor, runtimeSpec: () => ({} as RuntimeLaunchSpec) });
+    const project = await store.createProject({ path: dir });
+
+    // No body at all: the route's documented default.
+    const absent = await app.inject({ method: "POST", url: `/api/projects/${project.id}/conversations`, headers });
+    expect(absent.statusCode, JSON.stringify(absent.json())).toBe(201);
+    // The default the web client sends.
+    const empty = await app.inject({ method: "POST", url: `/api/projects/${project.id}/conversations`, headers, payload: {} });
+    expect(empty.statusCode, JSON.stringify(empty.json())).toBe(201);
+    expect(await store.listConversations(project.id)).toHaveLength(2);
+    await app.close();
+  });
+
   it("keeps the row marked as refused when the launch was refused before any process existed", async () => {
     // The row is the chat the user just created. Deleting it loses the only handle
     // they have to see the reason and retry; leaving it at `starting` would claim a

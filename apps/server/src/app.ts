@@ -396,7 +396,11 @@ export function buildApp(deps: AppDependencies): FastifyInstance<HttpServer> {
   app.post("/api/projects/:id/conversations", { preHandler: protectedHook }, async (request, reply) => {
     if (!deps.supervisor || !deps.runtimeSpec) return reply.code(501).send(fail("capability_missing", "Conversation lifecycle runtime is not configured"));
     const params = idParams.safeParse(request.params);
-    const body = conversationRequest.safeParse(request.body ?? {});
+    // `request.body ?? {}` also maps an explicit JSON `null` onto the absent-body
+    // value, so a body the strict schema rejects — a caller saying something we are
+    // not listening to — was accepted and started a fresh conversation. An absent
+    // body alone takes the documented default.
+    const body = conversationRequest.safeParse(request.body === undefined ? {} : request.body);
     if (!params.success || !body.success) return reply.code(400).send(fail("bad_request", "Invalid conversation request"));
     const project = (await deps.store.listProjects()).find((item) => item.id === params.data.id);
     if (!project) return reply.code(404).send(fail("not_found", "Project not found"));

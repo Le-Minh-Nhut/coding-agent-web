@@ -1,6 +1,6 @@
 import { createServer } from "node:http";
 import { once } from "node:events";
-import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, rm, writeFile, chmod } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 import net from "node:net";
 import type { AddressInfo } from "node:net";
@@ -201,6 +201,34 @@ describe("Single Origin & Static Web Serving", () => {
     }
 
     await app.close();
+  });
+
+  it("reports an unreadable asset as a server fault, not as a missing file", async () => {
+    // AGENTS.md rule 6: unknown must not read as missing. `tryServeFile` collapsed
+    // every failure to `false`, so an asset that is present but unreadable (EACCES,
+    // EIO) was served as the SPA fallback / 404 — a real filesystem fault disguised
+    // as a normal route. A genuinely absent file must keep the current behaviour.
+    const { auth, config, store, webDir } = await createFixture();
+    const app = buildApp({ config, auth, store });
+
+    await writeFile(join(webDir, "unreadable.js"), "console.log('present');", "utf8");
+    await chmod(join(webDir, "unreadable.js"), 0o000);
+    try {
+      const response = await app.inject({ method: "GET", url: "/unreadable.js" });
+      expect(response.statusCode).toBe(500);
+      expect(response.body).not.toContain("Product UI");
+
+      // The normal path and the genuinely-absent path are unchanged.
+      const present = await app.inject({ method: "GET", url: "/" });
+      expect(present.statusCode).toBe(200);
+      expect(present.body).toContain("Product UI");
+      const absent = await app.inject({ method: "GET", url: "/definitely-absent.js" });
+      expect(absent.statusCode).toBe(200);
+      expect(absent.body).toContain("Product UI");
+    } finally {
+      await chmod(join(webDir, "unreadable.js"), 0o600);
+      await app.close();
+    }
   });
 
   it("/guest/ serves the guest index.html when present", async () => {

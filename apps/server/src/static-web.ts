@@ -135,9 +135,16 @@ async function tryServeFile(
     const stream = handle.createReadStream();
     reply.code(200).send(stream);
     return true;
-  } catch {
+  } catch (error) {
     await handle?.close();
-    return false;
+    // ENOENT/ENOTDIR mean "not this file" and ELOOP a symlink we never serve: for
+    // those the caller's 404 / SPA fallback is the honest answer. Every other
+    // failure — EACCES, EIO, a bad descriptor — is a filesystem fault, and
+    // reporting it as a missing file would disguise a real fault as a normal route
+    // (AGENTS.md rule 6: unknown must not read as missing).
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" || code === "ENOTDIR" || code === "ELOOP") return false;
+    throw error;
   }
 }
 
