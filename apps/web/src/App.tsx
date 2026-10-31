@@ -27,6 +27,8 @@ function clearSessionScopedMutations(): void {
 
 export function App() {
   const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(null);
+  const [startupFailure, setStartupFailure] = useState<string | null>(null);
+  const [startupAttempt, setStartupAttempt] = useState(0);
   const [setupRequired, setSetupRequired] = useState(false);
   const [setupUnavailable, setSetupUnavailable] = useState(false);
   const [currentView, setCurrentView] = useState<View>("projects");
@@ -36,46 +38,73 @@ export function App() {
   const [refusedRecoveries, setRefusedRecoveries] = useState<Record<string, RefusedRecovery[]>>({});
 
   useEffect(() => {
+    let cancelled = false;
     void (async () => {
       const me = await api.getMe();
+      if (cancelled) return;
       if (me.ok) {
         const probe = await api.getCapabilities();
+        if (cancelled) return;
         if (probe.ok) {
           setIsAuthenticated(true);
           return;
         }
         if (probe.httpStatus === 403) {
           const refreshed = await api.getMe();
-          if (refreshed.ok) {
-            setSetupRequired(true);
-            clearSessionScopedMutations();
-            setIsAuthenticated(false);
-          } else {
-            setSetupUnavailable(true);
-            clearSessionScopedMutations();
-            setIsAuthenticated(false);
-          }
-        } else {
+          if (cancelled) return;
+          if (refreshed.ok) setSetupRequired(true);
+          else setSetupUnavailable(true);
           clearSessionScopedMutations();
           setIsAuthenticated(false);
+          return;
         }
+        // The session answered; only the capability probe failed. A 500 or a dead
+        // transport is not proof the session is gone, so nothing session-scoped is
+        // retired here — the workspace degrades behind a retryable surface instead.
+        setStartupFailure(probe.error.message || "The server could not answer the capabilities probe.");
         return;
       }
 
       if (me.httpStatus === 403) {
         const probe = await api.getCapabilities();
+        if (cancelled) return;
         if (probe.httpStatus === 403) {
           const refreshed = await api.getMe();
+          if (cancelled) return;
           if (refreshed.ok) setSetupRequired(true);
           else setSetupUnavailable(true);
         }
+        clearSessionScopedMutations();
+        setIsAuthenticated(false);
+        return;
       }
-      clearSessionScopedMutations();
-      setIsAuthenticated(false);
+
+      if (me.httpStatus === 401) {
+        clearSessionScopedMutations();
+        setIsAuthenticated(false);
+        return;
+      }
+
+      // No status at all means the probe never landed (transport failure), and any
+      // other status is a server fault: both are "we could not ask", not "you are
+      // signed out". Retrying re-runs the whole probe.
+      setStartupFailure(me.error.message || "The server could not be reached.");
     })();
-  }, []);
+    return () => { cancelled = true; };
+  }, [startupAttempt]);
 
   if (isAuthenticated === null) {
+    if (startupFailure !== null) {
+      return (
+        <div style={{ display: "flex", justifyContent: "center", alignItems: "center", minHeight: "100vh" }}>
+          <div className="card" style={{ maxWidth: "360px" }}>
+            <div role="alert">{startupFailure}</div>
+            <p style={{ color: "var(--text-muted)" }}>Your session was not reported as ended; this is a connectivity or server problem.</p>
+            <button type="button" className="primary" onClick={() => { setStartupFailure(null); setStartupAttempt((attempt) => attempt + 1); }}>Retry</button>
+          </div>
+        </div>
+      );
+    }
     return (
       <div style={{ display: "flex", justifyContent: "center", alignItems: "center", minHeight: "100vh" }}>
         <p style={{ color: "var(--text-muted)" }}>Loading workspace…</p>

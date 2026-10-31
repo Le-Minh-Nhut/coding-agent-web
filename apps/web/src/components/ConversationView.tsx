@@ -1092,7 +1092,17 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
 
   const handleStop = () => {
     if (transcriptRef.current.readOnly) return;
-    void socketRef.current?.send({ t: "abort" });
+    // An abort that was never delivered is a real failure: the user pressed Stop and
+    // the agent may still be running, so the send result must be surfaced, not dropped.
+    const notSent = "Not connected — stop was not sent. The agent may still be running.";
+    const socket = socketRef.current;
+    if (!socket) {
+      setSendError(notSent);
+      return;
+    }
+    void socket.send({ t: "abort" }).then((sent) => {
+      if (!sent) setSendError(notSent);
+    }, () => setSendError(notSent));
   };
 
   const handleSaveModel = async () => {
@@ -1157,7 +1167,6 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
       // Only adopt the server's value when the user has not edited the draft while
       // the restart was pending; a newer unsaved choice must not be clobbered.
       if (modelDraftRef.current === submittedDraft) setModelDraft(result.data.modelPreference ?? result.data.model ?? "");
-      setModelMessage("Agent restarted.");
       // V25-05: the restart replaced the tmux session, so the terminal attach
       // command on screen (from the pre-restart read) now points at a dead session.
       // Re-read the instructions and publish only while this is still the newest
@@ -1176,6 +1185,17 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
       socketRef.current?.close();
       socketRef.current = null;
       if (viewActiveRef.current && operationGenerationRef.current === operationGeneration && conversationIdRef.current === conversationAtRestart) await connectToCollab(true);
+      if (!viewActiveRef.current || operationGenerationRef.current !== operationGeneration || conversationIdRef.current !== conversationAtRestart) return;
+      // The restart response proves the request was accepted, not that the agent is
+      // back: a publish timeout leaves the row at `starting`
+      // (apps/server/src/app.ts:601, packages/runtime/src/supervisor.ts:793), and the
+      // returned row is the machine's own observation of that. So the claim follows
+      // what we can see — a live state, or a socket that actually joined the room —
+      // and says so honestly when neither has happened yet (AGENTS.md rule 9).
+      const joinedRoom = transcriptRef.current.connectionStatus === "live";
+      const up = result.data.state === "running" || result.data.state === "idle" || result.data.state === "awaiting_input";
+      if (joinedRoom || up) setModelMessage("Agent restarted.");
+      else setModelMessage(`Restart requested, but the agent has not come up yet (reported state: ${result.data.state}). Retry once the machine settles.`);
     } else setModelMessage(result.error.message);
   };
 
@@ -1513,6 +1533,14 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
                 <textarea value={uiEditorValue} onChange={(event) => setUiEditorValue(event.target.value)} rows={4} readOnly={transcript.readOnly} />
                 <button type="button" className="primary" disabled={transcript.readOnly} onClick={() => handleUiResponse(uiEditorValue, activeUiRequest.reqId)}>Submit</button>
               </>
+            )}
+            {/* An approval that can only be accepted is a trap. Cancel is a response
+                with no value — the same frame the host already reads as "declined"
+                (`CollabUiResponseValue` is optional; the vendored guest sends it too). */}
+            {!(transcript.readOnly || linkAccess === "view") && (
+              <div style={{ marginTop: "12px" }}>
+                <button type="button" className="ghost" disabled={transcript.readOnly} onClick={() => handleUiResponse(undefined, activeUiRequest.reqId)}>Cancel</button>
+              </div>
             )}
           </div>
         )}

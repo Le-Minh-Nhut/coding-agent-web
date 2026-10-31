@@ -79,7 +79,10 @@ it.each([false,true])('V25 terminal attach instructions must follow a successful
   vi.mocked(api.getAttachInstructions).mockResolvedValue({ok:true,data:{available:true,command:newCommand}} as any);
   fireEvent.click(screen.getByText('Conversation model settings'));
   await act(async()=>fireEvent.click(screen.getByRole('button',{name:'Save & restart agent'})));
-  await screen.findByText('Agent restarted.');
+  // F01: the returned row is genuinely live (`state:'idle'`), so the honest claim is
+  // the restart one — but this test proves the *attach* refetch, so it waits on the
+  // new command rather than pinning the success wording.
+  await screen.findByText(newCommand);
  }
  const oldVisible=screen.queryByText(oldCommand)!==null,newVisible=screen.queryByText(newCommand)!==null;
  console.log('AUDIT25 attach after restart',JSON.stringify({restart,oldVisible,newVisible}));

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { AgentSnapshot } from "@caw/collab-protocol";
 import type { TranscriptReply } from "../transcript.js";
+import { ModalOverlay } from "./ModalOverlay.js";
 
 interface SubagentPanelProps {
   agents: AgentSnapshot[];
@@ -64,10 +65,14 @@ export function SubagentPanel({
 
 
   return (
-    <div className="modal-overlay">
+    <ModalOverlay
+      onClose={onClose}
+      aria-labelledby="subagents-title"
+      overlayProps={{ className: "modal-overlay" }}
+    >
       <div className="modal-content" style={{ maxWidth: "600px" }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "12px" }}>
-          <h3>Subagents ({agents.length})</h3>
+          <h3 id="subagents-title">Subagents ({agents.length})</h3>
           <button type="button" className="ghost" onClick={onClose} aria-label="Close subagents">✕</button>
         </div>
 
@@ -109,6 +114,6 @@ export function SubagentPanel({
           </div>
         )}
       </div>
-    </div>
+    </ModalOverlay>
   );
 }

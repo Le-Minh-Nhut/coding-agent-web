@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import type { ConversationEvent } from "@caw/contracts";
 import { api } from "../api.js";
+import { ModalOverlay } from "./ModalOverlay.js";
 
 export interface ActivityPanelProps {
   conversationId?: string;
@@ -59,6 +60,15 @@ export function ActivityPanel({
    * for a previous conversation is dropped the same way.
    */
   const readGenerationRef = useRef(0);
+  /**
+   * The two entry points each own their own in-flight flag, so which response may
+   * release it is decided per entry point: a tail reload must not clear the spinner a
+   * NEWER tail reload still owns (ACTIVITY-01), and neither must a backward page.
+   * The shared `readGenerationRef` above stays the payload/ordering guard across both
+   * entry points; these two only decide flag ownership.
+   */
+  const tailGenerationRef = useRef(0);
+  const pageGenerationRef = useRef(0);
   const conversationIdRef = useRef(conversationId);
   conversationIdRef.current = conversationId;
 
@@ -71,13 +81,14 @@ export function ActivityPanel({
     if (!conversationId) return;
     const id = conversationId;
     const generation = ++readGenerationRef.current;
+    // The flag is owned by the newest TAIL read, so an older tail read landing late
+    // cannot clear the spinner the user is waiting on (ACTIVITY-01), while the newest
+    // tail read always releases it — which is what keeps `loading` from wedging.
+    const tail = ++tailGenerationRef.current;
     setLoading(true);
     setError(null);
     const res = await api.getConversationEvents(id);
-    // The flags belong to THIS request alone (the other entry point owns the other
-    // one), so they are released even when the payload is stale — otherwise a
-    // dropped tail reload would leave `loading` stuck true and Retry disabled.
-    setLoading(false);
+    if (tailGenerationRef.current === tail) setLoading(false);
     if (conversationIdRef.current !== id || readGenerationRef.current !== generation) return;
     if (res.ok) {
       setEvents(res.data.events);
@@ -90,6 +101,20 @@ export function ActivityPanel({
     // F-B2: a new conversation starts blank. Anything already in flight for the
     // previous one is superseded here and dropped on landing.
     readGenerationRef.current += 1;
+    // This effect is taking over the panel's state, so it also takes over the tail
+    // flag from whatever tail read it just superseded: an abandoned read can no
+    // longer release it (that is the point of the ownership check in loadEvents), so
+    // the effect releases it here. Without this the `initialEvents` path below —
+    // which starts no replacement read — would leave `loading` true forever and
+    // Retry disabled, exactly the wedge the old unconditional release guarded.
+    tailGenerationRef.current += 1;
+    setLoading(false);
+    // Same hand-off for the backward page: its flag is owned by the newest page
+    // read, so abandoning one here would otherwise leave `loadingMore` true on the
+    // new conversation (Load older disabled, and handleLoadMore early-returns)
+    // until the abandoned read lands — or forever, if it never does.
+    pageGenerationRef.current += 1;
+    setLoadingMore(false);
     if (initialEvents !== undefined) {
       setEvents(initialEvents);
       setNextBefore(initialNextBefore);
@@ -106,10 +131,11 @@ export function ActivityPanel({
     const id = conversationId;
     const cursor = nextBefore;
     const generation = ++readGenerationRef.current;
+    const page = ++pageGenerationRef.current;
     setLoadingMore(true);
     setError(null);
     const res = await api.getConversationEvents(id, { before: cursor });
-    setLoadingMore(false);
+    if (pageGenerationRef.current === page) setLoadingMore(false);
     if (conversationIdRef.current !== id || readGenerationRef.current !== generation) return;
     if (res.ok) {
       setEvents((prev) => [...res.data.events, ...prev]);
@@ -120,12 +146,14 @@ export function ActivityPanel({
   const sortedEvents = [...events].sort((a, b) => b.seq - a.seq);
 
   return (
-    <div
-      className="modal-overlay"
-      role="dialog"
-      aria-label="Activity timeline"
-      onClick={(e) => {
-        if (e.target === e.currentTarget) onClose?.();
+    <ModalOverlay
+      onClose={onClose ?? (() => {})}
+      aria-labelledby="activity-panel-title"
+      overlayProps={{
+        className: "modal-overlay",
+        onClick: (e) => {
+          if (e.target === e.currentTarget) onClose?.();
+        },
       }}
     >
       <div
@@ -148,7 +176,7 @@ export function ActivityPanel({
             marginBottom: "8px",
           }}
         >
-          <h3 style={{ fontSize: "1.05rem", margin: 0 }}>Activity Timeline</h3>
+          <h3 id="activity-panel-title" style={{ fontSize: "1.05rem", margin: 0 }}>Activity Timeline</h3>
           {onClose && (
             <button
               type="button"
@@ -237,6 +265,6 @@ export function ActivityPanel({
           )}
         </div>
       </div>
-    </div>
+    </ModalOverlay>
   );
 }

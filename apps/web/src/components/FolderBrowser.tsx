@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import { api } from "../api.js";
+import { ModalOverlay } from "./ModalOverlay.js";
 import type { DirectoryListing } from "@caw/contracts";
 
 interface FolderBrowserProps {
@@ -174,9 +175,13 @@ export function FolderBrowser({ onSelect, onCancel }: FolderBrowserProps) {
   };
 
   return (
-    <div className="modal-overlay">
+    <ModalOverlay
+      onClose={onCancel}
+      aria-labelledby="folder-browser-title"
+      overlayProps={{ className: "modal-overlay" }}
+    >
       <div className="modal-content">
-        <h3 style={{ marginBottom: "12px" }}>Browse Folders</h3>
+        <h3 id="folder-browser-title" style={{ marginBottom: "12px" }}>Browse Folders</h3>
 
         {errorText && (
           <div style={{ marginBottom: "12px" }}>
@@ -217,8 +222,10 @@ export function FolderBrowser({ onSelect, onCancel }: FolderBrowserProps) {
           ))}
         </div>
 
+        {/* role="group": a bare div has no role for aria-label to attach to, so
+            the name was exposed on nothing. */}
         {!currentPath && listing?.roots && listing.roots.length > 1 && (
-          <div aria-label="Workspace roots" style={{ display: "flex", flexWrap: "wrap", gap: "6px", margin: "8px 0" }}>
+          <div role="group" aria-label="Workspace roots" style={{ display: "flex", flexWrap: "wrap", gap: "6px", margin: "8px 0" }}>
             {listing.roots.map((root) => (
               <button type="button" key={root} className="ghost" onClick={() => { setSelectedPath(null); setCurrentPath(root); }}>
                 {root}
@@ -260,21 +267,26 @@ export function FolderBrowser({ onSelect, onCancel }: FolderBrowserProps) {
         ) : (
           <div className="folder-browser-list">
             {listing?.parent && (
-              <div
+              // A real <button>: focus, Enter/Space activation and the button role all
+              // come from the browser. .folder-item carries the list styling.
+              <button
+                type="button"
                 className="folder-item"
                 style={{ cursor: "pointer" }}
                 onClick={() => { setSelectedPath(null); setCurrentPath(listing.parent!); }}
               >
                 <span>📁 .. (Up)</span>
-              </div>
+              </button>
             )}
 
             {listing?.entries.filter((entry) => entry.isDirectory).map((entry) => {
               const disabled = !entry.allowed || !entry.isDirectory;
               const selected = selectedPath === entry.path;
               return (
-                <div
+                <button
                   key={entry.path}
+                  type="button"
+                  disabled={disabled}
                   className={`folder-item ${disabled ? "disabled" : ""} ${selected ? "selected" : ""}`}
                   style={{ cursor: disabled ? "not-allowed" : "pointer", borderColor: selected ? "var(--primary)" : undefined }}
                   onClick={() => {
@@ -287,7 +299,7 @@ export function FolderBrowser({ onSelect, onCancel }: FolderBrowserProps) {
                   <span>📁 {entry.name}</span>
                   {entry.hasProject && <span className="badge" style={{ fontSize: "0.7rem" }}>Project</span>}
                   {selected && <span className="badge">Selected</span>}
-                </div>
+                </button>
               );
             })}
 
@@ -329,6 +341,6 @@ export function FolderBrowser({ onSelect, onCancel }: FolderBrowserProps) {
           </button>
         </div>
       </div>
-    </div>
+    </ModalOverlay>
   );
 }

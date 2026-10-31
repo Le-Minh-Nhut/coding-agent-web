@@ -138,11 +138,24 @@ export function ProjectDetailView({
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: "8px", marginBottom: "24px" }}>
           {conversations.map((conv) => (
+            // Same as the project card: this is a navigation control, so it is a tab
+            // stop with button semantics. A div because it holds block content
+            // (heading, badge row, detail paragraphs), which a <button> may not.
             <div
               key={conv.id}
               className="card"
+              role="button"
+              tabIndex={0}
+              // Same as the project card: name the control, not its block content.
+              aria-label={`Open ${conv.title}`}
               style={{ cursor: "pointer", transition: "border-color 0.15s" }}
               onClick={() => onSelectConversation(conv.id)}
+              onKeyDown={(event) => {
+                if (event.target !== event.currentTarget) return;
+                if (event.key !== "Enter" && event.key !== " ") return;
+                if (event.key === " ") event.preventDefault();
+                onSelectConversation(conv.id);
+              }}
             >
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "6px" }}>
                 <h4 style={{ fontSize: "0.95rem" }}>{conv.title}</h4>

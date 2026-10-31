@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from "react";
 import { api } from "../api.js";
 import { chainMutation, currentAuthGeneration, MUTATION_CANCELLED } from "../mutation-order.js";
 import { FolderBrowser } from "./FolderBrowser.js";
+import { ModalOverlay } from "./ModalOverlay.js";
 import type { ProjectWithStats } from "@caw/contracts";
 
 interface ProjectsViewProps {
@@ -39,6 +40,30 @@ const renameFlights = new Map<string, { desired: string; pending: { label: strin
 const favoriteFlights = new Map<string, { desired: boolean; base: boolean; pending: boolean | null }>();
 
 /**
+ * Projects whose DELETE has been sent and not yet settled.
+ *
+ * Module scope, like the rename and favorite flights: the delete button lives on the
+ * project row, and a dialog can be cancelled and reopened — from the same mount or a
+ * remount after Back/Settings — while the request is still open. A confirm pressed
+ * again then finds the row already being deleted instead of sending a second DELETE,
+ * which would come back 404 and tell the user their successful delete failed. Keyed
+ * per project, so an in-flight delete of one project never blocks another (F06).
+ */
+const deletingProjects = new Set<string>();
+
+/**
+ * Projects this client has already successfully deleted, by id.
+ *
+ * A duplicate DELETE of a project we just removed comes back 404, and the server
+ * reports every missing project with the same `not_found` code — it cannot tell
+ * "our duplicate" from "another tab deleted it" or "the row was stale". This set
+ * is the only evidence that separates them, so the 404 tolerance is keyed on it
+ * instead of on the status alone. Module scope like `deletingProjects`, and
+ * cleared with it at the auth boundary.
+ */
+const deletedProjects = new Set<string>();
+
+/**
  * Drops every module-scope flight recorded for projects: called at the auth
  * boundary (logout, or the probe finding no session) so intents submitted under
  * one session are never replayed under the next one, and so a flight left hung
@@ -49,6 +74,8 @@ const favoriteFlights = new Map<string, { desired: boolean; base: boolean; pendi
 export function resetProjectMutationState(): void {
   renameFlights.clear();
   favoriteFlights.clear();
+  deletingProjects.clear();
+  deletedProjects.clear();
 }
 
 /**
@@ -156,17 +183,23 @@ export function ProjectsView({ onSelectProject, onOpenSettings }: ProjectsViewPr
   const labelRevisionRef = useRef(0);
   const [deletingProject, setDeletingProject] = useState<ProjectWithStats | null>(null);
   const deleteOperationRef = useRef<object | null>(null);
+  /**
+   * The project id whose DELETE this view has open, if any. Confirm is disabled for
+   * that row only, so an in-flight delete of one project never blocks another's
+   * confirm (F06). The cross-mount guard is the module-scope deletingProjects set.
+   */
+  const [deletingId, setDeletingId] = useState<string | null>(null);
 
   const loadProjects = async () => {
-    setLoading(true);
     const seq = ++listSeqRef.current;
     const epoch = favoriteEpochRef.current;
+    setLoading(true);
     const res = await api.listProjects();
-    setLoading(false);
-    // Drop a superseded snapshot. A snapshot taken before a favorite settled still
-    // carries the rest of the list (create/rename/delete results), so keep it and
-    // overlay the star column with the values the favorite path last applied.
+    // A superseded response has nothing to say about the list on screen: it must not
+    // clear the spinner of the read the user is actually waiting on (F07), nor
+    // repaint with its stale snapshot. Both belong to the request that owns `seq`.
     if (seq !== listSeqRef.current) return;
+    setLoading(false);
     if (res.ok) {
       setListReadOk(true);
       setProjects(epoch === favoriteEpochRef.current
@@ -431,13 +464,45 @@ export function ProjectsView({ onSelectProject, onOpenSettings }: ProjectsViewPr
 
   const handleDeleteProject = async () => {
     if (!deletingProject) return;
+    const projectId = deletingProject.id;
     const token = deleteOperationRef.current;
-    const res = await api.deleteProject(deletingProject.id);
-    if (res.ok) {
-      if (deleteOperationRef.current === token) setDeletingProject(null);
-      loadProjects();
-    } else if (deleteOperationRef.current === token) {
-      setError(res.error.message);
+    // One DELETE per project at a time. Confirm is disabled while the request is
+    // open, but the dialog can also be cancelled and reopened — here or after a
+    // remount — so the module-scope set is the guard, not the button state alone: a
+    // second request would target a row the server is already removing and come back
+    // 404 (F06). Attaching to the request in flight still shows the pending state.
+    if (deletingProjects.has(projectId)) {
+      setDeletingId(projectId);
+      return;
+    }
+    deletingProjects.add(projectId);
+    setDeletingId(projectId);
+    try {
+      const res = await api.deleteProject(projectId);
+      // The guard stays held until the outcome is interpreted: releasing it before
+      // reading `res` would reopen the window a Confirm click slips through.
+      if (res.ok) {
+        deletedProjects.add(projectId);
+        // Close the dialog by the project it shows, not by the token that opened it: a
+        // dialog cancelled and reopened on the same project is still a dialog about a
+        // row that no longer exists, and leaving it open would offer to delete it again.
+        setDeletingProject((current) => (current && current.id === projectId ? null : current));
+        void loadProjects();
+      } else if (res.error.code === "not_found" && deletedProjects.has(projectId)) {
+        // A duplicate of a DELETE this client already completed successfully: the
+        // intended end state holds, so this is not a failure. Any other 404 — a
+        // first attempt for a row the server never had, or one another tab removed —
+        // is reported, because this app did not perform that delete.
+        setDeletingProject((current) => (current && current.id === projectId ? null : current));
+        void loadProjects();
+      } else if (deleteOperationRef.current === token) {
+        setError(res.error.message);
+      }
+    } finally {
+      deletingProjects.delete(projectId);
+      // Only release the row that owns this request: another project's delete may
+      // have started meanwhile, and it still owns the disabled Confirm.
+      setDeletingId((current) => (current === projectId ? null : current));
     }
   };
 
@@ -517,11 +582,31 @@ export function ProjectsView({ onSelectProject, onOpenSettings }: ProjectsViewPr
           {projects
             .sort((a, b) => (b.favorite ? 1 : 0) - (a.favorite ? 1 : 0))
             .map((project) => (
+              // The card is a navigation control, so it must be a tab stop with
+              // button semantics. It stays a div because it holds its own controls
+              // (star, Rename, Delete) and heading content: a <button> would nest
+              // interactive elements and break those. Styling comes from the
+              // existing [role="button"] hit-area rule in styles.css.
               <div
                 key={project.id}
                 className="card"
+                role="button"
+                tabIndex={0}
+                // The card's name from content would be every descendant's text run
+                // together — including the star, Rename and Delete labels — so the
+                // name is stated: the control opens this project, nothing else.
+                aria-label={`Open ${project.label}`}
                 style={{ cursor: "pointer", transition: "border-color 0.15s" }}
                 onClick={() => onSelectProject(project.id)}
+                onKeyDown={(event) => {
+                  // Enter/Space landing on a nested control belongs to that control:
+                  // without this check the star or Rename would also open the project.
+                  if (event.target !== event.currentTarget) return;
+                  if (event.key !== "Enter" && event.key !== " ") return;
+                  // Space scrolls the page by default; activation owns the keystroke.
+                  if (event.key === " ") event.preventDefault();
+                  onSelectProject(project.id);
+                }}
               >
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: "6px" }}>
                   <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
@@ -594,9 +679,13 @@ export function ProjectsView({ onSelectProject, onOpenSettings }: ProjectsViewPr
 
       {/* Rename Modal */}
       {editingProject && (
-        <div className="modal-overlay">
+        <ModalOverlay
+          onClose={() => setEditingProject(null)}
+          aria-labelledby="rename-project-title"
+          overlayProps={{ className: "modal-overlay" }}
+        >
           <div className="modal-content">
-            <h3 style={{ marginBottom: "12px" }}>Rename Project Label</h3>
+            <h3 id="rename-project-title" style={{ marginBottom: "12px" }}>Rename Project Label</h3>
             <p style={{ fontSize: "0.85rem", color: "var(--text-muted)", marginBottom: "12px" }}>
               Display label only. Renaming never touches the filesystem.
             </p>
@@ -615,14 +704,18 @@ export function ProjectsView({ onSelectProject, onOpenSettings }: ProjectsViewPr
               </div>
             </form>
           </div>
-        </div>
+        </ModalOverlay>
       )}
 
       {/* Delete Confirmation Modal */}
       {deletingProject && (
-        <div className="modal-overlay">
+        <ModalOverlay
+          onClose={() => setDeletingProject(null)}
+          aria-labelledby="delete-project-title"
+          overlayProps={{ className: "modal-overlay" }}
+        >
           <div className="modal-content">
-            <h3 style={{ marginBottom: "12px", color: "var(--danger-text)" }}>Delete Project</h3>
+            <h3 id="delete-project-title" style={{ marginBottom: "12px", color: "var(--danger-text)" }}>Delete Project</h3>
             <p style={{ marginBottom: "16px", fontSize: "0.95rem" }}>
               Are you sure you want to delete <strong>{deletingProject.label}</strong>?
             </p>
@@ -631,12 +724,17 @@ export function ProjectsView({ onSelectProject, onOpenSettings }: ProjectsViewPr
             </p>
             <div style={{ display: "flex", justifyContent: "flex-end", gap: "8px" }}>
               <button type="button" onClick={() => setDeletingProject(null)}>Cancel</button>
-              <button type="button" className="danger" onClick={handleDeleteProject}>
+              <button
+                type="button"
+                className="danger"
+                disabled={deletingId === deletingProject.id}
+                onClick={handleDeleteProject}
+              >
                 Confirm Delete
               </button>
             </div>
           </div>
-        </div>
+        </ModalOverlay>
       )}
     </div>
   );
