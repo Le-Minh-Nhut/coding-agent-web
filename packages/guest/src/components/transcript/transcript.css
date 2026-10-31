@@ -91,6 +91,12 @@
   border-radius: var(--radius-sm);
 }
 
+.tr-msg-skip {
+  color: var(--fg-faint);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+}
+
 /* ---- chips & badges ---- */
 
 .tr-badge {

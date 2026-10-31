@@ -131,7 +131,10 @@ export const Composer = memo(function Composer({
   queuedMessageCount,
 }: ComposerProps): ReactNode {
   const [text, setText] = useState("");
+  const [sendError, setSendError] = useState<string | null>(null);
   const taRef = useRef<HTMLTextAreaElement | null>(null);
+  /** True from the first press until that send settles: see the re-entry guard in `send`. */
+  const sendingRef = useRef(false);
   const { composingRef, onCompositionStart, onCompositionEnd } =
     useCompositionGuard();
 
@@ -148,8 +151,35 @@ export const Composer = memo(function Composer({
   const send = useCallback((): void => {
     const trimmed = text.trim();
     if (!trimmed || !live || readOnly) return;
-    client.sendPrompt(trimmed);
-    setText("");
+    // One submission at a time: the draft now survives until delivery is known, so
+    // `canSend` stays true for the whole round trip and a second Enter (or a click on
+    // Send) would queue the same prompt twice. The guard, not a timer, makes the
+    // second press a no-op, and is released when the send settles so a refusal can be
+    // retried.
+    if (sendingRef.current) return;
+    sendingRef.current = true;
+    // Clear only once delivery is known: `sendPrompt` resolves true only when the
+    // frame actually reaches the wire (or the queue flushed to it), and false when
+    // it was refused or dropped by a terminal close — so a draft is never destroyed
+    // by a frame that will not be sent.
+    const submitted = trimmed;
+    void Promise.resolve(client.sendPrompt(submitted))
+      .then(
+        (accepted) => {
+          if (accepted) {
+            // The answer can arrive long after the send (a queued frame resolves when
+            // the connection flushes), so never clear text typed since.
+            setText((current) => (current.trim() === submitted ? "" : current));
+            setSendError(null);
+            return;
+          }
+          setSendError("prompt not sent — press send to retry");
+        },
+        () => setSendError("prompt not sent — press send to retry"),
+      )
+      .finally(() => {
+        sendingRef.current = false;
+      });
   }, [client, live, readOnly, text]);
 
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>): void => {
@@ -235,7 +265,10 @@ export const Composer = memo(function Composer({
           ref={taRef}
           className="sh-composer-input"
           value={text}
-          onChange={(e) => setText(e.target.value)}
+          onChange={(e) => {
+            setText(e.target.value);
+            if (sendError !== null) setSendError(null);
+          }}
           onKeyDown={onKeyDown}
           onCompositionStart={onCompositionStart}
           onCompositionEnd={onCompositionEnd}
@@ -251,6 +284,11 @@ export const Composer = memo(function Composer({
           spellCheck={false}
         />
         <div className="sh-composer-actions">
+          {sendError && (
+            <span className="sh-send-error" role="status">
+              {sendError}
+            </span>
+          )}
           {busy && queued > 0 && (
             <span className="sh-queued">
               <span className="sh-queued-label">queued </span>×{queued}

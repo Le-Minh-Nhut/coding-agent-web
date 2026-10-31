@@ -11,6 +11,7 @@ import {
   Row,
 } from "../parts";
 import type { ToolRenderer, ToolRenderProps } from "../types";
+import { safeHref } from "../../components/transcript/Markdown";
 import {
   detailsRecord,
   isRecord,
@@ -67,10 +68,12 @@ function SourceRow({
   const title = str(source.title)?.trim() || url || "Untitled";
   const domain = url ? getDomain(url) : "";
   const age = formatAge(source.ageSeconds) || (str(source.publishedDate) ?? "");
+  // Search results are untrusted: only an allowlisted scheme may become a link.
+  const href = url ? safeHref(url) : null;
   return (
     <Row k={String(index + 1)}>
-      {url ? (
-        <a href={url} rel="noreferrer" target="_blank">
+      {href !== null ? (
+        <a href={href} rel="noopener noreferrer" target="_blank">
           {title}
         </a>
       ) : (

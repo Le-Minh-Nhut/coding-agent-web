@@ -19,8 +19,27 @@ const RELAY_CLOSE_REASONS: Record<number, string> = {
 
 const BACKOFF_BASE_MS = 1_000;
 const BACKOFF_MAX_MS = 30_000;
-/** Max enveloped frames buffered while a reconnect is pending; overflow is dropped. */
+/**
+ * Max enveloped frames buffered while a reconnect/`welcome` is pending. The cap
+ * refuses the frame that would overflow it; it never kills the socket, because a
+ * full queue says nothing about whether the connection is recoverable.
+ */
 const MAX_PENDING_SENDS = 256;
+
+/** A frame held back until the host's `welcome`; `settle(true)` means it reached the wire. */
+interface PendingSend {
+	envelope: Uint8Array<ArrayBuffer>;
+	settle: (delivered: boolean) => void;
+}
+
+/** The repo targets Node 20, which has no `Promise.withResolvers`. */
+function deferred<T>(): { promise: Promise<T>; settle: (value: T) => void } {
+	let settle!: (value: T) => void;
+	const promise = new Promise<T>((resolve) => {
+		settle = resolve;
+	});
+	return { promise, settle };
+}
 
 export interface CollabSocketOptions {
 	/** wss://host[:port]/r/<roomId> — no query string. */
@@ -46,12 +65,14 @@ export class CollabSocket {
 	#closed = false;
 	/** Allows a previously joined guest to outlive room recreation races. */
 	#retryMissingRoom = false;
+	/** Host answered `hello` with a `welcome`; no other frame may precede it. */
+	#helloAcknowledged = false;
 	/** Serializes seal() so frames hit the wire in send() order. */
 	#sendChain: Promise<void> = Promise.resolve();
 	/** Serializes open() so frames are delivered in arrival order. */
 	#recvChain: Promise<void> = Promise.resolve();
-	/** Envelopes sealed while disconnected, flushed on the next open. */
-	#pendingSends: Uint8Array<ArrayBuffer>[] = [];
+	/** Frames sealed while disconnected/ungreeted, flushed on the next `welcome`. */
+	#pendingSends: PendingSend[] = [];
 
 	constructor(opts: CollabSocketOptions) {
 		this.#opts = opts;
@@ -65,27 +86,40 @@ export class CollabSocket {
 		if (this.#ws || this.#retryTimer) return;
 		this.#closed = false;
 		this.#retryMissingRoom = false;
+		this.#helloAcknowledged = false;
 		this.#attempt = 0;
 		this.#openSocket();
 	}
 
-	send(frame: GuestFrame, targetPeer = 0): void {
-		this.#sendChain = this.#sendChain
-			.then(async () => {
-				if (this.#closed) return;
+	send(frame: GuestFrame, targetPeer = 0): Promise<boolean> {
+		// The caller's answer is per frame, not per seal: it resolves `true` when the
+		// envelope actually reaches the wire (now, or later from the flush) and
+		// `false` when it never will (refused, or discarded by a terminal path).
+		// `true` therefore never means "queued and maybe dropped".
+		const outcome = deferred<boolean>();
+		const step = this.#sendChain.then(async (): Promise<void> => {
+			try {
+				if (this.#closed) return outcome.settle(false);
 				const sealed = await seal(await this.#opts.key, frame);
 				const envelope = packEnvelope(targetPeer, sealed);
 				const ws = this.#ws;
-				if (ws && ws.readyState === WebSocket.OPEN) {
+				// Only `hello` may precede the host's `welcome`: anything sent first
+				// would be dropped (or rejected) by the relay-side handshake.
+				if (ws && ws.readyState === WebSocket.OPEN && (frame.t === "hello" || this.#helloAcknowledged)) {
 					ws.send(envelope);
-					return;
+					return outcome.settle(true);
 				}
-				if (this.#pendingSends.length >= MAX_PENDING_SENDS) return;
-				this.#pendingSends.push(envelope);
-			})
-			.catch(() => {
-				// dropped frame; the socket-level close path reports actionable failures
-			});
+				// The queue is full: refuse THIS frame and keep the socket alive. A full
+				// buffer says nothing about whether the connection can still recover, so
+				// killing it would turn one refused frame into a lost session.
+				if (this.#pendingSends.length >= MAX_PENDING_SENDS) return outcome.settle(false);
+				this.#pendingSends.push({ envelope, settle: outcome.settle });
+			} catch {
+				outcome.settle(false);
+			}
+		});
+		this.#sendChain = step;
+		return outcome.promise;
 	}
 
 	/** Intentional close: clears any retry timer, suppresses reconnect. A later connect() starts fresh. */
@@ -95,7 +129,8 @@ export class CollabSocket {
 		const wasClosed = this.#closed;
 		this.#closed = true;
 		this.#retryMissingRoom = false;
-		this.#pendingSends.length = 0;
+		this.#helloAcknowledged = false;
+		this.#discardPending();
 		const ws = this.#ws;
 		this.#ws = null;
 		if (ws) {
@@ -112,11 +147,12 @@ export class CollabSocket {
 		const ws = new WebSocket(`${this.#opts.wsUrl}?role=${this.#opts.role}`);
 		ws.binaryType = "arraybuffer";
 		this.#ws = ws;
+		this.#helloAcknowledged = false;
 		ws.onopen = () => {
 			if (this.#ws !== ws) return;
 			if (!this.#retryMissingRoom) this.#attempt = 0;
-			for (const envelope of this.#pendingSends) ws.send(envelope);
-			this.#pendingSends.length = 0;
+			// Queued frames stay queued until the host's `welcome`: `onOpen` runs
+			// first so the handshake `hello` is enqueued ahead of them.
 			this.onOpen?.();
 		};
 		ws.onmessage = (event: MessageEvent) => {
@@ -163,6 +199,10 @@ export class CollabSocket {
 					return;
 				}
 				if (this.#ws !== ws) return;
+				if (frame.t === "welcome") {
+					this.#helloAcknowledged = true;
+					this.#flushPending();
+				}
 				this.#retryMissingRoom = false;
 				this.#attempt = 0;
 				this.onFrame?.(frame, envelope.peerId);
@@ -176,7 +216,16 @@ export class CollabSocket {
 		if (this.#closed) return;
 		const fatalReason = RELAY_CLOSE_REASONS[code];
 		const closeReason = fatalReason ?? (reason || `connection lost (code ${code})`);
-		const retryRoom = this.#opts.role === "guest" && (code === 4001 || (code === 4004 && this.#retryMissingRoom));
+		// A 4004 after a 4001 retry means the recreated room never came back:
+		// terminal, not another retry.
+		if (this.#opts.role === "guest" && code === 4004 && this.#retryMissingRoom) {
+			this.#closed = true;
+			this.#retryMissingRoom = false;
+			this.#discardPending();
+			this.onClose?.(closeReason, false);
+			return;
+		}
+		const retryRoom = this.#opts.role === "guest" && code === 4001;
 		if (retryRoom) {
 			this.#retryMissingRoom = true;
 			this.onClose?.(closeReason, true);
@@ -185,7 +234,7 @@ export class CollabSocket {
 		}
 		if (fatalReason !== undefined) {
 			this.#closed = true;
-			this.#pendingSends.length = 0;
+			this.#discardPending();
 			this.onClose?.(fatalReason, false);
 			return;
 		}
@@ -193,12 +242,43 @@ export class CollabSocket {
 		this.#scheduleRetry();
 	}
 
+	/**
+	 * Drain frames queued while disconnected/ungreeted. Called only after the
+	 * host's `welcome`, so the handshake can never be overtaken.
+	 */
+	#flushPending(): void {
+		const ws = this.#ws;
+		if (!ws || ws.readyState !== WebSocket.OPEN) return;
+		const queued = this.#pendingSends;
+		this.#pendingSends = [];
+		for (const pending of queued) {
+			try {
+				ws.send(pending.envelope);
+				pending.settle(true);
+			} catch {
+				// The socket died mid-drain: every caller still learns which frames
+				// reached the wire and which did not.
+				pending.settle(false);
+			}
+		}
+	}
+
+	/**
+	 * Drop every queued frame and tell each caller it was NOT delivered, so a
+	 * draft parked behind a terminal path is restored rather than silently lost.
+	 */
+	#discardPending(): void {
+		const dropped = this.#pendingSends;
+		this.#pendingSends = [];
+		for (const pending of dropped) pending.settle(false);
+	}
+
 	/** Decryption failure: wrong key or corrupted frame. Never reconnect. */
 	#failFatal(reason: string): void {
 		if (this.#closed) return;
 		this.#closed = true;
 		this.#clearRetry();
-		this.#pendingSends.length = 0;
+		this.#discardPending();
 		const ws = this.#ws;
 		this.#ws = null;
 		if (ws) {

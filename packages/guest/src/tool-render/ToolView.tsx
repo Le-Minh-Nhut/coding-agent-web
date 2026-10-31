@@ -2,10 +2,11 @@
  * Tool card chrome + per-tool dispatch. Works in the collab-web app and inside
  * the `<omp-tool-view>` web component embedded in HTML session exports.
  */
-import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
+import { INTENT_FIELD } from "../vendor/wire";
 import type { ReactNode } from "react";
 import { useState } from "react";
 import { resolveToolRenderer } from "./registry";
+import { ToolErrorBoundary } from "./ToolErrorBoundary";
 import type { ToolRenderHost, ToolRenderProps, ToolResultLike } from "./types";
 import { isRecord, replaceTabs, stripAnsi } from "./util";
 import "./tool-render.css";
@@ -70,6 +71,15 @@ function executeXdevDispatch(props: ToolViewProps): XdevDispatch | null {
 }
 
 export function ToolView(props: ToolViewProps): ReactNode {
+  return (
+    <ToolErrorBoundary name={props.name}>
+      <ToolCardView {...props} />
+    </ToolErrorBoundary>
+  );
+}
+
+/** Inner card: any throw here degrades to the boundary's note, not a blank app. */
+function ToolCardView(props: ToolViewProps): ReactNode {
   const [open, setOpen] = useState(props.defaultOpen ?? false);
   const xdev = executeXdevDispatch(props);
   const { args, intent: argIntent } = normalizeArgs(props.args);

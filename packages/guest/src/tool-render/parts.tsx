@@ -7,10 +7,12 @@ import { useMemo, useState } from "react";
 import type { ToolRenderHost, ToolResultImage, ToolResultLike } from "./types";
 import {
   getHljs,
+  isRasterImageMime,
   replaceTabs,
   resultImagesOf,
   resultTextOf,
   shortenPath,
+  skippedImagesOf,
   stripAnsi,
 } from "./util";
 
@@ -239,6 +241,9 @@ export function ResultText({
 }
 
 function openImage(img: ToolResultImage): void {
+  // Raster-only: `resultImagesOf` already filtered, but keep the guard local so
+  // a future caller cannot navigate to a scriptable blob.
+  if (!isRasterImageMime(img.mimeType)) return;
   try {
     const bin = atob(img.data);
     const bytes = new Uint8Array(bin.length);
@@ -251,32 +256,44 @@ function openImage(img: ToolResultImage): void {
   }
 }
 
-/** Thumbnails for every image block in a result; click opens full size. */
+/** Thumbnails for every raster image block in a result; click opens full size. */
 export function ResultImages({
   result,
 }: {
   result: ToolResultLike | undefined;
 }): ReactNode {
   const images = resultImagesOf(result);
-  if (images.length === 0) return null;
+  const skipped = skippedImagesOf(result);
+  if (images.length === 0 && skipped.length === 0) return null;
   return (
-    <div className="tv-imgs">
-      {images.map((img, i) => (
-        <button
-          key={i}
-          type="button"
-          style={{ all: "unset", display: "inline-flex" }}
-          onClick={() => openImage(img)}
-          aria-label={`Open tool result image ${i + 1}`}
-        >
-          <img
-            className="tv-img"
-            src={`data:${img.mimeType};base64,${img.data}`}
-            alt={`tool result ${i + 1}`}
-          />
-        </button>
-      ))}
-    </div>
+    <>
+      {images.length > 0 && (
+        <div className="tv-imgs">
+          {images.map((img, i) => (
+            <button
+              key={i}
+              type="button"
+              style={{ all: "unset", display: "inline-flex" }}
+              onClick={() => openImage(img)}
+              aria-label={`Open tool result image ${i + 1}`}
+            >
+              <img
+                className="tv-img"
+                src={`data:${img.mimeType};base64,${img.data}`}
+                alt={`tool result ${i + 1}`}
+              />
+            </button>
+          ))}
+        </div>
+      )}
+      {skipped.length > 0 && (
+        <div className="tv-faint">
+          {skipped.map((block, i) => (
+            <div key={i}>[image not displayed: {block.mimeType}]</div>
+          ))}
+        </div>
+      )}
+    </>
   );
 }
 

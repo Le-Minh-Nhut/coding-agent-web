@@ -59,7 +59,8 @@ function normalizeRelayOrigin(relayUrl: string): { origin: string } | { error: s
   try {
     url = new URL(relayUrl);
   } catch {
-    return { error: `Invalid relay URL: ${relayUrl}` };
+    // Never echo the submitted URL: a collab link carries the room secret.
+    return { error: "Invalid relay URL" };
   }
   let scheme: string;
   switch (url.protocol) {
@@ -72,7 +73,8 @@ function normalizeRelayOrigin(relayUrl: string): { origin: string } | { error: s
       scheme = "ws:";
       break;
     default:
-      return { error: `Unsupported relay URL scheme: ${url.protocol}` };
+      // Static text: the submitted URL carries the room secret.
+      return { error: "Unsupported relay URL scheme" };
   }
   if (scheme === "ws:" && !LOCAL_HOSTNAMES[url.hostname]) {
     return { error: "relay link must be wss:// (plain ws:// is only allowed for localhost)" };
@@ -120,7 +122,8 @@ export function parseCollabLink(
   try {
     url = new URL(text);
   } catch {
-    return { error: `Invalid collab link: ${link}` };
+    // The submitted link must never be echoed (it carries the room key).
+    return { error: "Invalid collab link" };
   }
 
   if ((url.protocol === "http:" || url.protocol === "https:") && url.hash) {

@@ -17,7 +17,7 @@ import {
 } from "react";
 import type { ActiveTool, ConnectionPhase } from "../../lib/client";
 import { fmtTokens } from "../../lib/format";
-import type { ToolRenderHost } from "../../tool-render";
+import { isRasterImageMime, type ToolRenderHost } from "../../tool-render";
 import { Markdown, StreamingMarkdown } from "./Markdown";
 import { ToolCard } from "./ToolCard";
 import "./transcript.css";
@@ -125,17 +125,26 @@ function MsgContent({
   return (
     <>
       {content.map((block, i) => {
+        // Partial/malformed wire content: a null or primitive entry must be
+        // skipped, not dereferenced.
+        if (typeof block !== "object" || block === null) return null;
         switch (block.type) {
           case "text":
             return <Markdown key={i} text={block.text} />;
           case "image":
-            return (
+            // Same policy as the tool-result thumbnails: a non-raster MIME
+            // (SVG, HTML, unknown) degrades to a note instead of an <img>.
+            return isRasterImageMime(block.mimeType) ? (
               <img
                 key={i}
                 className="tr-msg-img"
                 src={`data:${block.mimeType};base64,${block.data}`}
                 alt="attachment"
               />
+            ) : (
+              <div key={i} className="tr-msg-skip">
+                [image not displayed: {block.mimeType}]
+              </div>
             );
           default:
             return null;
@@ -160,6 +169,7 @@ function AssistantBody({
   host?: ToolRenderHost;
 }): ReactNode {
   const blocks = message.content.map((block, i) => {
+    if (typeof block !== "object" || block === null) return null;
     switch (block.type) {
       case "thinking":
         return <ThinkingBlock key={i} text={block.thinking} />;
@@ -228,6 +238,7 @@ function entryRowEqual(prev: EntryRowProps, next: EntryRowProps): boolean {
   const e = next.entry;
   if (e.type !== "message" || e.message.role !== "assistant") return true;
   for (const block of e.message.content) {
+    if (typeof block !== "object" || block === null) continue;
     if (block.type !== "toolCall") continue;
     if (prev.results.get(block.id) !== next.results.get(block.id)) return false;
     if (prev.active.get(block.id) !== next.active.get(block.id)) return false;
@@ -431,6 +442,7 @@ export function Transcript(props: TranscriptProps): ReactNode {
       if (entry.type !== "message" || entry.message.role !== "assistant")
         continue;
       for (const block of entry.message.content) {
+        if (typeof block !== "object" || block === null) continue;
         if (block.type === "toolCall") ids.add(block.id);
       }
     }
@@ -444,7 +456,11 @@ export function Transcript(props: TranscriptProps): ReactNode {
       if (committedToolIds.has(tool.toolCallId)) continue;
       if (
         stream?.content.some(
-          (block) => block.type === "toolCall" && block.id === tool.toolCallId,
+          (block) =>
+            typeof block === "object" &&
+            block !== null &&
+            block.type === "toolCall" &&
+            block.id === tool.toolCallId,
         )
       )
         continue;

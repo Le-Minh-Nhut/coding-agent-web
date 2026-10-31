@@ -151,35 +151,70 @@ export function languageFromPath(filePath: string): string | null {
 
 /** Joined text blocks of a tool result ("" when absent). */
 export function resultTextOf(result: ToolResultLike | undefined): string {
-  if (!result) return "";
+  if (!result || !Array.isArray(result.content)) return "";
   const parts: string[] = [];
   for (const block of result.content) {
-    if (
-      block.type === "text" &&
-      typeof (block as { text?: unknown }).text === "string"
-    ) {
-      parts.push((block as { text: string }).text);
+    // Wire JSON is only partially trusted: a null/primitive entry must not
+    // throw out of the renderer (contract in ./types.ts).
+    if (!isRecord(block)) continue;
+    if (block.type === "text" && typeof block.text === "string") {
+      parts.push(block.text);
     }
   }
   return parts.join("\n");
 }
 
+/**
+ * RASTER image types only. SVG and text/html are scriptable when navigated to
+ * as a top-level document, so they must never become a blob/data URL target.
+ */
+const RASTER_IMAGE_MIME_TYPES: Record<string, true> = {
+  "image/png": true,
+  "image/jpeg": true,
+  "image/gif": true,
+  "image/webp": true,
+};
+
+export function isRasterImageMime(mimeType: unknown): boolean {
+  return (
+    typeof mimeType === "string" &&
+    RASTER_IMAGE_MIME_TYPES[mimeType.trim().toLowerCase()] === true
+  );
+}
+
 export function resultImagesOf(
   result: ToolResultLike | undefined,
 ): ToolResultImage[] {
-  if (!result) return [];
+  if (!result || !Array.isArray(result.content)) return [];
   const images: ToolResultImage[] = [];
   for (const block of result.content) {
-    const img = block as Partial<ToolResultImage>;
+    if (!isRecord(block)) continue;
+    const img = block as unknown as Partial<ToolResultImage>;
     if (
       block.type === "image" &&
-      typeof img.data === "string" &&
-      typeof img.mimeType === "string"
+      isRasterImageMime(img.mimeType) &&
+      typeof img.data === "string"
     ) {
       images.push(img as ToolResultImage);
     }
   }
   return images;
+}
+
+/** Image blocks whose MIME is not renderable raster: shown as a note, never an <img>. */
+export function skippedImagesOf(
+  result: ToolResultLike | undefined,
+): ToolResultImage[] {
+  if (!result || !Array.isArray(result.content)) return [];
+  const skipped: ToolResultImage[] = [];
+  for (const block of result.content) {
+    if (!isRecord(block) || block.type !== "image") continue;
+    const mimeType = typeof block.mimeType === "string" ? block.mimeType : "";
+    if (!isRasterImageMime(mimeType)) {
+      skipped.push({ type: "image", data: "", mimeType });
+    }
+  }
+  return skipped;
 }
 
 /** `result.details` when it is a plain object; renderers narrow field-by-field. */

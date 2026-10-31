@@ -213,8 +213,13 @@ export class GuestClient {
 		return this.#snapshot;
 	}
 
-	sendPrompt(text: string): void {
-		this.#socket.send({ t: "prompt", text });
+	/**
+	 * Returns whether the prompt was handed to the socket or queued for the next
+	 * connect. `false` means the frame was refused (closed socket / full queue);
+	 * the caller must keep the user's draft and say so.
+	 */
+	sendPrompt(text: string): Promise<boolean> {
+		return this.#socket.send({ t: "prompt", text });
 	}
 
 	sendUiResponse(reqId: number, value?: CollabUiResponseValue): void {
