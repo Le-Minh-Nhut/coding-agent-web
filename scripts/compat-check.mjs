@@ -39,7 +39,10 @@ check(
   ompVersion.ok ? "ok" : "missing",
   ompVersion.ok ? ompVersion.stdout : ompVersion.stderr.split("\n")[0],
 );
-const parsedVersion = /^omp\/(\S+)/.exec(ompVersion.stdout)?.[1] ?? null;
+export function parseOmpVersion(stdout) {
+  return /(?:^|\s)omp[\s/v]+([0-9A-Za-z.-]+)/i.exec(stdout.trim())?.[1] ?? null;
+}
+const parsedVersion = parseOmpVersion(ompVersion.stdout);
 check("omp version parsed", parsedVersion ? "ok" : "warn", parsedVersion ?? "unrecognised --version output");
 
 const ompHelp = await capture("omp", ["--help"]);
@@ -77,7 +80,10 @@ export function evaluateCollabList(parsed) {
       detail: `version=${parsed?.version ?? "unknown"} (expected 1)`,
     };
   }
-  const hosts = Array.isArray(parsed?.hosts) ? parsed.hosts : [];
+  if (!Array.isArray(parsed?.hosts)) {
+    return { status: "fail", detail: "hosts is not an array" };
+  }
+  const hosts = parsed.hosts;
   if (hosts.length === 0) {
     return {
       status: "warn",
@@ -121,6 +127,14 @@ export function selfCheck() {
   assert.equal(malformedRes.status, "fail");
   assert.match(malformedRes.detail, /missing=/);
 
+  // 2a. Non-array hosts violate the version 1 schema.
+  assert.equal(evaluateCollabList({ version: 1, hosts: null }).status, "fail");
+  assert.equal(evaluateCollabList({ version: 1, hosts: "invalid" }).status, "fail");
+
+  // Production capability parsing accepts each documented OMP version form.
+  assert.equal(parseOmpVersion("omp/18.12.2"), "18.12.2");
+  assert.equal(parseOmpVersion("omp 18.12.2"), "18.12.2");
+  assert.equal(parseOmpVersion("omp v18.12.2"), "18.12.2");
   // 3. Valid host row => ok
   const validRes = evaluateCollabList({ version: 1, hosts: [validHost] });
   assert.equal(validRes.status, "ok");

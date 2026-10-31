@@ -8,7 +8,7 @@ import { createRuntimeSpec, launchWithOverlay } from "../../apps/server/src/serv
 import { buildApp } from "../../apps/server/src/app.js";
 import type { Conversation, NativeSessionSummary } from "@caw/contracts";
 import type { RuntimeLaunchSpec, Supervisor } from "@caw/runtime";
-import type { CollabHost, NativeSessionHistory } from "@caw/omp-adapter";
+import type { CollabHost, NativeSessionHeader, NativeSessionHistory } from "@caw/omp-adapter";
 import type { ServerConfig } from "../../apps/server/src/config.js";
 import type { WorkspacePathPolicy } from "../../apps/server/src/path-policy.js";
 import { createMetadataStore } from "../../apps/server/src/store.js";
@@ -387,7 +387,7 @@ describe("Fastify API security", () => {
     mismatchHeader = true;
     const badHeaderConversation = await store.createConversation({ projectId: project.id, nativeSessionId: "journal-session" });
     const badHeader = await app.inject({ method: "POST", url: `/api/conversations/${badHeaderConversation.id}/actions`, headers, payload: { action: "restart" } });
-    expect(badHeader.statusCode).toBe(409);
+    expect(badHeader.statusCode).toBe(403);
     expect(launchCount).toBe(afterFresh);
     mismatchHeader = false;
 
@@ -425,7 +425,7 @@ describe("Fastify API security", () => {
           if (id === "unreadable-catalog") throw Object.assign(new Error("EACCES: session catalog unreadable"), { code: "EACCES" });
           return id === "journal-session" ? journalPath : null;
         },
-        readHeader: async (path) => path === journalPath ? { sessionId: "journal-session", cwd: dir } : null,
+        readHeader: async (path): Promise<NativeSessionHeader | null> => path === journalPath ? { sessionId: "journal-session", cwd: dir, timestamp: null, version: 3, title: null } : null,
       },
     });
     const project = await store.createProject({ path: dir });
@@ -603,8 +603,22 @@ describe("native session history route", () => {
     expect(foreignResponse.json().error.code).toBe("path_forbidden");
     await app.close();
   });
-});
+  it("returns 403 for path_forbidden from conversation creation and restart", async () => {
+    const supervisor = { start: async (_id: string, spec: RuntimeLaunchSpec) => ({ id: spec.conversationId } as Conversation), stop: async () => { throw new Error("not used"); } } as unknown as Supervisor;
+    const { app, headers, dir, store } = await fixture({
+      supervisor,
+      runtimeSpec: () => { throw Object.assign(new Error("foreign journal"), { code: "path_forbidden" }); },
+    });
+    const project = await store.createProject({ path: dir });
+    const create = await app.inject({ method: "POST", url: `/api/projects/${project.id}/conversations`, headers, payload: {} });
+    expect(create.statusCode).toBe(403);
+    const conversation = await store.createConversation({ projectId: project.id });
+    const restart = await app.inject({ method: "POST", url: `/api/conversations/${conversation.id}/actions`, headers, payload: { action: "restart" } });
+    expect(restart.statusCode).toBe(403);
+    await app.close();
+  });
 
+});
 describe("native session host availability", () => {
   const session = { sessionId: "native-listed", path: "/workspace/session.jsonl", cwd: "/workspace", title: null, updatedAt: null, live: true as const, tracked: false };
   const host = { instanceId: "host-listed", generation: 1, pid: 12, sessionId: "native-listed", sessionName: null, cwd: "/workspace", model: null, startedAt: null, participants: 0, relayConnected: true, inputRequired: null, busy: null, access: "view" as const };
@@ -620,6 +634,14 @@ describe("native session host availability", () => {
     expect(response.statusCode).toBe(200);
     expect(response.json().data.map((row: NativeSessionSummary) => [row.sessionId, row.hasCollabHost])).toEqual([["native-listed", true], ["no-host", false]]);
     expect(registryReads).toBe(1);
+    await app.close();
+  });
+  it("preserves host presence when relay status is unknown", async () => {
+    const { app, headers, dir, store } = await fixture({ listNativeSessions: async () => [session], listCollabHosts: async () => [{ ...host, relayConnected: null }] });
+    const project = await store.createProject({ path: dir });
+    const response = await app.inject({ method: "GET", url: `/api/projects/${project.id}/sessions`, headers });
+    expect(response.statusCode).toBe(200);
+    expect(response.json().data[0]).toMatchObject({ hasCollabHost: false, relayConnected: null, collabHostReported: true });
     await app.close();
   });
 

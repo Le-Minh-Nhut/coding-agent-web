@@ -132,9 +132,11 @@ export const Composer = memo(function Composer({
 }: ComposerProps): ReactNode {
   const [text, setText] = useState("");
   const [sendError, setSendError] = useState<string | null>(null);
+  const [uiResponseError, setUiResponseError] = useState<string | null>(null);
   const taRef = useRef<HTMLTextAreaElement | null>(null);
   /** True from the first press until that send settles: see the re-entry guard in `send`. */
   const sendingRef = useRef(false);
+  const answeringRef = useRef(false);
   const { composingRef, onCompositionStart, onCompositionEnd } =
     useCompositionGuard();
 
@@ -182,6 +184,25 @@ export const Composer = memo(function Composer({
       });
   }, [client, live, readOnly, text]);
 
+  const submitUiResponse = useCallback(
+    (reqId: number, value?: string): void => {
+      if (answeringRef.current) return;
+      answeringRef.current = true;
+      setUiResponseError(null);
+      void Promise.resolve(client.sendUiResponse(reqId, value))
+        .then(
+          (accepted) => {
+            if (!accepted) setUiResponseError("response not sent — retry or check connection");
+          },
+          () => setUiResponseError("response not sent — retry or check connection"),
+        )
+        .finally(() => {
+          answeringRef.current = false;
+        });
+    },
+    [client],
+  );
+
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>): void => {
     if (shouldSubmitOnEnter(e, composingRef.current)) {
       e.preventDefault();
@@ -204,7 +225,7 @@ export const Composer = memo(function Composer({
                   key={`${uiRequest.reqId}-${index}-${label}`}
                   type="button"
                   className={`sh-ask-option${checked ? " sh-ask-option-checked" : ""}`}
-                  onClick={() => client.sendUiResponse(uiRequest.reqId, label)}
+                  onClick={() => submitUiResponse(uiRequest.reqId, label)}
                 >
                   <span className="sh-ask-option-marker">
                     {uiRequest.selectionMarker === "checkbox"
@@ -231,17 +252,22 @@ export const Composer = memo(function Composer({
           <AskEditor
             key={uiRequest.reqId}
             prefill={uiRequest.prefill}
-            onSubmit={(value) => client.sendUiResponse(uiRequest.reqId, value)}
+            onSubmit={(value) => submitUiResponse(uiRequest.reqId, value)}
           />
         )}
         <div className="sh-composer-actions sh-ask-actions">
           <button
             type="button"
             className="sh-btn"
-            onClick={() => client.sendUiResponse(uiRequest.reqId)}
+            onClick={() => submitUiResponse(uiRequest.reqId)}
           >
             Cancel
           </button>
+          {uiResponseError && (
+            <span className="sh-send-error" role="status">
+              {uiResponseError}
+            </span>
+          )}
           {busy && (
             <button
               type="button"

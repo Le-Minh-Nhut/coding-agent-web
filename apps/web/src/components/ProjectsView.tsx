@@ -329,7 +329,9 @@ export function ProjectsView({ onSelectProject, onOpenSettings }: ProjectsViewPr
     // the text on screen an unsaved label for a different project; the success of the
     // submitted create must neither close the form nor clear that draft (V20-06).
     const revision = labelRevisionRef.current;
+    const lifetime = currentAuthGeneration();
     const res = await api.createProject(selectedPath, newLabel.trim());
+    if (lifetime !== currentAuthGeneration()) return;
     if (createOperationRef.current === token) setCreating(false);
     if (res.ok) {
       if (createOperationRef.current === token && labelRevisionRef.current === revision) {
@@ -477,8 +479,10 @@ export function ProjectsView({ onSelectProject, onOpenSettings }: ProjectsViewPr
     }
     deletingProjects.add(projectId);
     setDeletingId(projectId);
+    const lifetime = currentAuthGeneration();
     try {
       const res = await api.deleteProject(projectId);
+      if (lifetime !== currentAuthGeneration()) return;
       // The guard stays held until the outcome is interpreted: releasing it before
       // reading `res` would reopen the window a Confirm click slips through.
       if (res.ok) {
@@ -499,10 +503,12 @@ export function ProjectsView({ onSelectProject, onOpenSettings }: ProjectsViewPr
         setError(res.error.message);
       }
     } finally {
-      deletingProjects.delete(projectId);
-      // Only release the row that owns this request: another project's delete may
-      // have started meanwhile, and it still owns the disabled Confirm.
-      setDeletingId((current) => (current === projectId ? null : current));
+      if (lifetime === currentAuthGeneration()) {
+        deletingProjects.delete(projectId);
+        // Only release the row that owns this request: another project's delete may
+        // have started meanwhile, and it still owns the disabled Confirm.
+        setDeletingId((current) => (current === projectId ? null : current));
+      }
     }
   };
 

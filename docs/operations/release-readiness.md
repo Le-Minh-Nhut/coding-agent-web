@@ -8,10 +8,10 @@ observed on this machine; nothing is carried over from an author's summary.
 | Gate | Command | Result |
 | --- | --- | --- |
 | Typecheck | `pnpm -r typecheck` | 0 errors |
-| Test suite | `npx vitest run` | **334 passed**, 8 skipped |
+| Test suite | `npx vitest run` | See round-28 verification |
 | Real OMP compatibility | `CAW_COMPAT=1 npx vitest run tests/compat` | **8 passed** |
-| Browser E2E, 390×844 | `TMPDIR=$HOME/.cache npx playwright test --project=chromium` | **24 passed** |
-| End-to-end acceptance | `node scripts/acceptance-ui-drives-agent.mjs --base … --token-file … --root …` | **7/7 PASS** |
+| Browser E2E, 390×844 | `TMPDIR=$HOME/.cache npx playwright test --project=chromium` | See round-28 verification |
+| End-to-end acceptance | `node scripts/acceptance-ui-drives-agent.mjs --base … --tmp … --root …/roots --password <secret>` | **7/7 PASS** |
 
 The 8 skipped tests are the opt-in real-agent suite plus the WebKit project, both
 deliberately gated so a normal run spawns no agent and spends no credits.

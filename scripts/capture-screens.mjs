@@ -9,6 +9,7 @@ const result = spawnSync("npx", ["playwright", "test", "tests/e2e/screens.spec.t
   cwd: repoRoot,
   stdio: "inherit",
   env: process.env,
+  shell: false,
 });
 
 // A launch failure (`npx` missing, ENOENT) leaves `status` null; without this

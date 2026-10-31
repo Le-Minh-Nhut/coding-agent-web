@@ -27,7 +27,7 @@ import type {
 } from "@oh-my-pi/pi-wire";
 import { importRoomKey } from "./codec";
 import { COLLAB_PROTO, encodeBase64Url, parseCollabLink } from "./link";
-import { CollabSocket } from "./socket";
+import { CollabSocket, deferred } from "./socket";
 
 export type ConnectionPhase = "connecting" | "waiting" | "live" | "reconnecting" | "ended";
 
@@ -186,13 +186,9 @@ export class GuestClient {
 			this.#endedReason = null;
 			this.#commit();
 		}
+		this.#welcomed = false;
+		this.#armWelcomeTimer();
 		this.#socket.connect();
-		if (!this.#welcomed && this.#welcomeTimer === null) {
-			this.#welcomeTimer = setTimeout(() => {
-				this.#welcomeTimer = null;
-				if (!this.#welcomed) this.#end("timed out waiting for the host's welcome");
-			}, WELCOME_TIMEOUT_MS);
-		}
 	}
 
 	close(): void {
@@ -222,20 +218,26 @@ export class GuestClient {
 		return this.#socket.send({ t: "prompt", text });
 	}
 
-	sendUiResponse(reqId: number, value?: CollabUiResponseValue): void {
-		this.#socket.send({ t: "ui-response", reqId, value });
+	async sendUiResponse(reqId: number, value?: CollabUiResponseValue): Promise<boolean> {
+		const sent = await this.#socket.send({ t: "ui-response", reqId, value });
+		if (!sent) {
+			this.#pushNotice("error", "response not sent — connection lost or offline");
+			this.#commit();
+			return false;
+		}
 		if (this.#uiRequest?.reqId === reqId) {
 			this.#showNextUiRequest();
 			this.#commit();
 		}
+		return true;
 	}
 
 	sendAbort(): void {
 		this.#socket.send({ t: "abort" });
 	}
 
-	sendAgentCmd(cmd: "chat" | "kill" | "revive", agentId: string, text?: string): void {
-		this.#socket.send({ t: "agent-cmd", cmd, agentId, text });
+	sendAgentCmd(cmd: "chat" | "kill" | "revive", agentId: string, text?: string): Promise<boolean> {
+		return this.#socket.send({ t: "agent-cmd", cmd, agentId, text });
 	}
 
 	/**
@@ -244,8 +246,9 @@ export class GuestClient {
 	 * session end) where re-polling from the same cursor is correct.
 	 */
 	fetchTranscript(agentId: string, fromByte: number): Promise<TranscriptResult | null> {
+		if (this.#phase === "ended") return Promise.resolve(null);
 		const reqId = ++this.#reqSeq;
-		const { promise, resolve } = Promise.withResolvers<TranscriptResult | null>();
+		const { promise, settle: resolve } = deferred<TranscriptResult | null>();
 		const timer = setTimeout(() => {
 			this.#pendingTranscripts.delete(reqId);
 			resolve(null);
@@ -265,7 +268,19 @@ export class GuestClient {
 		if ((options.flush ?? true) && this.#cancelFrameCommit !== null) this.#commit();
 	}
 
+	#armWelcomeTimer(): void {
+		this.#clearWelcomeTimer();
+		const timer = setTimeout(() => {
+			if (this.#welcomeTimer !== timer) return;
+			this.#welcomeTimer = null;
+			if (this.#phase !== "ended") this.#end("timed out waiting for the host's welcome");
+		}, WELCOME_TIMEOUT_MS);
+		this.#welcomeTimer = timer;
+	}
+
 	#handleOpen(): void {
+		this.#welcomed = false;
+		this.#armWelcomeTimer();
 		this.#socket.send({ t: "hello", proto: COLLAB_PROTO, name: this.#name, writeToken: this.#writeToken });
 		this.#phase = this.#everConnected ? "reconnecting" : "waiting";
 		this.#everConnected = true;
@@ -273,6 +288,7 @@ export class GuestClient {
 	}
 
 	#handleClose(reason: string, willReconnect: boolean): void {
+		this.#clearWelcomeTimer();
 		this.#clearSnapshotProgressTimer();
 		if (this.#phase === "ended") return;
 		if (willReconnect) {

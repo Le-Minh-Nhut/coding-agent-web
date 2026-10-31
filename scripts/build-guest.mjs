@@ -3,15 +3,20 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import * as esbuild from "esbuild";
+import { swapStageToDist } from "./build-guest-utils.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, "..");
 const guestDir = path.join(root, "packages", "guest");
-const distDir = path.join(guestDir, "dist");
-const publicDir = path.join(guestDir, "public");
-const stageDir = path.join(guestDir, `dist.tmp-${process.pid}`);
+const distDir = process.env.CAW_GUEST_DIST_DIR
+  ? path.resolve(process.env.CAW_GUEST_DIST_DIR)
+  : path.join(guestDir, "dist");
+const publicDir = process.env.CAW_GUEST_PUBLIC_DIR
+  ? path.resolve(process.env.CAW_GUEST_PUBLIC_DIR)
+  : path.join(guestDir, "public");
+const stageDir = `${distDir}.tmp-${process.pid}`;
 const stageAssetsDir = path.join(stageDir, "assets");
-const oldDir = path.join(guestDir, `dist.old-${process.pid}`);
+const oldDir = `${distDir}.old-${process.pid}`;
 
 async function build() {
   const startTime = Date.now();
@@ -92,9 +97,8 @@ async function build() {
   try {
     await fs.cp(publicDir, stageDir, { recursive: true });
   } catch (err) {
-    // Ignore if public directory is empty or missing
+    if (err?.code !== "ENOENT") throw err;
   }
-
   // 4. Transform index.html to reference bundled JS/CSS in staging
   const indexHtmlPath = path.join(guestDir, "index.html");
   let html = await fs.readFile(indexHtmlPath, "utf-8");
@@ -104,21 +108,13 @@ async function build() {
     : "";
   const jsScript = `<script type="module" src="./assets/${jsFilename}"></script>`;
 
-  html = html.replace(
-    /<script type="module" src="\.\/src\/main\.tsx"><\/script>/,
-    `${cssLink}${jsScript}`,
-  );
+  const scriptTag = /<script type="module" src="\.\/src\/main\.tsx"><\/script>/;
+  if (!scriptTag.test(html)) throw new Error("main.tsx script tag missing in index.html");
+  html = html.replace(scriptTag, `${cssLink}${jsScript}`);
 
   await fs.writeFile(path.join(stageDir, "index.html"), html, "utf-8");
 
-  // 5. Atomic swap: stageDir -> distDir
-  try {
-    await fs.rename(distDir, oldDir);
-  } catch {}
-  await fs.rename(stageDir, distDir);
-  try {
-    await fs.rm(oldDir, { recursive: true, force: true });
-  } catch {}
+  await swapStageToDist(stageDir, distDir, oldDir);
 
   const duration = Date.now() - startTime;
   console.log(
@@ -131,9 +127,8 @@ async function build() {
 }
 
 build().catch(async (err) => {
-  try {
-    await fs.rm(stageDir, { recursive: true, force: true });
-  } catch {}
+  await fs.rm(stageDir, { recursive: true, force: true });
+  await fs.rm(oldDir, { recursive: true, force: true });
   console.error("[build-guest] build failed:", err);
   process.exit(1);
 });

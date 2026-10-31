@@ -74,6 +74,15 @@ describe("WEB-01 startup taxonomy", () => {
     expect(vi.mocked(resetProjectMutationState)).toHaveBeenCalled();
   });
 
+  it("treats a capabilities 401 as an expired session", async () => {
+    vi.mocked(api.getMe).mockResolvedValue({ ok: true, data: { csrfToken: "live" } });
+    vi.mocked(api.getCapabilities).mockResolvedValue({ ok: false, httpStatus: 401, error: { code: "unauthorized", message: "Authentication required" } });
+    render(<App />);
+    await waitFor(() => expect(signIn()).not.toBeNull());
+    expect(retry()).toBeNull();
+    expect(vi.mocked(resetProjectMutationState)).toHaveBeenCalled();
+  });
+
   it("opens the workspace when both probes succeed", async () => {
     vi.mocked(api.getMe).mockResolvedValue({ ok: true, data: { csrfToken: "live" } });
     vi.mocked(api.getCapabilities).mockResolvedValue({ ok: true, data: {} as never });

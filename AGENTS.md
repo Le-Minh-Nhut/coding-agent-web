@@ -95,7 +95,7 @@ TMPDIR=$HOME/.cache pnpm test:e2e
 CAW_COMPAT=1 pnpm vitest run tests/compat
 
 # the acceptance check that proves the product end to end against a running server
-node scripts/acceptance-ui-drives-agent.mjs --base <origin> --token-file <file> --root <dir>
+node scripts/acceptance-ui-drives-agent.mjs --base <origin> --tmp <scratch-dir> --root <scratch-dir>/roots --password <secret>
 ```
 
 ## Verified environment baseline

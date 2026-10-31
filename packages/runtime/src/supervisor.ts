@@ -251,15 +251,16 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
           )
         : Promise.resolve(false as Tri);
 
+    const leaseSessionId = conversation.nativeSessionId ?? (conversation.nativeSessionPath ? await options.adapters.readSessionId?.(conversation.nativeSessionPath) ?? null : null);
     const [managedResult, hosts, leaseLive, sessionPathExists] = await Promise.all([
       readManagedTmux(),
       options.adapters.listHosts().then(
         (rows) => ({ ok: true as const, rows }),
         () => ({ ok: false as const, rows: [] as RuntimeHost[] }),
       ),
-      conversation.nativeSessionId
-        ? options.adapters.isSessionLive(conversation.nativeSessionId).catch(() => "unknown" as const)
-        : Promise.resolve(false as Tri),
+      leaseSessionId
+        ? options.adapters.isSessionLive(leaseSessionId).catch(() => "unknown" as const)
+        : conversation.nativeSessionPath ? Promise.resolve("unknown" as Tri) : Promise.resolve(false as Tri),
       sessionPathProbe,
     ]);
 
@@ -465,7 +466,7 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
     const observedSeq = observationSeqOf(conversation);
 
     if (conversation.nativeSessionPath && !conversation.nativeSessionId) {
-      const header = await options.adapters.findBySessionId(conversation.nativeSessionPath);
+      const header = await options.adapters.readSessionId?.(conversation.nativeSessionPath);
       if (header) patch.nativeSessionId = header;
     }
 
@@ -552,9 +553,11 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
         //
         // This probe belongs *inside* the critical section. Run before the lock
         // it can be answered by the previous holder and reused by the next.
-        const leaseLive = conversation.nativeSessionId
-          ? await options.adapters.isSessionLive(conversation.nativeSessionId).catch(() => "unknown" as const)
-          : false;
+        const resumePath = spec.resumeSessionPath ?? conversation.nativeSessionPath;
+        const leaseSessionId = conversation.nativeSessionId ?? (resumePath ? await options.adapters.readSessionId?.(resumePath).catch(() => null) ?? null : null);
+        const leaseLive = resumePath
+          ? leaseSessionId ? await options.adapters.isSessionLive(leaseSessionId).catch(() => "unknown" as const) : "unknown"
+          : conversation.nativeSessionId ? await options.adapters.isSessionLive(conversation.nativeSessionId).catch(() => "unknown" as const) : false;
         const managed = managedResult.ok ? managedResult.sessions : [];
         const conversations = await options.store.listAllConversations();
         const untracked = untrackedLiveSessions(conversations, managed);
@@ -859,7 +862,7 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
       await options.store.updateConversationIfCurrent(conversationId, stopEpoch, { state: "unknown", statusDetail: reason });
       throw new RuntimeFailure("agent_not_running", reason);
     };
-    if (!conversation.tmuxServerIdentity || conversation.tmuxPanePid === null || !conversation.nativeSessionId) {
+    if (!conversation.tmuxServerIdentity || conversation.tmuxPanePid === null || !conversation.tmuxSessionId) {
       return refuse("The recorded pane identity is incomplete, so ownership cannot be verified.");
     }
     const serverIdentity = await options.adapters.tmuxServerIdentity().catch(() => "unknown" as const);
@@ -891,16 +894,18 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
     if (pane.session.serverIdentity !== conversation.tmuxServerIdentity || pane.session.panePid !== conversation.tmuxPanePid) {
       return refuse("The recorded tmux pane identity or PID changed, so this process cannot be safely stopped.");
     }
-    const hosts = await options.adapters.listHosts().catch(() => null);
-    if (hosts === null) return refuse("The host registry could not be read, so the pane's native session cannot be verified.");
-    const lineage = await Promise.all(hosts.filter((host) => host.pid !== null).map(async (host) => ({
-      host,
-      result: await options.adapters.isProcessDescendant(host.pid!, conversation.tmuxPanePid!),
-    })));
-    if (lineage.some(({ result }) => result === "unknown")) return refuse("Host process lineage could not be verified, so the pane's native session cannot be verified.");
-    const paneHosts = lineage.filter(({ result }) => result === true).map(({ host }) => host);
-    if (paneHosts.length !== 1 || paneHosts[0]!.sessionId !== conversation.nativeSessionId) {
-      return refuse("The recorded tmux pane is not positively verified as serving this native session.");
+    if (conversation.nativeSessionId) {
+      const hosts = await options.adapters.listHosts().catch(() => null);
+      if (hosts === null) return refuse("The host registry could not be read, so the pane's native session cannot be verified.");
+      const lineage = await Promise.all(hosts.filter((host) => host.pid !== null).map(async (host) => ({
+        host,
+        result: await options.adapters.isProcessDescendant(host.pid!, conversation.tmuxPanePid!),
+      })));
+      if (lineage.some(({ result }) => result === "unknown")) return refuse("Host process lineage could not be verified, so the pane's native session cannot be verified.");
+      const paneHosts = lineage.filter(({ result }) => result === true).map(({ host }) => host);
+      if (paneHosts.length !== 1 || paneHosts[0]!.sessionId !== conversation.nativeSessionId) {
+        return refuse("The recorded tmux pane is not positively verified as serving this native session.");
+      }
     }
     await options.adapters.killTmux(conversation.tmuxSessionId, conversation.tmuxServerIdentity);
     await commit({ state: "stopping", statusDetail: "Stopping the agent…" });
@@ -1047,7 +1052,7 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
         // Adoption is about the *process* we found, not the label the verdict
         // chose: a live managed session whose host cannot report turn state is
         // still running under us and still needs its room recorded.
-        else if (tmux.alive) {
+        if (tmux.alive) {
           report.adopted += 1;
           const withRoom = await adopt(refreshed, managed, hostsResult.rows);
           if (withRoom.hostInstanceId) report.registered += 1;

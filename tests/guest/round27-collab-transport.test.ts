@@ -171,9 +171,8 @@ describe("collab socket handshake gate", () => {
     expect(connections).toBe(connectionsAfterTerminalClose);
   });
 
-  it("refuses frames past the queue cap without dropping queued frames silently", async () => {
+  it("queues prompts but refuses abort immediately before a welcome", async () => {
     const key = await importRoomKey(generateRoomKey());
-    // Never connects: every frame queues.
     const client = new CollabSocket({
       wsUrl: "ws://127.0.0.1:1/r/room",
       role: "guest",
@@ -183,13 +182,9 @@ describe("collab socket handshake gate", () => {
     const closes: Array<{ reason: string; willReconnect: boolean }> = [];
     client.onClose = (reason, willReconnect) => closes.push({ reason, willReconnect });
 
-    const sends: Array<Promise<boolean>> = [];
-    for (let i = 0; i < 400; i++) sends.push(client.send({ t: "abort" } as GuestFrame));
-
-    // The first 256 fit and stay queued (their answer is pending until they reach
-    // the wire); every frame past the cap is refused with `false`. A full queue is
-    // not evidence that the connection is unrecoverable, so the socket survives.
-    await expect(Promise.all(sends.slice(256))).resolves.toEqual(Array.from({ length: 144 }, () => false));
+    await expect(client.send({ t: "abort" })).resolves.toBe(false);
+    const prompts = Array.from({ length: 400 }, () => client.send({ t: "prompt", text: "queued" }));
+    await expect(Promise.all(prompts.slice(256))).resolves.toEqual(Array.from({ length: 144 }, () => false));
     expect(closes).toEqual([]);
     expect(client.isOpen).toBe(false);
   });

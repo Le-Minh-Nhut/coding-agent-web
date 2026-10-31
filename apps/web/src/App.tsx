@@ -58,6 +58,11 @@ export function App() {
           setIsAuthenticated(false);
           return;
         }
+        if (probe.httpStatus === 401) {
+          clearSessionScopedMutations();
+          setIsAuthenticated(false);
+          return;
+        }
         // The session answered; only the capability probe failed. A 500 or a dead
         // transport is not proof the session is gone, so nothing session-scoped is
         // retired here — the workspace degrades behind a retryable surface instead.

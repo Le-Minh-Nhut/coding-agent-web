@@ -212,6 +212,8 @@ export interface RuntimeAdapters {
   sessionPathExists(path: string): Promise<Tri>;
   /** Resolve a session id to its journal path anywhere on this machine. */
   findBySessionId(sessionId: string): Promise<string | null>;
+  /** Read a session journal path's header identity; null confirms it is not a journal. */
+  readSessionId?(path: string): Promise<string | null>;
 }
 
 /** A clock and a sleep, injected so timing logic is testable without real delays. */

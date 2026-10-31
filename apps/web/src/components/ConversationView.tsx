@@ -1143,23 +1143,25 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     // pair, so the preference the restart launched with is the one that stays
     // stored. (V25-02)
     const saved = await chainMutation(`conversation-lifecycle:${conversationId}`, () => api.setConversationModel(conversationId, submittedDraft));
-    // Retired with the session: the save never left, so the pair stops here — we must
-    // not restart a session under credentials the user has left, and we must not claim
-    // a restart that did not happen.
-    if (saved === MUTATION_CANCELLED) { setModelBusy(false); return; }
-    if (!viewActiveRef.current || operationGenerationRef.current !== operationGeneration || conversationIdRef.current !== conversationAtRestart) return;
+    const stillThisView = () => viewActiveRef.current && operationGenerationRef.current === operationGeneration && conversationIdRef.current === conversationAtRestart;
+    if (saved === MUTATION_CANCELLED) { if (stillThisView()) setModelBusy(false); return; }
     if (!saved.ok) {
-      setModelBusy(false);
-      setModelMessage(saved.error.message);
+      if (stillThisView()) {
+        setModelBusy(false);
+        setModelMessage(saved.error.message);
+      }
       return;
     }
-    metadataGenerationRef.current += 1;
-    setConversation(saved.data);
+    // The save landed and the user asked for a restart. Back does not retire this request;
+    // only the auth-lifetime cancellation below stops the pair.
+    if (stillThisView()) {
+      metadataGenerationRef.current += 1;
+      setConversation(saved.data);
+    }
     const result = await chainMutation(`conversation-lifecycle:${conversationId}`, () => api.restartConversation(conversationId));
-    // Same retirement: the restart was never sent, so the pending spinner is cleared
-    // and no outcome is claimed.
-    if (result === MUTATION_CANCELLED) { setModelBusy(false); return; }
-    if (!viewActiveRef.current || operationGenerationRef.current !== operationGeneration || conversationIdRef.current !== conversationAtRestart) return;
+    // Auth retirement means restart never left; only clear state if this view still owns it.
+    if (result === MUTATION_CANCELLED) { if (stillThisView()) setModelBusy(false); return; }
+    if (!stillThisView()) return;
     setModelBusy(false);
     if (result.ok) {
       metadataGenerationRef.current += 1;

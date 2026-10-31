@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { ConversationView } from "../../apps/web/src/components/ConversationView.js";
 import { api } from "../../apps/web/src/api.js";
+import { MUTATION_CANCELLED } from "../../apps/web/src/mutation-order.js";
 import { CollabSocket, type HostFrame } from "@caw/collab-protocol";
 
 vi.mock("../../apps/web/src/api.js", () => ({
@@ -17,6 +18,7 @@ vi.mock("../../apps/web/src/api.js", () => ({
     getModels: vi.fn().mockResolvedValue({ ok: true, data: { models: [], source: "omp", reason: null } }),
   },
 }));
+
 
 const base = {
   id: "c-1",
@@ -121,5 +123,105 @@ describe("F01 restart honesty", () => {
   it("reports a restart as done when the returned state is starting but the host answers live", async () => {
     await restartWith("starting", true);
     await waitFor(() => expect(modelStatus()).toContain("Agent restarted."));
+  });
+  it("saves the submitted model before a mounted restart", async () => {
+    vi.mocked(api.getConversation).mockResolvedValue({ ok: true, data: { ...base } as never });
+    vi.mocked(api.getAttachInstructions).mockResolvedValue({ ok: true, data: { conversationId: "c-1", available: false, command: null, tmuxSessionName: null, reason: null } });
+    vi.mocked(api.getConversationLink).mockResolvedValue({ ok: true, data: { url: "ws://127.0.0.1:7466/r/0123456789abcdef.AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE", access: "full", instanceId: "inst-1", generation: 1 } });
+    vi.mocked(api.setConversationModel).mockResolvedValue({ ok: true, data: { ...base, modelPreference: "model-b" } as never });
+    vi.mocked(api.restartConversation).mockResolvedValue({ ok: true, data: { ...base, modelPreference: "model-b", state: "running" } } as never);
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    render(<ConversationView conversationId="c-1" onBack={() => {}} />);
+    fireEvent.click(await screen.findByText("Conversation model settings"));
+    fireEvent.change(screen.getByLabelText("Custom model ID"), { target: { value: "model-b" } });
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Save & restart agent" })); });
+    expect(api.setConversationModel).toHaveBeenCalledWith("c-1", "model-b");
+    expect(api.restartConversation).toHaveBeenCalledWith("c-1");
+  });
+  it("still restarts with the saved draft when Back unmounts during the save", async () => {
+    let resolveSave!: (value: unknown) => void;
+    vi.mocked(api.getConversation).mockResolvedValue({ ok: true, data: { ...base } as never });
+    vi.mocked(api.getAttachInstructions).mockResolvedValue({
+      ok: true,
+      data: { conversationId: "c-1", available: false, command: null, tmuxSessionName: null, reason: null },
+    });
+    vi.mocked(api.getConversationLink).mockResolvedValue({
+      ok: true,
+      data: { url: "ws://127.0.0.1:7466/r/0123456789abcdef.AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE", access: "full", instanceId: "inst-1", generation: 1 },
+    });
+    vi.mocked(api.setConversationModel).mockReturnValue(new Promise((resolve) => { resolveSave = resolve; }) as never);
+    vi.mocked(api.restartConversation).mockResolvedValue({ ok: true, data: { ...base, modelPreference: "model-b", state: "starting" } as never });
+    vi.spyOn(CollabSocket.prototype, "send").mockResolvedValue(true);
+    vi.spyOn(CollabSocket.prototype, "connect").mockImplementation(function (this: CollabSocket) { socket = this; this.onOpen?.(); });
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    const view = render(<ConversationView conversationId="c-1" onBack={() => {}} />);
+    await screen.findByText("Conversation model settings");
+    const input = screen.getByLabelText("Custom model ID");
+    fireEvent.change(input, { target: { value: "model-b" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save & restart agent" }));
+    view.unmount();
+    await act(async () => { resolveSave({ ok: true, data: { ...base, modelPreference: "model-b" } }); });
+    expect(api.setConversationModel).toHaveBeenCalledWith("c-1", "model-b");
+    expect(api.restartConversation).toHaveBeenCalledWith("c-1");
+  });
+  it("does not restart when saving the model fails", async () => {
+    vi.mocked(api.getConversation).mockResolvedValue({ ok: true, data: { ...base } as never });
+    vi.mocked(api.getAttachInstructions).mockResolvedValue({ ok: true, data: { conversationId: "c-1", available: false, command: null, tmuxSessionName: null, reason: null } });
+    vi.mocked(api.getConversationLink).mockResolvedValue({ ok: true, data: { url: "ws://127.0.0.1:7466/r/0123456789abcdef.AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE", access: "full", instanceId: "inst-1", generation: 1 } });
+    vi.mocked(api.setConversationModel).mockResolvedValue({ ok: false, error: { code: "internal", message: "Save refused" } } as never);
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    render(<ConversationView conversationId="c-1" onBack={() => {}} />);
+    await screen.findByText("Conversation model settings");
+    fireEvent.change(screen.getByLabelText("Custom model ID"), { target: { value: "model-b" } });
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Save & restart agent" })); });
+    expect(api.restartConversation).not.toHaveBeenCalled();
+    expect(modelStatus()).toContain("Save refused");
+  });
+
+  it("restarts after a conversation change without publishing old metadata", async () => {
+    let resolveSave!: (value: unknown) => void;
+    vi.mocked(api.getConversation).mockImplementation(async (id) => ({ ok: true, data: { ...base, id, title: id } as never }));
+    vi.mocked(api.getConversationLink).mockResolvedValue({ ok: true, data: { url: "ws://127.0.0.1:7466/r/0123456789abcdef.AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE", access: "full", instanceId: "inst-1", generation: 1 } });
+    vi.mocked(api.getAttachInstructions).mockResolvedValue({ ok: true, data: { conversationId: "c-1", available: false, command: null, tmuxSessionName: null, reason: null } });
+    vi.mocked(api.setConversationModel).mockReturnValue(new Promise((resolve) => { resolveSave = resolve; }) as never);
+    vi.mocked(api.restartConversation).mockResolvedValue({ ok: true, data: { ...base, modelPreference: "model-b", state: "starting" } } as never);
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    const view = render(<ConversationView conversationId="c-1" onBack={() => {}} />);
+    await screen.findByText("Conversation model settings");
+    fireEvent.change(screen.getByLabelText("Custom model ID"), { target: { value: "model-b" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save & restart agent" }));
+    view.rerender(<ConversationView conversationId="c-2" onBack={() => {}} />);
+    await act(async () => { resolveSave({ ok: true, data: { ...base, modelPreference: "OLD_CONVERSATION_PREFERENCE" } }); });
+    expect(api.restartConversation).toHaveBeenCalledWith("c-1");
+    expect(await screen.findByRole("heading", { name: "c-2" })).toBeTruthy();
+    expect(screen.queryByText("OLD_CONVERSATION_PREFERENCE")).toBeNull();
+  });
+  it("does not restart when the save was retired at the auth boundary", async () => {
+    vi.mocked(api.getConversation).mockResolvedValue({ ok: true, data: { ...base } as never });
+    vi.mocked(api.getAttachInstructions).mockResolvedValue({ ok: true, data: { conversationId: "c-1", available: false, command: null, tmuxSessionName: null, reason: null } });
+    vi.mocked(api.getConversationLink).mockResolvedValue({ ok: true, data: { url: "ws://127.0.0.1:7466/r/0123456789abcdef.AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE", access: "full", instanceId: "inst-1", generation: 1 } });
+    vi.mocked(api.setConversationModel).mockResolvedValue(MUTATION_CANCELLED as never);
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    render(<ConversationView conversationId="c-1" onBack={() => {}} />);
+    await screen.findByText("Conversation model settings");
+    fireEvent.change(screen.getByLabelText("Custom model ID"), { target: { value: "model-b" } });
+    await waitFor(() => expect((screen.getByRole("button", { name: "Save & restart agent" }) as HTMLButtonElement).disabled).toBe(false));
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Save & restart agent" })); });
+    expect(api.restartConversation).not.toHaveBeenCalled();
+  });
+  it("reports a restart failure after the model save", async () => {
+    vi.mocked(api.getConversation).mockResolvedValue({ ok: true, data: { ...base } as never });
+    vi.mocked(api.getAttachInstructions).mockResolvedValue({ ok: true, data: { conversationId: "c-1", available: false, command: null, tmuxSessionName: null, reason: null } });
+    vi.mocked(api.getConversationLink).mockResolvedValue({ ok: true, data: { url: "ws://127.0.0.1:7466/r/0123456789abcdef.AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE", access: "full", instanceId: "inst-1", generation: 1 } });
+    vi.mocked(api.setConversationModel).mockResolvedValue({ ok: true, data: { ...base, modelPreference: "model-a" } as never });
+    vi.mocked(api.restartConversation).mockResolvedValue({ ok: false, error: { code: "internal", message: "Restart refused" } } as never);
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    render(<ConversationView conversationId="c-1" onBack={() => {}} />);
+    fireEvent.click(screen.getByText("Conversation model settings"));
+    fireEvent.change(screen.getByLabelText("Custom model ID"), { target: { value: "model-b" } });
+    await waitFor(() => expect((screen.getByRole("button", { name: "Save & restart agent" }) as HTMLButtonElement).disabled).toBe(false));
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Save & restart agent" })); });
+    expect(api.restartConversation).toHaveBeenCalledWith("c-1");
+    expect(modelStatus()).toContain("Restart refused");
   });
 });

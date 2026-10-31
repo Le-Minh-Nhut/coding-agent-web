@@ -160,11 +160,11 @@ describe("D5 a full queue refuses the frame without destroying the socket", () =
 
     // Fill and overflow the queue while the socket is still closed.
     const sends: Array<Promise<boolean>> = [];
-    for (let i = 0; i < 300; i++) sends.push(client.send({ t: "abort" } as GuestFrame));
+    for (let i = 0; i < 300; i++) sends.push(client.send({ t: "prompt", text: "queued" }));
 
     client.connect();
-    // The 256 that fit flush with `true` once the host welcomes; the 44 refused
-    // frames, and only those, resolve `false`.
+    // The 256 prompts that fit flush with `true` once the host welcomes; the 44 refused
+    // prompts resolve `false`.
     const results = await Promise.all(sends);
     expect(results.filter(Boolean).length).toBe(256);
     expect(results.filter((value) => !value).length).toBe(44);
@@ -187,13 +187,13 @@ describe("D5 a full queue refuses the frame without destroying the socket", () =
     client.onClose = (_reason, willReconnect) => closes.push(willReconnect);
     client.onOpen = () => void client.send({ t: "hello", proto: 3, name: "test" } as GuestFrame);
 
-    for (let i = 0; i < 256; i++) void client.send({ t: "abort" } as GuestFrame);
-    await expect(client.send({ t: "abort" } as GuestFrame)).resolves.toBe(false);
+    for (let i = 0; i < 256; i++) void client.send({ t: "prompt", text: "queued" });
+    await expect(client.send({ t: "prompt", text: "overflow" })).resolves.toBe(false);
     // Refusing the overflowing frame must not have ended the socket.
     expect(closes).toEqual([]);
 
     client.connect();
-    await vi.waitFor(async () => expect(await client.send({ t: "abort" } as GuestFrame)).toBe(true), {
+    await vi.waitFor(async () => expect(await client.send({ t: "prompt", text: "after flush" })).toBe(true), {
       timeout: 5000,
     });
   });

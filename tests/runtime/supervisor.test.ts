@@ -114,6 +114,9 @@ function makeWorld() {
     async findBySessionId() {
       return "/tmp/sessions/journal.jsonl";
     },
+    async readSessionId(sessionPath) {
+      return sessionPath ? "native-journal" : null;
+    },
   };
 
   const conversations = new Map<string, Conversation>();
@@ -1151,6 +1154,29 @@ describe("supervisor.stop", () => {
     expect(world.kills).toEqual(["$4"]);
     expect(result.state).toBe("stopped");
   });
+  it("stops a live recorded pane before its native session is published", async () => {
+    const world = makeWorld();
+    world.seed({ id: "c1", state: "starting", tmuxSessionId: "$4", tmuxSessionName: "caw-c1", tmuxPanePid: 1_000_000_000, tmuxServerIdentity: "private-socket:1" });
+    await world.store.updateConversation("c1", { nativeSessionId: null });
+    world.tmuxSessions.push({ id: "$4", name: "caw-c1", alive: true, panePid: 1_000_000_000, serverIdentity: "private-socket:1" });
+    const supervisor = createSupervisor({ store: world.store, adapters: world.adapters, clock: instantClock, maxActive: 3 });
+
+    const result = await supervisor.stop("c1");
+
+    expect(world.kills).toEqual(["$4"]);
+    expect(result.state).toBe("stopped");
+    expect((await world.store.getConversation("c1"))?.state).toBe("stopped");
+  });
+  it("refuses to stop an unverified pane identity", async () => {
+    const world = makeWorld();
+    world.seed({ id: "c1", state: "starting", nativeSessionId: null, tmuxSessionId: "$4", tmuxSessionName: "caw-c1", tmuxPanePid: 1_000_000_000, tmuxServerIdentity: "private-socket:1" });
+    world.tmuxSessions.push({ id: "$4", name: "caw-c1", alive: true, panePid: 999, serverIdentity: "private-socket:1" });
+    const supervisor = createSupervisor({ store: world.store, adapters: world.adapters, clock: instantClock, maxActive: 3 });
+
+    await expect(supervisor.stop("c1")).rejects.toMatchObject({ code: "agent_not_running" });
+    expect(world.kills).toHaveLength(0);
+    expect((await world.store.getConversation("c1"))?.state).toBe("unknown");
+  });
   it("refuses stop when recorded tmux server identity differs", async () => {
     const world = makeWorld();
     world.seed({ id: "c1", state: "running", tmuxSessionId: "$0", tmuxSessionName: "caw-c1", tmuxPanePid: null, tmuxServerIdentity: "old-socket:1:10" });
@@ -1621,7 +1647,52 @@ describe("supervisor.reconcile", () => {
     expect(conversation?.hostGeneration).toBe(2);
     expect(conversation?.state).toBe("idle");
   });
+  it("adopts and registers a live managed process with unknown turn state", async () => {
+    const world = makeWorld();
+    world.seed({ id: "c1", state: "starting", tmuxSessionId: "$1", tmuxSessionName: "caw-c1", tmuxPanePid: 42, tmuxServerIdentity: "private-socket:1", nativeSessionId: "sess-1" });
+    world.tmuxSessions.push({ id: "$1", name: "caw-c1", alive: true, panePid: 42, serverIdentity: "private-socket:1" });
+    world.hosts.push({ instanceId: "inst-1", generation: 2, pid: 42, sessionId: "sess-1", cwd: "/tmp/project", model: "provider/model", participants: 1, relayConnected: true, inputRequired: false, busy: null, access: "control" });
+    const supervisor = createSupervisor({ store: world.store, adapters: world.adapters, clock: instantClock, maxActive: 3 });
 
+    const report = await supervisor.reconcile();
+
+    expect(report.unknown).toBe(1);
+    expect(report.adopted).toBe(1);
+    expect(report.registered).toBe(1);
+    expect((await world.store.getConversation("c1"))?.hostInstanceId).toBe("inst-1");
+  });
+  it("refuses a path-based resume when session identity is unresolved", async () => {
+    const world = makeWorld();
+    world.seed({ id: "c1", nativeSessionPath: "/tmp/unresolved.jsonl", nativeSessionId: null });
+    world.adapters.readSessionId = async () => null;
+    world.setLease(false);
+    const supervisor = createSupervisor({ store: world.store, adapters: world.adapters, clock: instantClock, maxActive: 3 });
+
+    await expect(supervisor.start("c1", { conversationId: "c1", name: "caw-c1", cwd: "/tmp/project", resumeSessionPath: "/tmp/unresolved.jsonl" })).rejects.toMatchObject({ code: "conflict_owner" });
+    expect(world.launches).toHaveLength(0);
+  });
+  it("allows a fresh launch when no native session or journal exists", async () => {
+    const world = makeWorld();
+    world.seed({ id: "c1", nativeSessionPath: null, nativeSessionId: null });
+    const supervisor = createSupervisor({ store: world.store, adapters: world.adapters, clock: instantClock, maxActive: 3, publishTimeoutMs: 0 });
+
+    await supervisor.start("c1", { conversationId: "c1", name: "caw-c1", cwd: "/tmp/project" });
+    expect(world.launches).toHaveLength(1);
+  });
+
+  it("backfills native session ID from a journal header during adoption", async () => {
+    const world = makeWorld();
+    world.seed({ id: "c1", state: "starting", nativeSessionPath: "/tmp/native.jsonl", tmuxSessionId: "$1", tmuxSessionName: "caw-c1", tmuxPanePid: 42, tmuxServerIdentity: "private-socket:1" });
+    await world.store.updateConversation("c1", { nativeSessionId: null });
+    world.tmuxSessions.push({ id: "$1", name: "caw-c1", alive: true, panePid: 42, serverIdentity: "private-socket:1" });
+    world.hosts.length = 0;
+    world.adapters.readSessionId = async (sessionPath) => sessionPath === "/tmp/native.jsonl" ? "native-from-header" : null;
+    const supervisor = createSupervisor({ store: world.store, adapters: world.adapters, clock: instantClock, maxActive: 3 });
+
+    await supervisor.reconcile();
+
+    expect((await world.store.getConversation("c1"))?.nativeSessionId).toBe("native-from-header");
+  });
   it("marks a room we never launched as external so we never try to stop it", async () => {
     const world = makeWorld();
     world.seed({ id: "c1", nativeSessionId: "sess-9" });

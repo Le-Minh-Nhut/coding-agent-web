@@ -49,7 +49,13 @@ export function App(): ReactNode {
       setConnectError(err instanceof Error ? err.message : String(err));
       return;
     }
-    next.connect();
+    try {
+      next.connect();
+    } catch (err) {
+      next.close();
+      setConnectError(err instanceof Error ? err.message : String(err));
+      return;
+    }
     try {
       localStorage.setItem(NAME_KEY, name);
     } catch {
@@ -243,6 +249,7 @@ function Session({ client, onLeave, onRejoin }: SessionProps): ReactNode {
             progress={snap.progress.get(drawerAgent.id)}
             lifecycle={snap.lifecycle.get(drawerAgent.id)}
             client={client}
+            phase={snap.phase}
             readOnly={snap.readOnly}
             host={toolHost}
             onClose={closeDrawer}

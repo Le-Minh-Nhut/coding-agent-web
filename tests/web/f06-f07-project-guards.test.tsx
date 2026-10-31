@@ -172,6 +172,32 @@ describe("F06 delete is one operation at a time", () => {
 
     await act(async () => { pending.resolve(deleted as never); });
   });
+  it("does not let a previous auth lifetime release a new delete guard or reload projects", async () => {
+    const pending = deferred<never>();
+    vi.mocked(api.deleteProject).mockReturnValueOnce(pending.promise);
+    vi.mocked(api.listProjects).mockResolvedValue(ok([project("A", "/work/A")]));
+    const oldView = render(<ProjectsView onSelectProject={() => {}} onOpenSettings={() => {}} />);
+    await screen.findByRole("button", { name: "Delete" });
+    openDeleteDialog();
+    await act(async () => { confirmDelete(); });
+
+    resetMutationQueues();
+    resetProjectMutationState();
+    oldView.unmount();
+    vi.mocked(api.listProjects).mockResolvedValue(ok([project("A", "/work/A")]));
+    vi.mocked(api.deleteProject).mockReturnValueOnce(new Promise(() => {}) as never);
+    await act(async () => { render(<ProjectsView onSelectProject={() => {}} onOpenSettings={() => {}} />); });
+    await screen.findByRole("button", { name: "Delete" });
+    openDeleteDialog();
+    await act(async () => { confirmDelete(); });
+    const listCallsBeforeOldResponse = vi.mocked(api.listProjects).mock.calls.length;
+    await act(async () => { pending.resolve(deleted as never); });
+    expect(vi.mocked(api.listProjects)).toHaveBeenCalledTimes(listCallsBeforeOldResponse);
+    expect(screen.getByRole("heading", { name: "Delete Project" })).toBeTruthy();
+    await act(async () => { confirmDelete(); });
+    expect(api.deleteProject).toHaveBeenCalledTimes(2);
+    expect((screen.getByRole("button", { name: "Confirm Delete" }) as HTMLButtonElement).disabled).toBe(true);
+  });
 });
 
 describe("F07 loading belongs to the newest list request", () => {

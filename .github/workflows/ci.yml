@@ -46,10 +46,13 @@ jobs:
 
       - name: Assert no off-origin assets in the shipped bundles
         run: |
-          set -eu
+          test -d apps/web/dist && test -d packages/guest/dist || { echo "::error::Required dist directory missing."; exit 1; }
           if grep -rIl "um\.can\.ac\|my\.omp\.sh" apps/web/dist packages/guest/dist; then
             echo "::error::A shipped bundle references a third-party or upstream origin."
             exit 1
+          else
+            status=$?
+            if [ "$status" -ne 1 ]; then exit "$status"; fi
           fi
           echo "bundles clean"
 
@@ -106,7 +109,7 @@ jobs:
             exit 1
           }
           echo "Installed $omp_version"
-          if [ "$omp_version" != "omp/18.12.2" ]; then
+          if [[ ! "$omp_version" =~ ^omp[[:space:]/v]+18\.12\.2$ ]]; then
             echo "::error::Expected OMP v18.12.2, got: $omp_version"
             exit 1
           fi

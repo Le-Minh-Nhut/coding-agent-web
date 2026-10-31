@@ -48,7 +48,7 @@ describe("D1 loadingMore is released when the conversation switches", () => {
     vi.mocked(api.getConversationEvents).mockImplementation((id: string) =>
       id === "c1" ? Promise.resolve(eventsPage([10, 9], 8) as never) : Promise.resolve(eventsPage([30, 29], 28) as never),
     );
-    const { rerender } = render(<ActivityPanel conversationId="c1" />);
+    const { rerender } = render(<ActivityPanel conversationId="c1" events={eventsPage([10, 9], 8).data.events as never} nextBefore={8} />);
     await act(async () => {});
 
     // Back out of c1 with a page in flight that will never resolve.
@@ -102,7 +102,7 @@ describe("D1 loadingMore is released when the conversation switches", () => {
       },
     );
 
-    const { rerender } = render(<ActivityPanel conversationId="c1" />);
+    const { rerender } = render(<ActivityPanel conversationId="c1" events={eventsPage([10, 9], 8).data.events as never} nextBefore={8} />);
     await act(async () => {});
     fireEvent.click(screen.getByRole("button", { name: "Load older activity" }));
     await act(async () => {});
@@ -113,7 +113,7 @@ describe("D1 loadingMore is released when the conversation switches", () => {
     fireEvent.click(screen.getByRole("button", { name: "Load older activity" }));
     await act(async () => {});
     expect((screen.getByRole("button", { name: "Loading…" }) as HTMLButtonElement).disabled).toBe(true);
-    expect(calls).toEqual(["c1:tail", "c1:page:8", "c2:tail", "c2:page:28"]);
+    expect(calls).toEqual(["c1:page:8", "c2:tail", "c2:page:28"]);
 
     // The abandoned page lands: it must neither paint nor release the flag the newer
     // page owns.
@@ -138,7 +138,7 @@ describe("D1 loadingMore is released when the conversation switches", () => {
     vi.mocked(api.getConversationEvents).mockImplementation((id: string) =>
       Promise.resolve(eventsPage(id === "c1" ? [10, 9] : [30, 29], id === "c1" ? 8 : 28) as never),
     );
-    const { rerender } = render(<ActivityPanel conversationId="c1" />);
+    const { rerender } = render(<ActivityPanel conversationId="c1" events={eventsPage([10, 9], 8).data.events as never} nextBefore={8} />);
     await act(async () => {});
 
     vi.mocked(api.getConversationEvents).mockReturnValueOnce(abandoned.promise);
@@ -152,5 +152,32 @@ describe("D1 loadingMore is released when the conversation switches", () => {
 
     const loadOlder = screen.getByRole("button", { name: "Load older activity" }) as HTMLButtonElement;
     expect(loadOlder.disabled).toBe(false);
+  });
+});
+
+describe("tail and page reads", () => {
+  it.each(["tail-first", "page-first"] as const)("keeps newest and older events without duplicates (%s)", async (order) => {
+    const tail = deferred<never>();
+    const page = deferred<never>();
+    vi.mocked(api.getConversationEvents).mockResolvedValueOnce({ ok: false, error: { code: "internal", message: "page failed" } } as never);
+    render(<ActivityPanel conversationId="c1" events={eventsPage([6, 7, 8, 9, 10]).data.events as never} nextBefore={6} />);
+    fireEvent.click(screen.getByRole("button", { name: "Load older activity" }));
+    await screen.findByRole("alert");
+    vi.mocked(api.getConversationEvents).mockReturnValueOnce(tail.promise).mockReturnValueOnce(page.promise);
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await act(async () => {});
+     fireEvent.click(screen.getByRole("button", { name: "Load older activity" }));
+     await act(async () => {});
+    await act(async () => {});
+
+    const resolveTail = () => tail.resolve(eventsPage([7, 8, 9, 10, 11], 7) as never);
+    const resolvePage = () => page.resolve(eventsPage([4, 5, 6, 7], 4) as never);
+    await act(async () => {
+      if (order === "tail-first") { resolveTail(); resolvePage(); }
+      else { resolvePage(); resolveTail(); }
+    });
+    const seqs = [...document.querySelectorAll(".activity-item")].map((row) => Number(row.querySelector("span[style*='0.75rem']")?.textContent?.replace(/\D/g, "")));
+    expect(seqs).toEqual([11, 10, 9, 8, 7, 6, 5, 4]);
+    expect(new Set(seqs).size).toBe(seqs.length);
   });
 });

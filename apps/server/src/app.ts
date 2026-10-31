@@ -314,9 +314,12 @@ export function buildApp(deps: AppDependencies): FastifyInstance<HttpServer> {
     } catch {
       return reply.code(500).send(fail("internal", "Unable to read Collab host registry."));
     }
-    const hostAvailability = new Map<string, boolean>();
-    for (const host of hosts) if (!hostAvailability.has(host.sessionId)) hostAvailability.set(host.sessionId, host.relayConnected === true);
-    return ok(sessions.map((session) => ({ ...session, hasCollabHost: hostAvailability.get(session.sessionId) ?? false })));
+    const hostsBySession = new Map<string, CollabHost>();
+    for (const host of hosts) if (!hostsBySession.has(host.sessionId)) hostsBySession.set(host.sessionId, host);
+    return ok(sessions.map((session) => {
+      const host = hostsBySession.get(session.sessionId);
+      return { ...session, hasCollabHost: host?.relayConnected === true, relayConnected: host?.relayConnected ?? null, collabHostReported: Boolean(host) };
+    }));
   });
   app.post("/api/projects/:id/sessions/:sessionId/attach-live", { preHandler: protectedHook }, async (request, reply) => {
     const params = z.object({ id: z.string().min(1).max(128), sessionId: z.string().min(1).max(128) }).safeParse(request.params);
@@ -452,7 +455,7 @@ export function buildApp(deps: AppDependencies): FastifyInstance<HttpServer> {
           { observation: true, expectedObservationSeq: observationSeqOf(started) },
         ).catch(() => null);
       }
-      return reply.code(code === "internal" ? 500 : code === "not_found" ? 404 : 409).send(fail(code, message));
+      return reply.code(code === "internal" ? 500 : code === "not_found" ? 404 : code === "path_forbidden" ? 403 : 409).send(fail(code, message));
     }
   });
   // SEC-7: A top-level cross-site navigation to GET /api/conversations/:id with an
@@ -607,7 +610,7 @@ export function buildApp(deps: AppDependencies): FastifyInstance<HttpServer> {
       return ok(conversation);
     } catch (error) {
       const code = runtimeErrorCode(error);
-      return reply.code(code === "internal" ? 500 : code === "not_found" ? 404 : 409).send(fail(code, String(redactLogValue(error instanceof Error ? error.message : "Conversation action failed"))));
+      return reply.code(code === "internal" ? 500 : code === "not_found" ? 404 : code === "path_forbidden" ? 403 : 409).send(fail(code, String(redactLogValue(error instanceof Error ? error.message : "Conversation action failed"))));
     }
   });
   app.get("/api/models", { preHandler: protectedHook }, async () => {

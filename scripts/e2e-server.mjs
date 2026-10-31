@@ -9,10 +9,11 @@
  */
 import { spawn, spawnSync } from "node:child_process";
 import { randomBytes, scryptSync } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { constants as osConstants, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { reapServerWriters as reapServerWritersForRun } from "./e2e-utils.mjs";
 
 const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 
@@ -71,7 +72,9 @@ if (!tsxBin) {
 }
 
 // ── 2. Hermetic state ──────────────────────────────────────────────────────
-const tempRoot = realpathSync(mkdtempSync(join(tmpdir(), "caw-e2e-")));
+const tempRootPath = mkdtempSync(join(tmpdir(), "caw-e2e-"));
+process.once("exit", () => rmSync(tempRootPath, { recursive: true, force: true }));
+const tempRoot = realpathSync(tempRootPath);
 const stateDir = join(tempRoot, "state");
 const rootsDir = join(tempRoot, "roots");
 const secondaryRootsDir = join(tempRoot, "roots-secondary");
@@ -293,28 +296,8 @@ function reapTmuxServer() {
  * to recreate files after exit.
  */
 function reapServerWriters(signal = "SIGKILL") {
-  if (process.platform !== "linux") return;
-  try {
-    const target = `CAW_STATE_DIR=${stateDir}`;
-    for (const entry of readdirSync("/proc")) {
-      if (!/^\d+$/.test(entry)) continue;
-      const pid = Number(entry);
-      if (pid === process.pid || pid === child.pid) continue;
-      try {
-        const environ = readFileSync(`/proc/${pid}/environ`, "utf8");
-        if (environ.includes(target)) {
-          process.kill(pid, signal);
-        }
-      } catch {
-        /* process already exited or permission denied */
-      }
-    }
-  } catch {
-    /* /proc unreadable */
-  }
+  reapServerWritersForRun(stateDir, child.pid, signal);
 }
-
-
 /**
  * Playwright's webServer teardown contract: on SIGTERM it waits up to
  * `gracefulShutdown.timeout` (10s), then SIGKILLs the process group. The group
@@ -329,18 +312,22 @@ function reapServerWriters(signal = "SIGKILL") {
  * holds no work of its own — a launcher SIGINT/SIGTERM during startup is already
  * fatal — so stopping it costs nothing.
  */
+let expectedTeardown = false;
+
 process.on("SIGINT", () => {
+  expectedTeardown = true;
   reapTmuxServer(true);
   reapServerWriters("SIGINT");
   child.kill("SIGINT");
 });
 process.on("SIGTERM", () => {
+  expectedTeardown = true;
   reapTmuxServer(true);
   reapServerWriters("SIGTERM");
   child.kill("SIGTERM");
 });
 
-child.on("exit", (code) => {
+child.on("exit", (code, signal) => {
   // The server ended: reaped by one of the signal handlers, or on its own
   // (crash, or an external stop). Reap its tmux server and any surviving
   // descendant writers, remove the temp tree and default manifest, then mirror
@@ -355,7 +342,19 @@ child.on("exit", (code) => {
   } catch {
     /* already gone, or unwritable: nothing left to clean. */
   }
-  process.exit(code ?? 0);
+  if (code !== null) process.exit(code);
+  if (expectedTeardown) process.exit(0);
+  process.exit(signal ? 128 + (osConstants.signals[signal] ?? 1) : 1);
+});
+child.on("error", (err) => {
+  rmSync(tempRoot, { recursive: true, force: true });
+  try {
+    rmSync(manifestFile, { force: true });
+  } catch {
+    /* already gone, or unwritable: nothing left to clean. */
+  }
+  process.stderr.write(`[e2e-server] could not start server: ${err.message}\n`);
+  process.exit(1);
 });
 
 const port = env.CAW_PORT;

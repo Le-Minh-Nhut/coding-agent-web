@@ -1,19 +1,31 @@
 import * as fs from "node:fs/promises";
+import * as os from "node:os";
 import * as path from "node:path";
 import { execFileSync } from "node:child_process";
-import { beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 const rootDir = path.resolve(__dirname, "../..");
-const distDir = path.join(rootDir, "packages/guest/dist");
 const buildScript = path.join(rootDir, "scripts/build-guest.mjs");
+/**
+ * Built fresh into a private directory for this file. Asserting against
+ * `packages/guest/dist` let a source edit pass on a stale artifact — the CAW-07
+ * `Promise.withResolvers` check in particular only proves anything if the bytes
+ * were bundled from the current source.
+ */
+let distDir = "";
 
 describe("Guest client static security and PWA assertions", () => {
   beforeAll(async () => {
-    try {
-      await fs.stat(path.join(distDir, "index.html"));
-    } catch {
-      execFileSync("node", [buildScript], { cwd: rootDir, stdio: "pipe" });
-    }
+    distDir = await fs.mkdtemp(path.join(os.tmpdir(), "caw-guest-dist-"));
+    execFileSync("node", [buildScript], {
+      cwd: rootDir,
+      stdio: "pipe",
+      env: { ...process.env, CAW_GUEST_DIST_DIR: distDir },
+    });
+  });
+
+  afterAll(async () => {
+    if (distDir) await fs.rm(distDir, { recursive: true, force: true });
   });
 
   it("asserts index.html and JS bundles contain no third-party analytics or off-origin secrets", async () => {
@@ -94,5 +106,8 @@ describe("Guest client static security and PWA assertions", () => {
 
     // Must use replaceState to strip the fragment
     expect(jsContent).toContain("replaceState");
+
+    // CAW-07: Must not use Promise.withResolvers (esbuild target safari16 has no runtime polyfill)
+    expect(jsContent).not.toContain("withResolvers");
   });
 });

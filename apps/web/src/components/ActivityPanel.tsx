@@ -51,21 +51,9 @@ export function ActivityPanel({
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
   /**
-   * F-B1/F-B2: every read (tail reload and backward page) takes the next
-   * generation, and it may only touch the panel while it is still the newest
-   * read *and* still the same conversation. A disposition-less "in flight" flag
-   * is not enough: a tail reload that started first but lands last used to replace
-   * the rows a backward page had just prepended, silently dropping the seq range
-   * between the two windows and leaving the cursor unable to reach it. A late read
-   * for a previous conversation is dropped the same way.
-   */
-  const readGenerationRef = useRef(0);
-  /**
    * The two entry points each own their own in-flight flag, so which response may
    * release it is decided per entry point: a tail reload must not clear the spinner a
    * NEWER tail reload still owns (ACTIVITY-01), and neither must a backward page.
-   * The shared `readGenerationRef` above stays the payload/ordering guard across both
-   * entry points; these two only decide flag ownership.
    */
   const tailGenerationRef = useRef(0);
   const pageGenerationRef = useRef(0);
@@ -80,7 +68,6 @@ export function ActivityPanel({
   const loadEvents = async () => {
     if (!conversationId) return;
     const id = conversationId;
-    const generation = ++readGenerationRef.current;
     // The flag is owned by the newest TAIL read, so an older tail read landing late
     // cannot clear the spinner the user is waiting on (ACTIVITY-01), while the newest
     // tail read always releases it — which is what keeps `loading` from wedging.
@@ -89,10 +76,11 @@ export function ActivityPanel({
     setError(null);
     const res = await api.getConversationEvents(id);
     if (tailGenerationRef.current === tail) setLoading(false);
-    if (conversationIdRef.current !== id || readGenerationRef.current !== generation) return;
+    if (conversationIdRef.current !== id || tailGenerationRef.current !== tail) return;
     if (res.ok) {
-      setEvents(res.data.events);
-      setNextBefore(res.data.nextBefore ?? null);
+      setEvents((prev) => [...new Map([...prev, ...res.data.events].map((event) => [event.seq, event])).values()]);
+      const next = res.data.nextBefore ?? null;
+      setNextBefore((prev) => (prev === null || next === null ? next : Math.min(prev, next)));
     } else setError(res.error.message || "Could not load activity.");
   };
 
@@ -100,7 +88,6 @@ export function ActivityPanel({
     conversationIdRef.current = conversationId;
     // F-B2: a new conversation starts blank. Anything already in flight for the
     // previous one is superseded here and dropped on landing.
-    readGenerationRef.current += 1;
     // This effect is taking over the panel's state, so it also takes over the tail
     // flag from whatever tail read it just superseded: an abandoned read can no
     // longer release it (that is the point of the ownership check in loadEvents), so
@@ -130,15 +117,14 @@ export function ActivityPanel({
     if (!conversationId || nextBefore === null || loadingMore) return;
     const id = conversationId;
     const cursor = nextBefore;
-    const generation = ++readGenerationRef.current;
     const page = ++pageGenerationRef.current;
     setLoadingMore(true);
     setError(null);
     const res = await api.getConversationEvents(id, { before: cursor });
     if (pageGenerationRef.current === page) setLoadingMore(false);
-    if (conversationIdRef.current !== id || readGenerationRef.current !== generation) return;
+    if (conversationIdRef.current !== id || pageGenerationRef.current !== page) return;
     if (res.ok) {
-      setEvents((prev) => [...res.data.events, ...prev]);
+      setEvents((prev) => [...new Map([...res.data.events, ...prev].map((event) => [event.seq, event])).values()]);
       setNextBefore(res.data.nextBefore ?? null);
     } else setError(res.error.message || "Could not load more activity.");
   };

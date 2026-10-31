@@ -438,6 +438,7 @@ const supervisor = createSupervisor({
       }
     },
     findBySessionId: (id) => catalog.findBySessionId(id),
+    readSessionId: async (path) => (await catalog.readHeader(path))?.sessionId ?? null,
   },
 });
 

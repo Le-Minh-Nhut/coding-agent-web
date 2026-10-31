@@ -7,7 +7,7 @@ import type {
 import { OctagonX, RotateCcw, SendHorizontal, X } from "lucide-react";
 import type { ReactNode } from "react";
 import { useEffect, useRef, useState } from "react";
-import type { GuestClient } from "../../lib/client";
+import type { ConnectionPhase, GuestClient } from "../../lib/client";
 import { fmtCost, fmtDuration, fmtTokens } from "../../lib/format";
 import { decideTranscriptPoll } from "../../lib/transcript-poll";
 import type { TranscriptProps } from "../transcript/Transcript";
@@ -23,18 +23,21 @@ export function AgentDrawer(props: {
   progress?: SubagentProgressPayload;
   lifecycle?: SubagentLifecyclePayload;
   client: GuestClient;
+  phase: ConnectionPhase;
   /** View-link guests: hide kill/revive/chat (the host rejects them anyway). */
   readOnly?: boolean;
   /** Forwarded to tool renderers so nested task cards can drill further. */
   host?: TranscriptProps["host"];
   onClose(): void;
 }): ReactNode {
-  const { agent, progress, lifecycle, client, readOnly, host, onClose } = props;
+  const { agent, progress, lifecycle, client, phase, readOnly, host, onClose } = props;
   const [entries, setEntries] = useState<readonly SessionEntry[]>([]);
   const [fetchError, setFetchError] = useState<string | null>(null);
+  const [sendError, setSendError] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
   /** Resumes a stopped poll loop; null while no loop is mounted. */
   const resumePollingRef = useRef<(() => void) | null>(null);
+  const sendingChatRef = useRef(false);
   const quiescentRef = useRef(false);
   quiescentRef.current = agent.status !== "running";
 
@@ -78,7 +81,7 @@ export function AgentDrawer(props: {
       try {
         const reply = await client.fetchTranscript(agent.id, cursor);
         if (disposed) return;
-        const decision = decideTranscriptPoll(reply, carry);
+        const decision = decideTranscriptPoll(reply, reply?.kind === "rows" && reply.newSize < cursor ? "" : carry);
         switch (decision.action) {
           case "retry":
             return; // timeout/transient → keep polling from the same cursor
@@ -88,11 +91,12 @@ export function AgentDrawer(props: {
             setFetchError(decision.message);
             return;
           case "advance": {
+            const rewound = decision.newSize < cursor;
             const grew = decision.newSize !== cursor;
             cursor = decision.newSize;
             carry = decision.carry;
-            if (decision.fresh.length > 0) {
-              acc = [...acc, ...decision.fresh];
+            if (decision.fresh.length > 0 || rewound) {
+              acc = rewound ? decision.fresh : [...acc, ...decision.fresh];
               setEntries(acc);
             }
             idlePolls = grew || !quiescentRef.current ? 0 : idlePolls + 1;
@@ -101,6 +105,11 @@ export function AgentDrawer(props: {
             return;
           }
         }
+      } catch (err) {
+        if (disposed) return;
+        failed = true;
+        stopPolling();
+        setFetchError(err instanceof Error ? err.message : "transcript fetch failed");
       } finally {
         inFlight = false;
       }
@@ -129,11 +138,20 @@ export function AgentDrawer(props: {
     resumePollingRef.current?.();
   }, [progress, lifecycle, agent.status, agent.lastActivity]);
 
-  const sendChat = () => {
+  const sendChat = (): void => {
     const text = draft.trim();
-    if (!text) return;
-    client.sendAgentCmd("chat", agent.id, text);
-    setDraft("");
+    if (!text || sendingChatRef.current) return;
+    sendingChatRef.current = true;
+    setSendError(null);
+    void client.sendAgentCmd("chat", agent.id, text).then(
+      (accepted) => {
+        if (accepted) setDraft((current) => current.trim() === text ? "" : current);
+        else setSendError("message not sent — press send to retry");
+      },
+      () => setSendError("message not sent — press send to retry"),
+    ).finally(() => {
+      sendingChatRef.current = false;
+    });
   };
 
   const p = progress?.progress;
@@ -156,7 +174,7 @@ export function AgentDrawer(props: {
           ) : null}
         </div>
         <div className="ag-drawer-actions">
-          {agent.status === "running" && !readOnly ? (
+          {agent.status === "running" && !readOnly && phase === "live" ? (
             <button
               type="button"
               className="ag-btn ag-btn--danger"
@@ -167,7 +185,7 @@ export function AgentDrawer(props: {
             </button>
           ) : null}
           {(agent.status === "parked" || agent.status === "aborted") &&
-          !readOnly ? (
+          !readOnly && phase === "live" ? (
             <button
               type="button"
               className="ag-btn"
@@ -260,6 +278,7 @@ export function AgentDrawer(props: {
             placeholder={`message ${agent.displayName}…`}
             onChange={(e) => setDraft(e.target.value)}
           />
+          {sendError && <div className="ag-fetch-error" role="status">{sendError}</div>}
           <button
             type="submit"
             className="ag-iconbtn"

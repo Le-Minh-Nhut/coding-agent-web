@@ -91,13 +91,13 @@ Then open `http://127.0.0.1:8791` locally, or follow
 session link handed to the browser is built from it — leave it out and the link
 points at a loopback port your phone cannot reach.
 
-Verify the whole loop yourself, without spending provider credits:
+Verify the whole loop yourself:
 
 ```bash
 pnpm compat                            # machine capability probe (spawns nothing)
-TMPDIR=$HOME/.cache pnpm test:e2e       # mobile UI, 24 specs
+TMPDIR=$HOME/.cache pnpm test:e2e       # mobile UI, 13 specs
 CAW_COMPAT=1 pnpm vitest run tests/compat # real OMP; launches agents
-node scripts/acceptance-ui-drives-agent.mjs --base <origin> --token-file <file> --root <dir>
+node scripts/acceptance-ui-drives-agent.mjs --base <origin> --tmp <scratch-dir> --root <scratch-dir>/roots --password <secret>
 ```
 
 The last one drives your real UI against a real agent and prints a PASS/FAIL line

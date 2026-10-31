@@ -125,7 +125,7 @@ must be checked by hand — they are listed in `docs/operations/iphone-setup.md`
 
 ## Verifying the harness without a live relay
 
-`GET /api/conversations/:id/link` is not implemented yet, and a real link needs a
+`POST /api/conversations/:id/link` is implemented, but a real link needs a
 live `omp` session, so the conversation specs answer that endpoint from the
 harness and stand in for the relay with `page.routeWebSocket`. The mock host
 seals real frames (4-byte big-endian peer prefix + AES-256-GCM `[12B IV][tag]`)

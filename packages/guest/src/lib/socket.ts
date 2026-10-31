@@ -33,7 +33,7 @@ interface PendingSend {
 }
 
 /** The repo targets Node 20, which has no `Promise.withResolvers`. */
-function deferred<T>(): { promise: Promise<T>; settle: (value: T) => void } {
+export function deferred<T>(): { promise: Promise<T>; settle: (value: T) => void } {
 	let settle!: (value: T) => void;
 	const promise = new Promise<T>((resolve) => {
 		settle = resolve;
@@ -82,6 +82,10 @@ export class CollabSocket {
 		return this.#ws?.readyState === WebSocket.OPEN;
 	}
 
+	get isGreeted(): boolean {
+		return this.#helloAcknowledged;
+	}
+
 	connect(): void {
 		if (this.#ws || this.#retryTimer) return;
 		this.#closed = false;
@@ -99,7 +103,9 @@ export class CollabSocket {
 		const outcome = deferred<boolean>();
 		const step = this.#sendChain.then(async (): Promise<void> => {
 			try {
-				if (this.#closed) return outcome.settle(false);
+				if ((frame.t === "abort" || frame.t === "agent-cmd" && frame.cmd !== "chat") && !this.#helloAcknowledged) {
+					return outcome.settle(false);
+				}
 				const sealed = await seal(await this.#opts.key, frame);
 				const envelope = packEnvelope(targetPeer, sealed);
 				const ws = this.#ws;
@@ -144,7 +150,13 @@ export class CollabSocket {
 	}
 
 	#openSocket(): void {
-		const ws = new WebSocket(`${this.#opts.wsUrl}?role=${this.#opts.role}`);
+		let ws: WebSocket;
+		try {
+			ws = new WebSocket(`${this.#opts.wsUrl}?role=${this.#opts.role}`);
+		} catch (err) {
+			this.onClose?.(err instanceof Error ? err.message : "failed to create WebSocket", false);
+			throw err;
+		}
 		ws.binaryType = "arraybuffer";
 		this.#ws = ws;
 		this.#helloAcknowledged = false;
