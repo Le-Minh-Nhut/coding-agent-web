@@ -9,7 +9,7 @@
  */
 import { spawn, spawnSync } from "node:child_process";
 import { randomBytes, scryptSync } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -36,6 +36,15 @@ function refuse(message) {
   process.stderr.write(`\n[e2e-server] cannot start: ${message}\n\n`);
   process.exit(1);
 }
+process.stdout.on("error", (err) => {
+  if (err.code === "EPIPE") return;
+  throw err;
+});
+process.stderr.on("error", (err) => {
+  if (err.code === "EPIPE") return;
+  throw err;
+});
+
 
 // ── 1. Preconditions ────────────────────────────────────────────────────────
 // The launcher starts the source entry point, so it needs the workspace's own
@@ -238,12 +247,19 @@ const env = {
   CAW_LOG_LEVEL: process.env.CAW_LOG_LEVEL ?? "warn",
 };
 
-const child = spawn(tsxBin, [SERVER_ENTRY], {
-  cwd: repoRoot,
-  env,
-  stdio: "inherit",
-  shell: false, // array argv only; see AGENTS.md hard rule 1.
-});
+const child = process.env.CAW_E2E_TSX
+  ? spawn(process.env.CAW_E2E_TSX, [SERVER_ENTRY], {
+      cwd: repoRoot,
+      env,
+      stdio: "inherit",
+      shell: false,
+    })
+  : spawn(process.execPath, ["--import", "tsx", SERVER_ENTRY], {
+      cwd: repoRoot,
+      env,
+      stdio: "inherit",
+      shell: false,
+    });
 
 /**
  * The app's private tmux server socket. Derived exactly as the server derives it
@@ -270,6 +286,34 @@ function reapTmuxServer() {
     /* no server running, or tmux absent: nothing left to reap. */
   }
 }
+/**
+ * Any process writing into this run's hermetic tree carries CAW_STATE_DIR in
+ * its environment. If an external runner or wrapper was used that spawned a
+ * grandchild, stop and reap them before removing the tree so no writer survives
+ * to recreate files after exit.
+ */
+function reapServerWriters(signal = "SIGKILL") {
+  if (process.platform !== "linux") return;
+  try {
+    const target = `CAW_STATE_DIR=${stateDir}`;
+    for (const entry of readdirSync("/proc")) {
+      if (!/^\d+$/.test(entry)) continue;
+      const pid = Number(entry);
+      if (pid === process.pid || pid === child.pid) continue;
+      try {
+        const environ = readFileSync(`/proc/${pid}/environ`, "utf8");
+        if (environ.includes(target)) {
+          process.kill(pid, signal);
+        }
+      } catch {
+        /* process already exited or permission denied */
+      }
+    }
+  } catch {
+    /* /proc unreadable */
+  }
+}
+
 
 /**
  * Playwright's webServer teardown contract: on SIGTERM it waits up to
@@ -287,22 +331,22 @@ function reapTmuxServer() {
  */
 process.on("SIGINT", () => {
   reapTmuxServer(true);
+  reapServerWriters("SIGINT");
   child.kill("SIGINT");
 });
-// Playwright's teardown signal: reap, stop the child, and let its exit handler
-// remove tempRoot. Without the kill the child keeps running, the exit handler
-// never fires, and every ordinary `pnpm test:e2e` leaves its temp tree behind.
 process.on("SIGTERM", () => {
   reapTmuxServer(true);
+  reapServerWriters("SIGTERM");
   child.kill("SIGTERM");
 });
 
 child.on("exit", (code) => {
   // The server ended: reaped by one of the signal handlers, or on its own
-  // (crash, or an external stop). Reap its tmux server, remove the temp tree and
-  // the default manifest, then mirror the exit so Playwright reports the real
-  // failure.
+  // (crash, or an external stop). Reap its tmux server and any surviving
+  // descendant writers, remove the temp tree and default manifest, then mirror
+  // the exit so Playwright reports the real failure.
   reapTmuxServer(true);
+  reapServerWriters("SIGKILL");
   rmSync(tempRoot, { recursive: true, force: true });
   try {
     // The manifest we wrote; with the default it sits in tmpdir() and would
@@ -349,5 +393,7 @@ writeFileSync(
   "utf8",
 );
 
-process.stdout.write(`[e2e-server] listening on http://127.0.0.1:${port}\n`);
-process.stdout.write(`[e2e-server] state=${stateDir} roots=${rootsDir} fixture=${manifestFile}\n`);
+process.stdout.write(
+  `[e2e-server] listening on http://127.0.0.1:${port}\n` +
+    `[e2e-server] state=${stateDir} roots=${rootsDir} fixture=${manifestFile}\n`,
+);

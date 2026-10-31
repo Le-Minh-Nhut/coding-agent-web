@@ -68,10 +68,26 @@ async function freePort(): Promise<number> {
 }
 
 async function waitForLine(stream: Readable, needle: string): Promise<void> {
-  for await (const chunk of stream) {
-    if (String(chunk).includes(needle)) return;
-  }
-  throw new Error(`launcher exited before printing ${JSON.stringify(needle)}`);
+  const { promise, resolve, reject } = withResolvers<void>();
+  const onData = (chunk: unknown) => {
+    if (String(chunk).includes(needle)) {
+      cleanup();
+      resolve();
+    }
+  };
+  const onClose = () => {
+    cleanup();
+    reject(new Error(`launcher exited before printing ${JSON.stringify(needle)}`));
+  };
+  const cleanup = () => {
+    stream.removeListener("data", onData);
+    stream.removeListener("close", onClose);
+    stream.removeListener("end", onClose);
+  };
+  stream.on("data", onData);
+  stream.once("close", onClose);
+  stream.once("end", onClose);
+  return promise;
 }
 
 it("removes its temp root and default manifest when stopped with SIGTERM", async () => {
@@ -101,7 +117,11 @@ it("removes its temp root and default manifest when stopped with SIGTERM", async
   env.CAW_RELAY_PORT = String(relayPort);
 
   const launcher = spawn(process.execPath, [LAUNCHER], { cwd: repoRoot, env, stdio: ["ignore", "pipe", "pipe"] });
-  launcher.stderr.resume(); // drained, never buffered: a full pipe would stall the server
+  let stderr = "";
+  launcher.stderr.setEncoding("utf8");
+  launcher.stderr.on("data", (chunk: string) => {
+    stderr += chunk;
+  });
   let tempRoot = "";
   try {
     await waitForLine(launcher.stdout, READY_LINE);
@@ -116,10 +136,11 @@ it("removes its temp root and default manifest when stopped with SIGTERM", async
     await exited;
     // Prove the launcher exited through its own cleanup path: a runtime still in
     // startup would have needed this test's SIGKILL fallback instead.
-    expect(launcher.signalCode).toBeNull();
+    expect(launcher.signalCode, `launcher killed by signal ${launcher.signalCode}; stderr: ${stderr}`).toBeNull();
+    expect(launcher.exitCode, `launcher exited with code ${launcher.exitCode}; stderr: ${stderr}`).toBe(0);
 
-    expect(existsSync(tempRoot)).toBe(false);
-    expect(existsSync(DEFAULT_MANIFEST)).toBe(false);
+    expect(existsSync(tempRoot), `tempRoot ${tempRoot} still exists after launcher exit (exitCode=${launcher.exitCode}, signalCode=${launcher.signalCode}); stderr: ${stderr}`).toBe(false);
+    expect(existsSync(DEFAULT_MANIFEST), `manifest ${DEFAULT_MANIFEST} still exists after launcher exit; stderr: ${stderr}`).toBe(false);
   } finally {
     if (launcher.exitCode === null) launcher.kill("SIGKILL");
     if (tempRoot) rmSync(tempRoot, { recursive: true, force: true });
