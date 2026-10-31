@@ -57,11 +57,13 @@ interface InteractionResults {
 }
 
 const VIEWPORTS = [
+  { name: "375x667", width: 375, height: 667, dpr: 2, isMobile: true, hasTouch: true },
   { name: "375x812", width: 375, height: 812, dpr: 3, isMobile: true, hasTouch: true },
   { name: "390x844", width: 390, height: 844, dpr: 2, isMobile: true, hasTouch: true },
   { name: "430x932", width: 430, height: 932, dpr: 3, isMobile: true, hasTouch: true },
   { name: "768x1024", width: 768, height: 1024, dpr: 2, isMobile: true, hasTouch: true },
   { name: "1280x800", width: 1280, height: 800, dpr: 1, isMobile: false, hasTouch: false },
+  { name: "1440x900", width: 1440, height: 900, dpr: 1, isMobile: false, hasTouch: false },
 ] as const;
 const SCREENS_DIR = join(process.cwd(), "docs", "assets", "screens");
 

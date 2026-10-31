@@ -216,6 +216,9 @@ describe("Single Origin & Static Web Serving", () => {
     try {
       const response = await app.inject({ method: "GET", url: "/unreadable.js" });
       expect(response.statusCode).toBe(500);
+      // The rethrow must land in the app-level error handler (`fail("internal")`),
+      // not in the SPA fallback: the body proves which of the two answered.
+      expect(response.json()).toMatchObject({ ok: false, error: { code: "internal" } });
       expect(response.body).not.toContain("Product UI");
 
       // The normal path and the genuinely-absent path are unchanged.
@@ -227,6 +230,30 @@ describe("Single Origin & Static Web Serving", () => {
       expect(absent.body).toContain("Product UI");
     } finally {
       await chmod(join(webDir, "unreadable.js"), 0o600);
+      await app.close();
+    }
+  });
+
+  it("reports an unreadable guest asset as a server fault, and still 404s a missing one", async () => {
+    // The guest handler routes through the same `tryServeFile`, so the narrowing
+    // must hold there too — and unlike the web handler it has no SPA fallback, so
+    // the only two honest answers are 500 (fault) and 404 (absent).
+    const { auth, config, store, guestDir } = await createFixture();
+    const app = buildApp({ config, auth, store });
+
+    await writeFile(join(guestDir, "unreadable.js"), "console.log('present');", "utf8");
+    await chmod(join(guestDir, "unreadable.js"), 0o000);
+    try {
+      const response = await app.inject({ method: "GET", url: "/guest/unreadable.js" });
+      expect(response.statusCode).toBe(500);
+      expect(response.json()).toMatchObject({ ok: false, error: { code: "internal" } });
+
+      const absent = await app.inject({ method: "GET", url: "/guest/definitely-absent.js" });
+      expect(absent.statusCode).toBe(404);
+      expect(absent.body).toContain("Not Found");
+      expect(absent.body).not.toContain("Guest Viewer");
+    } finally {
+      await chmod(join(guestDir, "unreadable.js"), 0o600);
       await app.close();
     }
   });
