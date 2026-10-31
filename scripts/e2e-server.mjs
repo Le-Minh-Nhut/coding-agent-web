@@ -11,7 +11,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { randomBytes, scryptSync } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -23,7 +23,13 @@ const SALT_BYTES = 16;
 const HASH_BYTES = 64;
 
 const SERVER_ENTRY = join(repoRoot, "apps", "server", "src", "server.ts");
-const WEB_DIST = join(repoRoot, "apps", "web", "dist");
+// The server derives its web assets from `CAW_WEB_DIST_DIR` (apps/server/src/config.ts),
+// so the precondition must check the same path the server will serve. A hardcoded
+// `apps/web/dist` would refuse a run whose assets are configured elsewhere — and
+// accept one whose real asset dir is missing.
+const WEB_DIST = process.env.CAW_WEB_DIST_DIR
+  ? resolve(repoRoot, process.env.CAW_WEB_DIST_DIR)
+  : join(repoRoot, "apps", "web", "dist");
 const WEB_INDEX = join(WEB_DIST, "index.html");
 
 function refuse(message) {

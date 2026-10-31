@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { existsSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -30,7 +30,6 @@ import { expect, it } from "vitest";
 const repoRoot = fileURLToPath(new URL("../..", import.meta.url));
 const LAUNCHER = join(repoRoot, "scripts", "e2e-server.mjs");
 const TSX = join(repoRoot, "node_modules", ".bin", "tsx");
-const WEB_INDEX = join(repoRoot, "apps", "web", "dist", "index.html");
 /** The launcher's own default; must match `tests/e2e/fixture.ts`'s fallback. */
 const DEFAULT_MANIFEST = join(tmpdir(), "caw-e2e-fixture.json");
 /** Printed only after the manifest is written, so it is a readiness signal. */
@@ -77,12 +76,20 @@ async function waitForLine(stream: Readable, needle: string): Promise<void> {
 
 it("removes its temp root and default manifest when stopped with SIGTERM", async () => {
   if (!existsSync(TSX)) throw new Error(`tsx devDependency missing at ${TSX}; run pnpm install`);
-  if (!existsSync(WEB_INDEX)) throw new Error(`web build missing at ${WEB_INDEX}; the launcher refuses to start without it`);
+
+  // This tier spawns no build, so the launcher's asset precondition (and the
+  // server's, which derives web assets from the same variable) is pointed at a
+  // stub `apps/web/dist` instead of requiring `pnpm --filter @caw/web build` to
+  // have run first. `CAW_WEB_DIST_DIR` is the server's own override, so this
+  // checks the same path the server will serve.
+  const webStub = mkdtempSync(join(tmpdir(), "caw-e2e-web-"));
+  writeFileSync(join(webStub, "index.html"), "<!doctype html><title>stub</title>\n");
 
   // Start from the state a "nothing was left behind" run should end in.
   rmSync(DEFAULT_MANIFEST, { force: true });
 
   const env: NodeJS.ProcessEnv = { ...process.env, CAW_LOG_LEVEL: "error" };
+  env.CAW_WEB_DIST_DIR = webStub;
   // The manifest default must be exercised, so the fixture variable stays unset;
   // the ports must not be, or this run races the default 4399 in a parallel batch.
   delete env.CAW_E2E_FIXTURE;
@@ -117,5 +124,6 @@ it("removes its temp root and default manifest when stopped with SIGTERM", async
     if (launcher.exitCode === null) launcher.kill("SIGKILL");
     if (tempRoot) rmSync(tempRoot, { recursive: true, force: true });
     rmSync(DEFAULT_MANIFEST, { force: true });
+    rmSync(webStub, { recursive: true, force: true });
   }
 });
