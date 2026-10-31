@@ -9,9 +9,11 @@ và `/home/heheboiz/data/caw-audit-r27/findings/F-series.md`. Không có số n�
 
 > **Bản này đã được cập nhật theo cây đã sửa.** Bản đầu viết trước vòng 2 và vòng 3 và trước
 > `ca9a7be`; nó còn ghi `API-01`/`STATIC-01` là không có fix và trích cổng lần chạy đầu
-> (`127 file / 878 test`, `76/76`). Cây hiện tại (`ca9a7be`, `HEAD == origin/main`) đã có cả hai fix
-> và các cổng cuối; mọi số dưới đây giờ lấy từ `audit/final-gates.md`, `audit/playwright-results.md`,
-> `audit/fixes.md` và CI run `41183496042`.
+> (`127 file / 878 test`, `76/76`). Bản cập nhật này (commit `58a1c82`, `HEAD == origin/main`) đối
+> chiếu với cây cuối `ca9a7be` — commit code cuối cùng, `HEAD` trước bản sửa tài liệu này — nơi cả
+> hai fix đã có; mọi số dưới đây giờ lấy từ `audit/final-gates.md`, `audit/playwright-results.md`,
+> `audit/fixes.md` và CI run `41183496042`. Bản thân `58a1c82` chỉ sửa tài liệu, không chạm code hay
+> test.
 
 > **Tuyên bố phạm vi, đọc trước khi trích dẫn.** Không agent nào khẳng định repo không còn lỗi. Hai
 > agent báo cáo không có P0/P1 trong phạm vi của họ — đó là phát biểu về những gì họ đọc, không phải
@@ -86,8 +88,8 @@ render của guest.
 
 ## 2. Bảng findings
 
-17 dòng theo ledger (cột "Trạng thái" là trạng thái **tại cây cuối `ca9a7be`** — `HEAD ==
-origin/main`, cây sạch — không phải trạng thái tại HEAD audit `26874b0`).
+17 dòng theo ledger (cột "Trạng thái" là trạng thái **tại cây cuối `ca9a7be`** — commit code cuối
+cùng — không phải trạng thái tại HEAD audit `26874b0`).
 
 | ID | Mức | File:line (HEAD) | Mô tả ngắn | Trạng thái |
 |---|---|---|---|---|
@@ -100,14 +102,14 @@ origin/main`, cây sạch — không phải trạng thái tại HEAD audit `2687
 | D-GUEST-01 | P2 | `packages/guest/src/lib/socket.ts:118-120` | Queue được xả trong `ws.onopen` và xoá **trước** `onOpen?.()` → frame ứng dụng đi trước `hello` khi reconnect; cap 256 xoá im lặng | **Đã sửa** — `#helloAcknowledged` + gate gửi (`:108`), flush theo `welcome` (`:203-204`, `:249`), `send()` trả `Promise<boolean>` |
 | D-GUEST-03 | P2 | `packages/guest/src/lib/socket.ts:179-193` | `4004` sau `4001` vẫn được coi là retryable → phòng đã retire bị thử lại vô hạn | **Đã sửa** — nhánh terminal `:221-227`, `retryRoom` thu hẹp còn `code === 4001` (`:228`) |
 | D-GUEST-02 | P3 | `packages/guest/src/lib/link.ts:160`; `:89-93` | Parser echo nguyên chuỗi link đã gửi (chính là bearer credential) vào error hiển thị cho người dùng copy | **Đã sửa** — text tĩnh ở cả hai bản sao (`packages/guest/src/lib/link.ts:93/107/163`, `packages/collab-protocol/src/link.ts:63/77/126`) |
-| API-01 | P3 | `apps/server/src/app.ts:403` | `conversationRequest.safeParse(request.body ?? {})` biến JSON `null` thành `{}` trước khi validate | **Đã sửa (vòng 3, `6b6de2f`)** — `app.ts:403` giờ đọc `conversationRequest.safeParse(request.body === undefined ? {} : request.body)`: body vắng mặt vẫn nhận default, `null` tường minh bị schema strict từ chối (400). Test hồi quy `tests/server/app.test.ts:870` ("refuses a literal null body instead of starting a fresh conversation", payload `"null"` → 400 + 0 conversation) và ca song song `:888` ("still starts a conversation from an absent body and from an empty object") |
-| STATIC-01 | P4 | `apps/server/src/static-web.ts:138-147` | `tryServeFile` gộp mọi lỗi open/stat/containment thành `false` → `EACCES`/`EIO` trên asset thật bị trả 404/SPA fallback | **Đã sửa (vòng 3, `6b6de2f`)** — `catch` thu hẹp còn `ENOENT`/`ENOTDIR`/`ELOOP` → `false`, mọi lỗi khác `throw` (`static-web.ts:146-147`). Test route-level: `tests/server/single-origin.test.ts:206` (web case, thêm ở `6b6de2f`) và `:237` (guest case, thêm ở `ca9a7be`) |
+| API-01 | P3 | `apps/server/src/app.ts:399` | `conversationRequest.safeParse(request.body ?? {})` biến JSON `null` thành `{}` trước khi validate | **Đã sửa (vòng 3, `6b6de2f`)** — cây hiện tại `apps/server/src/app.ts:403` đọc `conversationRequest.safeParse(request.body === undefined ? {} : request.body)`: body vắng mặt vẫn nhận default, `null` tường minh bị schema strict từ chối (400). Test hồi quy `tests/server/app.test.ts:870` ("refuses a literal null body instead of starting a fresh conversation", payload `"null"` → 400 + 0 conversation) và ca song song `:888` ("still starts a conversation from an absent body and from an empty object") |
+| STATIC-01 | P4 | `apps/server/src/static-web.ts:138-141` | `tryServeFile` gộp mọi lỗi open/stat/containment thành `false` → `EACCES`/`EIO` trên asset thật bị trả 404/SPA fallback | **Đã sửa (vòng 3, `6b6de2f`)** — `catch` tại `static-web.ts:138` giờ thu hẹp còn `ENOENT`/`ENOTDIR`/`ELOOP` → `false` (`:146`), mọi lỗi khác `throw` (`:147`). Test route-level: `tests/server/single-origin.test.ts:206` (web case, thêm ở `6b6de2f`) và `:237` (guest case, thêm ở `ca9a7be`) |
 | TOOL-01 | P2 | `scripts/capture-screens.mjs:14` | `process.exit(result.status ?? 0)` biến `spawnSync` thất bại (`status: null`, `result.error` có) thành exit 0 | **Đã sửa** — `result.error → exit(1)` (`:16-19`), `?? 0 → ?? 1` (`:21`). **Tái hiện được bằng lệnh thật** (`exit=0`) |
 | E2E-01 | P2 | `scripts/e2e-server.mjs:287` vs `playwright.config.ts:93` | SIGTERM chỉ reap tmux và cố ý không thoát, nên `child.on("exit")` (nơi xoá `tempRoot`) không bao giờ chạy trên lượt chạy bình thường | **Đã sửa** — SIGTERM giờ `child.kill("SIGTERM")` (`:289-291`) để exit handler dọn (`:300`) |
 | E2E-02 | P3 | `playwright.config.ts:34` vs `scripts/e2e-server.mjs:303` | Config quảng cáo `join(tmpdir(), "caw-e2e-fixture.json")` còn launcher ghi `join(tempRoot, "fixture.json")` — đường dẫn được quảng cáo không được ghi cũng không được xoá | **Đã sửa** — launcher dùng cùng default (`:319-320`) và xoá manifest trong exit handler (`:302-306`) |
 | ACTIVITY-01 | P3 | `ActivityPanel.tsx:80-81`, `:112-113` | `setLoading(false)`/`setLoadingMore(false)` chạy trước kiểm tra generation → read bị thay thế xoá spinner của read mới hơn | **Đã sửa** — mỗi entry point giữ generation riêng (`:70`, `:71`), release theo owner (`:91`, `:117`, `:138`) |
 | TOOL-02 | — | `scripts/e2e-server.mjs:198-209` | Bị báo là vi phạm rule-1 (canary `#!/bin/sh` tự sinh) | **Bác bỏ (INVALID_FINDING)** — canary là *file ghi xuống đĩa* cho kernel tra PATH, không phải process con; cả hai điểm spawn trong file dùng array argv + `shell: false` (`:235`, `:262`). Không sửa |
-| COMPOSER-01 | P2 | `packages/guest/src/components/shell/Composer.tsx:151-157` | Xoá draft chỉ khi delivery được chấp nhận (fix F13/D-GUEST-02) đã bỏ mất re-entry guard ngầm: hai lần Enter trước khi frame đầu settle xếp cùng prompt hai lần — regression do chính fix đó gây ra, tệ hơn HEAD | **Đã sửa (vòng 3)** — `sendingRef` in-flight (`Composer.tsx:137` khai báo, `:159` early return, `:181` release trong `finally`). Test `tests/guest/round27-composer-draft.test.tsx:110` ("sends exactly one prompt when Enter is pressed twice before the send settles") và `:137` |
+| COMPOSER-01 | P2 | `packages/guest/src/components/shell/Composer.tsx:151-157` (vị trí ở cây vòng 2 — defect **không tồn tại** ở HEAD `26874b0`; `send` ở baseline là `:148-153`) | Xoá draft chỉ khi delivery được chấp nhận (fix F13/D-GUEST-02) đã bỏ mất re-entry guard ngầm: hai lần Enter trước khi frame đầu settle xếp cùng prompt hai lần — regression do chính fix đó gây ra, tệ hơn HEAD | **Đã sửa (vòng 3)** — `sendingRef` in-flight (`Composer.tsx:137` khai báo, `:159` early return, `:181` release trong `finally`). Test `tests/guest/round27-composer-draft.test.tsx:110` ("sends exactly one prompt when Enter is pressed twice before the send settles") và `:137` |
 
 Tổng hợp trạng thái (tại `ca9a7be`): **16 dòng `CONFIRMED`, cả 16 đã được sửa và kiểm chứng được
 bằng thay đổi trong cây** — 13 dòng vòng 1 (`RUNTIME-01`, `WEB-01`, `WEB-02`, `RENDER-01/02/03`,
@@ -260,11 +262,13 @@ vòng 3.
 
 **Điều đã chứng minh được:**
 
-1. **17 dòng ledger được phân loại và có bằng chứng cho từng dòng.** 6 dòng tái hiện bằng probe đã
-   chạy thật (RUNTIME-01, RENDER-01, RENDER-02, D-GUEST-01, D-GUEST-03, TOOL-01) — trong đó 4 dòng
-   bằng lượt đối kháng (probe thật: `ws` server thật + AES-GCM thật cho socket; Chromium thật cho
-   CSP) và 1 dòng bằng lệnh `PATH=/nonexistent → exit=0`. 1 dòng bị bác bằng grep đã chạy (TOOL-02).
-   9 dòng còn lại là source-derived và được ghi đúng như vậy, không giả vờ đã chạy.
+1. **17 dòng ledger được phân loại và có bằng chứng cho từng dòng.** 7 dòng tái hiện bằng probe đã
+   chạy thật (RUNTIME-01, RENDER-01, RENDER-02, D-GUEST-01, D-GUEST-03, TOOL-01, `COMPOSER-01`) —
+   trong đó 4 dòng bằng lượt đối kháng (probe thật: `ws` server thật + AES-GCM thật cho socket;
+   Chromium thật cho CSP), 1 dòng bằng lệnh `PATH=/nonexistent → exit=0`, và `COMPOSER-01` bằng đo
+   `{ promptsSent: 2, texts: ["hello","hello"] }` ở lượt tái-tấn-công. 1 dòng bị bác bằng grep đã
+   chạy (TOOL-02). **9 dòng còn lại là source-derived** và được ghi đúng như vậy, không giả vờ đã
+   chạy.
 2. **16 dòng có thay đổi trong cây**, mỗi dòng kèm file:line trước/sau, và mỗi dòng có test hồi quy
    trừ `TOOL-01` (không có test nào phủ `scripts/capture-screens.mjs`).
 3. **Cổng xanh trên cây cuối**: typecheck 8/8 package, `915 passed | 8 skipped | 0 failed` trên máy
