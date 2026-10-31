@@ -4,10 +4,10 @@
 > `wdb/deepseek-ai/DeepSeek-V4.1-Flash`, nên alias cap 200k không còn cần thiết.
 > Trạng thái hiện tại: `models.yml` chỉ còn `cx`, `ag`, `or`; block provider
 > `cx-cap` đã bị xóa; `config.yml` route mọi lane sang
-> `cx/wdb/deepseek-ai/DeepSeek-V4.1-Flash:high` (`default` =
+> `9router/wdb/deepseek-ai/DeepSeek-V4.1-Flash:high` (`default` =
 > `9router/wdb/deepseek-ai/DeepSeek-V4.1-Flash:max`). Catalog xác nhận
-> `omp models cx-cap` → `{"models":[]}`, và `cx/wdb/...` báo
-> `contextWindow: 1048576`, `maxTokens: 384000`. Backup trước khi gỡ:
+> `omp models cx-cap` → `{"models":[]}`, và `9router/wdb/...` báo
+> `contextWindow: 1000000`, `maxTokens: 128000`. Backup trước khi gỡ:
 > `~/.omp/agent/{config,models}.yml.bak-20261031-r27`.
 >
 > Phần dưới là hồ sơ lịch sử của giải pháp cap — giữ nguyên để tham chiếu nếu
