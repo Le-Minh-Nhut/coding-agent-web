@@ -238,6 +238,7 @@ var/
 
 # ─── OMP overlay configs generated at runtime ────────────────────────────────
 .omp-run/
+.omp/
 
 # ─── Playwright ──────────────────────────────────────────────────────────────
 test-results/

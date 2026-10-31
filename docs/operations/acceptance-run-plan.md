@@ -11,7 +11,7 @@ Verification plan and observed results for Coding Agent Web driving real OMP age
 | **Tier 1: Machine Capability Probe** | `node scripts/compat-check.mjs` (or `pnpm compat`) | Node 20.19+, OMP binary on `PATH`, tmux 3.2+, read access to `/proc/net/unix` and `~/.omp`. Spawns no agent. | **No** (Costs nothing) |
 | **Tier 2: Real-OMP Compat Suite** | `CAW_COMPAT=1 npx vitest run tests/compat` | Vitest, Node 20.19+, functional OMP binary, tmux, active provider auth (`omp models`), disposable workspace under `/tmp`. Launches real agent processes into isolated test-scoped tmux servers. | **Yes** (Launches real agents; opt-in) |
 | **Tier 3: Browser E2E Suite** | `TMPDIR=$HOME/.cache pnpm test:e2e` | Built web app (`pnpm --filter @caw/web build`), built guest bundle (`node scripts/build-guest.mjs`), Playwright Chromium, room in `TMPDIR`. `CAW_OMP_BINARY_PATH` pins the one `omp` binary the server runs — registry *and* agent launch — to a recorder stub, with a PATH canary behind it. | **No** (a launched "agent" is the stub, which exits immediately; `tests/e2e/no-launch-guard.spec.ts` proves it from the recorder logs). |
-| **Tier 4: Acceptance Script (UI Drives Agent)** | `node scripts/acceptance-ui-drives-agent.mjs --base <origin> --token-file <file> --root <dir>` | Running CAW server instance with web assets, Playwright Chrome channel, seeded password/token file, directory in `allowedRoots`, active provider credentials. Creates project and conversation via UI, driving a live agent. | **Yes** (Launches real agent process via server) |
+| **Tier 4: Acceptance Script (UI Drives Agent)** | `node scripts/acceptance-ui-drives-agent.mjs --base <origin> --tmp <dir> --root <dir> --password <secret>` | Running CAW server instance with web assets, Playwright Chrome channel, a seeded password supplied via `--password`, directory in `allowedRoots`, active provider credentials. Creates project and conversation via UI, driving a live agent. | **Yes** (Launches real agent process via server) |
 
 ---
 
@@ -69,10 +69,23 @@ PASS  our UI opened a guest socket to the relay — ws://127.0.0.1:8801/r/OZNa4K
 PASS  the conversation screen reports a live session — ← | Acceptance run | Effective model: 9router/wdb/deepseek-ai/DeepSeek-V4.1-Flash | Activity | Agents (1) | Conversation model settings
 ```
 
+**Read that block as observation, not as assertion.** It is a hand-picked transcript, not the script's `RESULTS JSON`, and only the first two lines above are the script's own `pass(...)` records (`check1` at `acceptance-ui-drives-agent.mjs:903`; `check2c` at `:933`). Four of these criteria are **collected but never asserted** by the script as it stands:
+
+| Criterion in the block above | Actual status in `scripts/acceptance-ui-drives-agent.mjs` |
+| :--- | :--- |
+| login through the UI → projects screen | Asserted: `pass("check1", …)` at `:903`. |
+| conversation created, real agent launched | Asserted: `pass("check2c", "chat launch published tmux, native-session, and host identity", …)` at `:933`, reached only after `waitFreshConversation` (`:545-555`) has seen `tmuxSessionId`, `nativeSessionId` and `hostInstanceId`. |
+| "state reflects a live agent — idle" | **Observed, not asserted.** `conversation.state` is interpolated into `check2c`'s evidence string (`:933`) only; no `pass`/`fail` predicate tests `state === "idle"`. |
+| "a live session link is minted" | **Observed, not asserted.** Link responses are collected at `:2155` and read only inside check4's control gate (`:1042-1050`); no standalone pass/fail label. check15 mints a link at `:1889` but records failure as `skip` (`:1890-1893`), not `fail`. |
+| "our UI opened a guest socket to the relay" | **Observed, not asserted at all.** `socketLog` is pushed at `:2158-2161` with a frame counter and is **never read** — `grep -n socketLog` finds only the declaration (`:509`) and that push (`:2160`). |
+| "the conversation screen reports a live session" | **Observed, not asserted.** No such label exists; the nearest screen check is `check4`'s control evidence (`:1048`, reported inside `pass("check4a", …)` at `:1066`). |
+
+Keep this section as the record of what the script *does* assert; do not treat the transcript above as coverage for the last four rows.
+
 
 ## Round 9 — real-OMP acceptance
 
-Tier 4 now covers fifteen checks, including a prompt → reply → journal verification. One isolated real-OMP run completed against OMP `18.12.2`: **15 PASS / 2 FAIL / 0 SKIP**, **30.26 seconds**.
+Tier 4 defines fifteen checks, `check1` … `check15` (`acceptance-ui-drives-agent.mjs:862-1962`; `:2067-2068 knownChecks = Object.keys(checks)`), including a prompt → reply → journal verification. **"Fifteen checks exist" is not "fifteen scenarios were verified."** Counts are per *criterion record*, not per check — each check emits several. One isolated real-OMP run completed against OMP `18.12.2` and reported `PASS 15 / FAIL 2 / SKIP 0` over a **partial selection**: that run passed `--only check1,check2,check4,check5,check7,check9,check10`, i.e. 7 of the 15 checks, so 17 criterion records came from 7 checks and the remaining 8 checks were recorded `NOT SELECTED` (`:2202 for (const name of notSelected) record(name, "NOT SELECTED", …)`).
 
 Exact command:
 
@@ -104,9 +117,29 @@ PASS no second writer appeared — private tmux sessions 1→1, lease sockets 13
 FAIL check10 ran to completion — locator.fill: Error: Element is not an <input>, <textarea> or [contenteditable] element Call log: - waiting for locator('#<redacted>
 ```
 
-The first FAIL is a harness measurement disagreement: transcript shows one user row, but the journal query found zero `user`-role rows because OMP stores the pre-turn prompt in a non-`user`-role entry. Duplicate-resend risk remains **unproven**. The second FAIL happened because check10 called `fill()` on `#conversation-model`, a `<select>`; “Save & restart” was never clicked, so real-agent restart/resume remains **UNVERIFIED**. It is covered only by unit tests.
+> **These two FAIL lines describe OMP `18.12.2` runs from the round-9 vintage of the script. Both are now stale and must not be read as current known-failures.** The script at HEAD `26874b0` no longer produces either:
+> - **"nothing was silently resent"** — that criterion no longer exists. Its successor is `check7b`, "prompt reached host exactly once" (`acceptance-ui-drives-agent.mjs:1263`), and its predicate (`:1255-1257`) counts an entry when it is `custom_message`/`collab-prompt` **or** `message` with `role: "user"`. That is exactly the non-`user`-role storage that made the round-9 journal count return zero, so the measurement disagreement that produced this FAIL is fixed in the script itself — the script was corrected, not the product.
+> - **"check10 … locator.fill: Element is not an `<input>`"** — the `fill()`-on-a-`<select>` bug is gone. `check10` now selects the model through `chooseModelForRestart` (`:1507`), which uses `dropdown.selectOption(chosen)` on `select#conversation-model` (`:688-696`) and falls back to `#custom-model` only when that select is absent. Round 12 subsequently recorded `check10` passing with `argv --resume <journal path>`.
+>
+> The round-9 text originally concluded from these two failures that "duplicate-resend risk remains unproven" and that "real-agent restart/resume remains UNVERIFIED … covered only by unit tests." Both conclusions were warranted for that vintage of the script; at HEAD the corresponding checks (`check7b`, `check10`) have since been exercised, so treat those conclusions as superseded, not as current status.
 
 Cleanup: recorded tmux sessions and OMP PIDs exited, owner's process count was unchanged (4 before/after), and the scratch directory was removed. Real-agent checks are distinct from hermetic Chromium E2E.
+
+### Coverage claims: what is asserted, and what is silently skipped
+
+Read this before quoting any PASS count from this document.
+
+- **The script asserts; it does not merely print.** Every criterion goes through `record()` (`acceptance-ui-drives-agent.mjs:137-145`), `:142` `if (status === "FAIL") failed = true;`, and the process exits non-zero (`:2235 process.exit(failed ? 1 : 0);`). Its `RESULTS JSON` block (`:2232-2233`) is the authoritative record — prefer it over the hand-picked transcript in §3 above.
+- **SKIP never fails the run.** `:39` "Exit code is 1 if any check FAILed; SKIP never fails the run." A green run therefore does not prove every criterion ran. Any PASS/FAIL/SKIP tally must be read with the SKIP count.
+- **A run without `--password` executes only `check1`.** `:88-89` sets `BOOTSTRAP = hasFlag("--bootstrap") || !PASSWORD`, and `:2166-2168` then records every other selected check as `NOT RUN` (`"needs --password"`) and continues. Tier 4's prerequisites must include `--password` or the run is a login smoke test.
+- **Model-dependent checks skip silently when the isolated catalog has nothing usable.** If the filtered catalog is empty, `check3`, `check10` and `check11` each `skip` outright (`:948`, `:1501`, `:1569`) after a `skip("preflight-model-catalog", …)` at `:286`. So "restart/resume verified" is only claimable when a non-excluded model was present.
+- **Approval-dependent checks skip when no dialog appears.** `check6` (`:1170`) and `check15` (`:1886`) `skip` if `tools.approvalMode=always-ask` did not produce an approval request, and `check15` also `skip`s if the view-only link could not be minted (`:1890-1893`). A read-only-access verification can therefore be absent from a green run.
+- **The concurrency check can decline to test anything.** `check8` records `notRun("check8-race", "two concurrent chats have distinct writers", "NOT POSSIBLE VIA UI: …")` (`:1342`) when two independent browser contexts did not overlap their create request. That is a `NOT RUN`, not a pass.
+- **`--only` is a subset.** `:91` parses it and `:2202` records everything else as `NOT SELECTED`. The round-9 command below selects 7 of the 15 checks; the remaining 8 were not executed in that run.
+- **Provider credentials come from a copied profile.** `:221-231` copies `agent.db` from `--omp-auth-db` (mode `0600`, secrets not logged) or records `skip("preflight-agent-auth", "provider credentials", …)`.
+
+**Therefore: a check's existence is not evidence that it ran, and a run's exit code 0 is not evidence that every scenario was verified.** Quote the `RESULTS JSON` counts (PASS / FAIL / SKIP / NOT SELECTED / NOT RUN) together with the `--only` selection, never a bare PASS total.
+
 ---
 
 ## 4. Cleanup Proof
@@ -140,7 +173,7 @@ Cleanup was executed strictly by recorded IDs and PIDs:
 
 ## 5. iPhone Manual Verification Checklist
 
-Automated suites run in desktop/emulated viewports, but hardware iOS Safari quirks require physical device verification.
+Automated suites run in desktop/emulated viewports, but hardware iOS Safari quirks require physical device verification. **No automated check in this repository covers any row below**, and none may be upgraded on the strength of a green automation run: the acceptance harness launches Chromium only — `chromium.launch({ channel: "chrome" })` with a `390 × 844` emulated viewport (`acceptance-ui-drives-agent.mjs:2085-2089`) — which provides no iOS Safari rendering engine, no real virtual keyboard, no `visualViewport` resize behaviour, and no Home-Screen/PWA install path. All ten rows stay **UNVERIFIED** until a physical iPhone run records otherwise.
 
 | Item | What to watch for (One-line) | Status |
 | :--- | :--- | :--- |
