@@ -767,6 +767,18 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
           sessionId: host.sessionId,
         });
         const state = hostState(host);
+        // The row's explanation must not be silent about a dropped relay just because
+        // the turn flag is known: `evaluateState` reports both facts for the same
+        // observation, so the launch-publish path records both too.
+        const relayNote = host.relayConnected === false ? " Live viewing is unavailable: the relay is disconnected." : "";
+        const turnDetail =
+          state === "awaiting_input"
+            ? "The agent is waiting for an answer."
+            : state === "running"
+              ? "A turn is in flight."
+              : state === "idle"
+                ? "No turn in flight."
+                : "The agent does not report turn state (older OMP); activity here is unconfirmed.";
         return (
           (await options.store.updateConversationIfCurrent(conversationId, launchEpoch, {
             hostInstanceId: host.instanceId,
@@ -774,9 +786,7 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
             nativeSessionId: host.sessionId,
             model: host.model ?? conversation.model,
             state,
-            statusDetail: state === "unknown"
-              ? "The agent does not report turn state (older OMP); activity here is unconfirmed."
-              : null,
+            statusDetail: state === "unknown" || relayNote ? `${turnDetail}${relayNote}` : null,
             lastActivityAt: new Date(clock.now()).toISOString(),
           }))?.conversation ?? conversation
         );
@@ -989,6 +999,33 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
         : null;
       if (!tmux && host) {
         const state = hostState(host);
+        // Same composition rule as `evaluateState`: who owns the process, whether a
+        // turn is in flight, and whether the relay is up are three separate facts.
+        // Keying only on the busy flag recorded "it can be watched" for a host with
+        // no relay at all.
+        const relayNote =
+          host.relayConnected === false
+            ? " Live viewing is unavailable: the relay is disconnected."
+            : host.relayConnected === null
+              ? " Live viewing is unconfirmed: the host does not report relay connectivity."
+              : "";
+        const ownershipNote =
+          host.relayConnected === false
+            ? "Started outside this app; its lifecycle is not managed here."
+            : host.relayConnected === null
+              // "unknown" is not "watchable": an unreported relay is not evidence the
+              // host can be watched live, which is what `evaluateState` records for
+              // the same observation.
+              ? "Started outside this app; whether it can be watched is unconfirmed; its lifecycle is not managed here."
+              : "Started outside this app; it can be watched, and its lifecycle is not managed here.";
+        const turnDetail =
+          state === "awaiting_input"
+            ? "The agent is waiting for an answer."
+            : state === "running"
+              ? "A turn is in flight."
+              : state === "idle"
+                ? "No turn in flight."
+                : "The host does not report turn state (older OMP); activity here is unconfirmed.";
         await writeIfCurrent(conversation, {
           hostInstanceId: host.instanceId,
           // Same rule as the start path: an absent generation is not evidence of
@@ -996,9 +1033,7 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
           hostGeneration: host.generation ?? conversation.hostGeneration,
           ownership: "external",
           state,
-          statusDetail: host.busy === null || host.busy === undefined
-            ? "The host does not report turn state (older OMP); activity here is unconfirmed."
-            : "Started outside this app; it can be watched, and its lifecycle is not managed here.",
+          statusDetail: `${ownershipNote} ${turnDetail}${relayNote}`,
         });
         if (state === "unknown") report.unknown += 1;
         else report.external += 1;

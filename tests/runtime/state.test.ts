@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Conversation } from "@caw/contracts";
-import { evaluateState, launchVerdict } from "@caw/runtime";
+import { evaluateState, hostState, launchVerdict } from "@caw/runtime";
 import type { Observations, RuntimeHost, RuntimeTmuxSession } from "@caw/runtime";
 
 const tmux = (over: Partial<RuntimeTmuxSession> = {}): RuntimeTmuxSession => ({
@@ -42,6 +42,29 @@ const obs = (over: Partial<Observations> = {}): Observations => ({
   tmuxEnumerationFailed: false,
   tmuxEnumerationReason: null,
   ...over,
+});
+
+describe("hostState", () => {
+  it("reports running for an in-flight turn on a disconnected relay (RUNTIME-01)", () => {
+    expect(hostState(host({ relayConnected: false, busy: true }))).toBe("running");
+  });
+
+  it("leaves an unobserved busy flag unknown, not idle, on a disconnected relay (RUNTIME-01)", () => {
+    expect(hostState(host({ relayConnected: false, busy: null }))).toBe("unknown");
+    expect(hostState(host({ relayConnected: false, busy: undefined }))).toBe("unknown");
+  });
+
+  it("reports idle on a disconnected relay only for a confirmed-no-turn host", () => {
+    expect(hostState(host({ relayConnected: false, busy: false }))).toBe("idle");
+  });
+
+  it("still lets a pending question outrank turn state", () => {
+    expect(hostState(host({ relayConnected: false, busy: true, inputRequired: true }))).toBe("awaiting_input");
+  });
+
+  it("keeps an absent relay field unknown, not disconnected", () => {
+    expect(hostState(host({ relayConnected: null, busy: true }))).toBe("unknown");
+  });
 });
 
 describe("evaluateState", () => {
@@ -91,6 +114,46 @@ describe("evaluateState", () => {
     expect(verdict.detail).toMatch(/does not report relay connectivity/i);
   });
 
+  it("keeps an in-flight turn running when the relay is down (RUNTIME-01)", () => {
+    // Reachability and turn activity are independent observations: a dropped relay
+    // proves only that live viewing is unavailable, never that the agent stopped.
+    const verdict = evaluateState(obs({ tmux: tmux(), host: host({ relayConnected: false, busy: true }) }));
+    expect(verdict).toEqual({
+      state: "running",
+      ownership: "managed",
+      detail: expect.stringMatching(/live viewing is unavailable/i),
+    });
+  });
+
+  it("leaves an unobserved busy flag unknown, not idle, while the relay is down (RUNTIME-01)", () => {
+    expect(evaluateState(obs({ tmux: tmux(), host: host({ relayConnected: false, busy: null }) })).state).toBe("unknown");
+    expect(evaluateState(obs({ tmux: tmux(), host: host({ relayConnected: false, busy: undefined }) })).state).toBe("unknown");
+  });
+
+  it("reports idle for a disconnected relay only on the positive fact of no turn in flight", () => {
+    const verdict = evaluateState(obs({ tmux: tmux(), host: host({ relayConnected: false, busy: false }) }));
+    expect(verdict).toEqual({
+      state: "idle",
+      ownership: "managed",
+      detail: expect.stringMatching(/live viewing is unavailable/i),
+    });
+  });
+
+  it("keeps a pending question while the relay is down", () => {
+    const verdict = evaluateState(obs({ tmux: tmux(), host: host({ relayConnected: false, busy: true, inputRequired: true }) }));
+    expect(verdict.state).toBe("awaiting_input");
+  });
+
+  it("keeps an external in-flight turn running while the relay is down", () => {
+    const verdict = evaluateState(obs({ host: host({ relayConnected: false, busy: true }) }));
+    expect(verdict.state).toBe("running");
+    expect(verdict.detail).toMatch(/live viewing is unavailable/i);
+  });
+
+  it("leaves an external host's unobserved busy flag unknown while the relay is down", () => {
+    expect(evaluateState(obs({ host: host({ relayConnected: false, busy: null }) })).state).toBe("unknown");
+  });
+
   it("does not claim a waiting question when inputRequired is absent", () => {
     const verdict = evaluateState(obs({ tmux: tmux(), host: host({ busy: true, inputRequired: null }) }));
     expect(verdict.state).toBe("running");
@@ -100,6 +163,29 @@ describe("evaluateState", () => {
   it("marks a host we do not manage as external, and never as ours", () => {
     const verdict = evaluateState(obs({ tmux: null, host: host({ busy: true }) }));
     expect(verdict).toEqual({ state: "running", ownership: "external", detail: expect.stringMatching(/outside this app/i) });
+  });
+
+  it("composes turn state and a dropped relay for an external host, like the managed path", () => {
+    // The two facts are independent, so the external branch must not let the relay
+    // note replace the turn fact (nor the reverse): the managed path already
+    // composes them, and the same observation deserves the same explanation.
+    const running = evaluateState(obs({ host: host({ relayConnected: false, busy: true }) }));
+    expect(running.state).toBe("running");
+    expect(running.detail).toMatch(/turn is in flight/i);
+    expect(running.detail).toMatch(/live viewing is unavailable/i);
+
+    const idle = evaluateState(obs({ host: host({ relayConnected: false, busy: false }) }));
+    expect(idle.state).toBe("idle");
+    expect(idle.detail).toMatch(/no turn in flight/i);
+    expect(idle.detail).toMatch(/live viewing is unavailable/i);
+  });
+
+  it("keeps the relay-null explanation static for an external host, as the managed path does", () => {
+    const verdict = evaluateState(obs({ host: host({ relayConnected: null, busy: false }) }));
+    expect(verdict.state).toBe("unknown");
+    expect(verdict.detail).toBe(
+      "The host does not report relay connectivity, so live viewing is unconfirmed.",
+    );
   });
 
   it("reports stopped when the process is gone and the history survives", () => {

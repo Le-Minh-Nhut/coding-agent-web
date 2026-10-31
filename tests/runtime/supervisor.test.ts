@@ -1086,6 +1086,34 @@ describe("supervisor.start", () => {
     expect(result.state).toBe("unknown");
     expect(result.statusDetail).toMatch(/does not report turn state/i);
   });
+  it("records the dropped relay in statusDetail for a launched host that is running", async () => {
+    const world = makeWorld();
+    world.seed({ id: "c1" });
+    const originalLaunch = world.adapters.launch;
+    world.adapters.launch = async (spec) => {
+      const session = await originalLaunch(spec);
+      world.hosts.push({
+        instanceId: "inst-relay-down",
+        generation: 1,
+        pid: session.panePid ?? 1,
+        sessionId: "session-relay-down",
+        cwd: spec.cwd,
+        model: null,
+        participants: 1,
+        relayConnected: false,
+        inputRequired: false,
+        busy: true,
+        access: "control",
+      });
+      return session;
+    };
+    const supervisor = createSupervisor({ store: world.store, adapters: world.adapters, clock: instantClock, maxActive: 3, publishPollMs: 0 });
+    const result = await supervisor.start("c1", { conversationId: "c1", name: "caw-c1", cwd: "/tmp/project" });
+    expect(result.state).toBe("running");
+    // The row must not stay silent about a relay that is down: the state is honest
+    // and so is the explanation.
+    expect(result.statusDetail).toMatch(/live viewing is unavailable/i);
+  });
   it("reports an unpublished but live process as starting, not idle", async () => {
     const world = makeWorld();
     world.seed({ id: "c1" });
@@ -1759,6 +1787,51 @@ describe("supervisor.refresh", () => {
     expect((await supervisor.refresh("c1"))?.state).toBe("awaiting_input");
     expect((await world.store.getConversation("c1"))?.ownership).toBe("external");
     expect(world.launches).toHaveLength(0);
+  });
+
+  it("reports a dropped relay for an external host in reconcile, not 'it can be watched'", async () => {
+    const world = makeWorld();
+    world.seed({ nativeSessionId: "external-native", ownership: "external", state: "running" });
+    world.setLease(true);
+    world.hosts.push({
+      instanceId: "external-host", generation: 1, pid: 9000, sessionId: "external-native",
+      cwd: "/tmp/project", model: "model", participants: 1, relayConnected: false,
+      inputRequired: false, busy: true, access: "control",
+    });
+    const supervisor = createSupervisor({ store: world.store, adapters: world.adapters, clock: instantClock, maxActive: 3 });
+
+    await supervisor.reconcile();
+    const recorded = await world.store.getConversation("c1");
+    expect(recorded?.state).toBe("running");
+    expect(recorded?.ownership).toBe("external");
+    // A host with no relay cannot be watched live: the row must say so instead of
+    // recording the plain "it can be watched" line for the same observation.
+    expect(recorded?.statusDetail).toMatch(/live viewing is unavailable/i);
+    expect(recorded?.statusDetail).toMatch(/turn is in flight/i);
+    expect(recorded?.statusDetail).not.toMatch(/it can be watched/i);
+  });
+
+  it("does not claim an unreadable relay can be watched for an external host", async () => {
+    const world = makeWorld();
+    world.seed({ nativeSessionId: "external-native", ownership: "external", state: "running" });
+    world.setLease(true);
+    world.hosts.push({
+      instanceId: "external-host", generation: 1, pid: 9000, sessionId: "external-native",
+      cwd: "/tmp/project", model: "model", participants: 1, relayConnected: null,
+      inputRequired: false, busy: true, access: "control",
+    });
+    const supervisor = createSupervisor({ store: world.store, adapters: world.adapters, clock: instantClock, maxActive: 3 });
+
+    await supervisor.reconcile();
+    const recorded = await world.store.getConversation("c1");
+    // `relayConnected === null` is a real value (the registry maps any non-boolean
+    // field to null), and `evaluateState` says the opposite for it: an unreadable
+    // relay is not evidence the host can be watched live.
+    expect(recorded?.ownership).toBe("external");
+    // The affirmative "it can be watched" claim is gone; the detail says the relay
+    // (and therefore live viewing) is unconfirmed instead.
+    expect(recorded?.statusDetail).not.toMatch(/it can be watched,/i);
+    expect(recorded?.statusDetail).toMatch(/live viewing is unconfirmed/i);
   });
 
   it("reports unknown when an external host disappears", async () => {

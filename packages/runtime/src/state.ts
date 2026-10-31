@@ -27,8 +27,11 @@ export type { Observations };
  * know), then the process, then the room, then the lease.
  */
 export function hostState(host: RuntimeHost): RuntimeState {
+  // Relay reachability and turn activity are independent observations. A dropped
+  // relay proves only that live *viewing* is unavailable; the turn flag still
+  // decides whether a turn is in flight, and an unobserved flag stays unknown
+  // rather than becoming the idle a reachable relay would have produced.
   if (host.relayConnected === null || (host.busy !== true && host.busy !== false)) return "unknown";
-  if (!host.relayConnected) return "idle";
   if (host.inputRequired === true) return "awaiting_input";
   return host.busy ? "running" : "idle";
 }
@@ -80,16 +83,35 @@ export function evaluateState(observations: Observations): StateVerdict {
 
   if (host && !tmux) {
     const state = hostState(host);
+    // Same three facts the managed branch composes, in the same order and with the
+    // same wording: ownership framing, then the turn fact, then relay reachability.
+    // A single ternary keyed on the relay flag made the explanation report a relay
+    // problem for a turn-flag problem and vice versa.
+    if (host.relayConnected === null) {
+      // Matches the managed path: an unreported relay leaves the turn flag unable
+      // to produce a verdict either, so nothing about a turn may be claimed.
+      return {
+        state,
+        ownership: "external",
+        detail: "The host does not report relay connectivity, so live viewing is unconfirmed.",
+      };
+    }
+    const relayNote = host.relayConnected ? "" : " Live viewing is unavailable: the relay is disconnected.";
+    const ownershipNote = host.relayConnected
+      ? "Started outside this app; it can be watched, and its lifecycle is not managed here."
+      : "Started outside this app; its lifecycle is not managed here.";
+    const turnNote =
+      state === "unknown"
+        ? "The host does not report turn state (older OMP); activity here is unconfirmed."
+        : state === "running"
+          ? "A turn is in flight."
+          : state === "awaiting_input"
+            ? "The agent is waiting for an answer."
+            : "No turn in flight.";
     return {
       state,
       ownership: "external",
-      detail: host.relayConnected === null
-        ? "The host does not report relay connectivity, so live viewing is unconfirmed."
-        : !host.relayConnected
-          ? "Started outside this app; the host is not connected to the relay, so live viewing is unavailable."
-          : state === "unknown"
-            ? "The host does not report turn state (older OMP); activity here is unconfirmed."
-            : "Started outside this app; it can be watched, and its lifecycle is not managed here.",
+      detail: `${ownershipNote} ${turnNote}${relayNote}`,
     };
   }
 
@@ -138,13 +160,9 @@ export function evaluateState(observations: Observations): StateVerdict {
     if (host.relayConnected === null) {
       return { state: "unknown", ownership: "managed", detail: "The host does not report relay connectivity, so live viewing is unconfirmed." };
     }
-    if (!host.relayConnected) {
-      return {
-        state: "idle",
-        ownership: "managed",
-        detail: "The agent is running but not connected to the relay, so live viewing is unavailable.",
-      };
-    }
+    // Same rule as `hostState`: a disconnected relay removes live viewing, not
+    // turn activity. The busy flag keeps deciding, and an unreported one stays
+    // unknown instead of collapsing into the idle the old shortcut produced.
     if (host.busy !== false && host.busy !== true) {
       return {
         state: "unknown",
@@ -152,13 +170,14 @@ export function evaluateState(observations: Observations): StateVerdict {
         detail: "The agent does not report turn state (older OMP); activity here is unconfirmed.",
       };
     }
+    const relayDown = host.relayConnected ? "" : " Live viewing is unavailable: the relay is disconnected.";
     if (host.inputRequired === true) {
-      return { state: "awaiting_input", ownership: "managed", detail: "The agent is waiting for an answer." };
+      return { state: "awaiting_input", ownership: "managed", detail: `The agent is waiting for an answer.${relayDown}` };
     }
     if (host.busy === true) {
-      return { state: "running", ownership: "managed", detail: null };
+      return { state: "running", ownership: "managed", detail: relayDown ? `A turn is in flight.${relayDown}` : null };
     }
-    return { state: "idle", ownership: "managed", detail: "No turn in flight." };
+    return { state: "idle", ownership: "managed", detail: `No turn in flight.${relayDown}` };
   }
 
 
