@@ -34,7 +34,7 @@ the evidence each verdict rests on. The decision itself is ADR 0001.
 ## What the proof of concept settled
 
 Architecture A was not accepted on the strength of a table. These were observed on
-this machine against OMP 18.12.2 before the decision was locked, and they are
+this machine against OMP 18.12.2 (installed binary updated to 18.13.0 as of 2026-11-02) before the decision was locked, and they are
 recorded in `docs/research/proof-of-concept.md`:
 
 1. A tmux-hosted OMP hosts itself over Collab (`relayConnected: true` in

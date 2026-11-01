@@ -30,6 +30,21 @@ Make sure `publicOrigin` in `caw.config.json` (or `CAW_PUBLIC_ORIGIN`) matches t
 exact origin (`https://<machine>.<tailnet>.ts.net`). The server uses this to mint
 live-session deep links that point at your Serve endpoint rather than internal loopback.
 
+Setting `publicOrigin` alone is sufficient for the phone's browser to open the
+relay WebSocket: `apps/server/src/server.ts` includes `publicOrigin` in the relay's
+allowed origins alongside loopback browser origins (`http://localhost:<port>`,
+`http://127.0.0.1:<port>`, `http://[::1]:<port>` and their `https:` variants), so
+machine-local debugging continues to work. The `relayAllowedOrigins` configuration
+is available for additional, different origins (e.g. a separate public web
+origin), but is not required for the standard single-origin Tailscale setup.
+
+*Operational note on `trustTailscaleOrigin`:* The `trustTailscaleOrigin` configuration
+flag (default `false`) only permits `https://*.ts.net` Origin headers for Fastify **HTTP**
+requests (`apps/server/src/app.ts:127`). It is **not** consulted by the relay's WebSocket
+origin check (`apps/server/src/server.ts:523-533`). Setting `trustTailscaleOrigin: true`
+alone without `publicOrigin` allows HTTP requests while WebSocket guest connections
+fail with `403 Forbidden`. Setting `publicOrigin` is recommended because it satisfies
+both HTTP and WebSocket origin allowlists, as well as link minting.
 **The relay port must never be proxied.** The app listens on `8791` and the private
 Collab relay listens on `8792`. Only `8791` goes through Serve. The relay's host
 endpoint — the one our own agents connect to — is deliberately reachable only from

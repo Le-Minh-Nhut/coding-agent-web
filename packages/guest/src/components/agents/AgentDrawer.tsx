@@ -178,7 +178,14 @@ export function AgentDrawer(props: {
             <button
               type="button"
               className="ag-btn ag-btn--danger"
-              onClick={() => client.sendAgentCmd("kill", agent.id)}
+              onClick={() => {
+                void client.sendAgentCmd("kill", agent.id).then(
+                  (accepted) => {
+                    if (!accepted) setSendError("kill command not sent — check connection");
+                  },
+                  () => setSendError("kill command not sent — check connection"),
+                );
+              }}
             >
               <OctagonX size={13} aria-hidden />
               kill
@@ -189,7 +196,14 @@ export function AgentDrawer(props: {
             <button
               type="button"
               className="ag-btn"
-              onClick={() => client.sendAgentCmd("revive", agent.id)}
+              onClick={() => {
+                void client.sendAgentCmd("revive", agent.id).then(
+                  (accepted) => {
+                    if (!accepted) setSendError("revive command not sent — check connection");
+                  },
+                  () => setSendError("revive command not sent — check connection"),
+                );
+              }}
             >
               <RotateCcw size={13} aria-hidden />
               revive

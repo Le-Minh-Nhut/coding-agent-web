@@ -78,6 +78,8 @@ All repro scripts were throwaways under `/tmp` and wrote no repository source, t
 
 **Claim.** App-origin host refused, app-origin guest accepted, loopback relay-port host accepted; residual stated honestly.
 
+> *Historical record note (2026-11-02):* The baseline recorded during this audit was OMP `18.12.2`; the installed binary on this machine has since been updated to `18.13.0`.
+
 **What code does.** `apps/server/src/server.ts:453-480` attaches same relay/table to app and separate `127.0.0.1` listener. App listener uses `allowHost:false`; host listener enables host and checks local port/loopback (`:459-475`). Relay policy is applied per attachment at `packages/relay/src/relay.ts:417-420,461-490`. Residual states any process able to reach loopback relay port can claim host and Tailscale Serve must proxy app port only (`apps/server/src/server.ts:453-468`; `docs/operations/ubuntu-setup.md:79-91`; `docs/operations/iphone-setup.md:33-46`). Pinned OMP v18.12.2 [`packages/coding-agent/src/collab/relay-client.ts`](https://github.com/can1357/oh-my-pi/blob/v18.12.2/packages/coding-agent/src/collab/relay-client.ts) lines 498-505 builds role URL and socket options with proxy only; its `CollabSocketOptions` has `wsUrl`, `role`, `key` (lines 115-122), supporting no per-launch custom-header credential.
 
 **What I tried.**

@@ -221,6 +221,8 @@ __marimo__/
 # ─── Node / TypeScript ────────────────────────────────────────────────────────
 node_modules/
 dist/
+dist.old*
+dist.tmp*
 *.tsbuildinfo
 .pnpm-store/
 .npm/

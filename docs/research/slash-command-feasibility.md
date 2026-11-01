@@ -2,7 +2,7 @@
 
 ## Scope and source identity
 
-Observed installed CLI: `omp --version` → `omp/18.12.2`; `omp --help` exposes normal launch flags/subcommands, including `--mode rpc`, `--thinking`, `--advisor`, `--model`, `collab`, and `join`. Retrieved upstream source from `https://github.com/can1357/oh-my-pi`, tag `v18.12.2`, into `/tmp/omp-v18.12.2`; checkout resolves to commit `1d5aff90b057ce7dbfe32ea557a527c1b3144b72`. Upstream package also declares version 18.12.2 (`packages/coding-agent/package.json:1-4,21-28`). The repository's vendored guest provenance identifies the same upstream and version (`packages/guest/UPSTREAM.md:3-7`), but that guest is not the OMP host or command implementation.
+Observed installed CLI at research time: `omp --version` → `omp/18.12.2` (installed binary updated to `omp/18.13.0` as of 2026-11-02); `omp --help` exposes normal launch flags/subcommands, including `--mode rpc`, `--thinking`, `--advisor`, `--model`, `collab`, and `join`. Retrieved upstream source from `https://github.com/can1357/oh-my-pi`, tag `v18.12.2`, into `/tmp/omp-v18.12.2`; checkout resolves to commit `1d5aff90b057ce7dbfe32ea557a527c1b3144b72`. Upstream package also declares version 18.12.2 (`packages/coding-agent/package.json:1-4,21-28`). The repository's vendored guest provenance identifies the same upstream and version (`packages/guest/UPSTREAM.md:3-7`), but that guest is not the OMP host or command implementation.
 
 This is source investigation only. No agents were launched, no provider credits spent, and no build/test/smoke check run.
 

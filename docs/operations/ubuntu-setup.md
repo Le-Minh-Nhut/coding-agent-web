@@ -15,7 +15,7 @@ pnpm -v            # expect 10.x
 tmux -V
 
 # OMP — the agent runtime
-omp --version      # tested baseline: omp/18.12.2
+omp --version      # measured baseline: omp/18.13.0 (updated from initial tested 18.12.2)
 ```
 
 If OMP is missing, install it per the upstream instructions
@@ -56,7 +56,6 @@ Create `caw.config.json` in the repository root (git-ignored):
   "publicOrigin": "https://my-workstation.tailnet-name.ts.net",
   "allowedRoots": ["/home/you/projects", "/home/you/data"],
   "maxActiveAgents": 3,
-  "relayAllowedOrigins": ["https://my-workstation.tailnet-name.ts.net"],
   "logLevel": "info"
 }
 ```
@@ -74,8 +73,22 @@ Rules that matter:
   `https://my-workstation.tailnet-name.ts.net` Serve origin). Empty by default,
   which derives `http://127.0.0.1:<port>` for local development. In production
   over Tailscale Serve, set it to your tailnet HTTPS origin so live-session links
-  point at an origin the phone can reach and the browser's CSP allows. Must be an
-  absolute http(s) origin with no path, query, or fragment.
+  point at an origin the phone can reach and the browser's CSP allows. Setting
+  `publicOrigin` alone is sufficient for the phone's browser to open the relay
+  WebSocket; loopback browser origins (`http://localhost:<port>`,
+  `http://127.0.0.1:<port>`, `http://[::1]:<port>` and their `https:` variants)
+  are always allowed. `relayAllowedOrigins` remains available for additional,
+  different origins (e.g. a separate public web origin), but is not required
+  for standard single-origin Tailscale setups. Must be an absolute http(s)
+  origin with no path, query, or fragment.
+- **Operational note on `trustTailscaleOrigin` vs relay WebSocket:** `trustTailscaleOrigin`
+  (default `false`) only permits `https://*.ts.net` Origin headers on Fastify **HTTP**
+  requests (`apps/server/src/app.ts:127`). It is **not** consulted by the relay's
+  WebSocket origin verification (`apps/server/src/server.ts:523-533`). Configuring only
+  `trustTailscaleOrigin: true` without `publicOrigin` allows HTTP API calls from a Tailscale
+  origin but rejects the browser's live relay WebSocket connection with `403 Forbidden`.
+  Always configure `publicOrigin` instead (or additionally), which satisfies both the HTTP
+  Origin allowlist and the relay WebSocket allowlist, and is required for deep-link minting.
 - **Two listeners, two privileges.** The table above shows `relayPort`, and it is
   real: the app serves the UI, the API **and guest** room joins on `8791`, while the
   relay opens a second listener on `127.0.0.1:8792` that is the **only** place a

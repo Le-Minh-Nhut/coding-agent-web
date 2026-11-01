@@ -100,7 +100,7 @@ node scripts/acceptance-ui-drives-agent.mjs --base <origin> --tmp <scratch-dir> 
 
 ## Verified environment baseline
 
-OMP 18.12.2, tmux 3.6, Node 20.19.5, Ubuntu 26.04, Tailscale 1.104.1.
+OMP 18.13.0, tmux 3.6, Node 20.19.5, Ubuntu 26.04 (kernel 7.0.0-38-generic), pnpm 10.32.1, Tailscale 1.104.1 (Tailscale version unverified this session).
 Details and the upgrade procedure: `docs/research/omp-compatibility.md`.
 
 ## Upstream references

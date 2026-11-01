@@ -1671,6 +1671,41 @@ describe("supervisor.reconcile", () => {
     await expect(supervisor.start("c1", { conversationId: "c1", name: "caw-c1", cwd: "/tmp/project", resumeSessionPath: "/tmp/unresolved.jsonl" })).rejects.toMatchObject({ code: "conflict_owner" });
     expect(world.launches).toHaveLength(0);
   });
+  it.each([
+    ["EACCES", () => { throw Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" }); }],
+    ["ENOENT", () => { throw Object.assign(new Error("ENOENT: no such file or directory"), { code: "ENOENT" }); }],
+    ["EIO", () => { throw Object.assign(new Error("EIO: i/o error"), { code: "EIO" }); }],
+    ["malformed", async () => null],
+    ["removed mid-read", () => { throw Object.assign(new Error("ENOENT: file unlinked"), { code: "ENOENT" }); }],
+    ["replaced mid-read", async () => "session-replaced-v2"],
+  ])("H04 fault injection (%s): refresh/reconcile does not crash and fails closed against duplicate launch", async (name, readSessionIdImpl) => {
+    const world = makeWorld();
+    world.seed({ id: "c1", nativeSessionPath: "/tmp/fault.jsonl", nativeSessionId: null });
+    world.adapters.readSessionId = readSessionIdImpl;
+    world.setLease(false);
+    const supervisor = createSupervisor({ store: world.store, adapters: world.adapters, clock: instantClock, maxActive: 3, publishTimeoutMs: 0 });
+
+    const refreshed = await supervisor.refresh("c1");
+    expect(refreshed).not.toBeNull();
+    if (name === "replaced mid-read") {
+      expect(refreshed?.state).toBe("stopped");
+    } else {
+      expect(refreshed?.state).toBe("unknown");
+    }
+
+    const report = await supervisor.reconcile();
+    expect(report.unknown + report.stopped).toBeGreaterThan(0);
+
+    if (name === "replaced mid-read") {
+      // A valid session ID is resolved; start checks lease and allows if free
+      const started = await supervisor.start("c1", { conversationId: "c1", name: "caw-c1", cwd: "/tmp/project", resumeSessionPath: "/tmp/fault.jsonl" });
+      expect(started.nativeSessionPath).toBe("/tmp/fault.jsonl");
+    } else {
+      // All unverified / missing / error cases fail closed with conflict_owner
+      await expect(supervisor.start("c1", { conversationId: "c1", name: "caw-c1", cwd: "/tmp/project", resumeSessionPath: "/tmp/fault.jsonl" }))
+        .rejects.toMatchObject({ code: "conflict_owner" });
+    }
+  });
   it("allows a fresh launch when no native session or journal exists", async () => {
     const world = makeWorld();
     world.seed({ id: "c1", nativeSessionPath: null, nativeSessionId: null });

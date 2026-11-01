@@ -1,10 +1,10 @@
 # OMP RPC vs native Collab
 
-Comparison uses Architecture A = tmux + native Collab; Architecture B = `--mode rpc`/`rpc-ui` + supervisor + explicit terminal handoff. Local binary was `omp v18.12.2`; upstream docs/source refer to `main` and npm results report `18.12.6`, so version-specific differences remain possible.
+Comparison uses Architecture A = tmux + native Collab; Architecture B = `--mode rpc`/`rpc-ui` + supervisor + explicit terminal handoff. Local binary was `omp v18.12.2` at research time (updated to `18.13.0` as of 2026-11-02); upstream docs/source refer to `main` and npm results report `18.12.6`, so version-specific differences remain possible.
 
 ## RPC surface and evidence
 
-- **Exists:** local `omp --help` (`omp v18.12.2`) lists `--mode=<value> Output mode: text (default), json, rpc, or rpc-ui`. Same help lists `--no-ui`, `--no-session`, `--resume`, and `--continue`. Upstream [`docs/rpc.md`](https://github.com/can1357/oh-my-pi/blob/main/docs/rpc.md#startup) describes both RPC modes.
+- **Exists:** local `omp --help` (`omp v18.12.2` at research time, now `18.13.0`) lists `--mode=<value> Output mode: text (default), json, rpc, or rpc-ui`. Same help lists `--no-ui`, `--no-session`, `--resume`, and `--continue`. Upstream [`docs/rpc.md`](https://github.com/can1357/oh-my-pi/blob/main/docs/rpc.md#startup) describes both RPC modes.
 - **Transport:** stdio, not socket: newline-delimited JSON objects on stdin/stdout; it is not JSON-RPC 2.0. Cached docs: `/tmp/caw-research/rpc.md:3-17,36-49`. `rpc-ui` uses same transport. Direct RPC is local-only; it opens no remote endpoint. A web/mobile bridge would be a separate supervisor responsibility. [INFERENCE: network exposure depends on that bridge's design.]
 - **Observed handshake:** ran `printf '' | timeout 8 omp --mode rpc --no-session --cwd /tmp`; first raw stdout frame was `{"type":"ready","protocolVersion":1,"supportedProtocolVersions":[1,2],"maxFrameBytes":1048576,"maxReassembledFrameBytes":67108864}\n`. Further extension UI and available-command frames followed. The process needs a moment to initialize. Protocol startup/frame details: `/tmp/caw-research/rpc.md:31-39,81-106`.
 - **UI-relevant messages:** submit `prompt` (and optional images/steer-vs-follow-up behavior); receive `message_start`/`message_update`/`message_end`, including streamed text/thinking/tool-call deltas; observe `tool_execution_start/update/stream_update/end`; abort with `abort` or `abort_and_prompt`; inspect state via `get_state`, with state and lifecycle events. Sources: `/tmp/caw-research/rpc.md:122-157,224-236,821-874,1148-1177`; command/result semantics: `:313-353`.
@@ -63,7 +63,7 @@ One logical peer per RPC process: the process consumes one stdin stream and emit
 - Concurrent RPC and TUI use of the same JSONL file; avoid until proven safe.
 - Live interrupt/handoff corner cases, recovery after supervisor or laptop crash, and production performance; not tested here.
 - Supervisor HTTP/auth/TLS/CSRF design, actual mobile interface, and its exposure boundary; not specified by RPC protocol.
-- Exact RPC approval behavior for installed `18.12.2` vs upstream `main` (approval evidence is upstream docs; local help/handshake only verified).
+- Exact RPC approval behavior for initial `18.12.2` / current `18.13.0` vs upstream `main` (approval evidence is upstream docs; local help/handshake only verified).
 - Whether package might be published under a different name; only the three requested names were queried.
 
 ## Decision

@@ -251,8 +251,17 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
           )
         : Promise.resolve(false as Tri);
 
-    const leaseSessionId = conversation.nativeSessionId ?? (conversation.nativeSessionPath ? await options.adapters.readSessionId?.(conversation.nativeSessionPath) ?? null : null);
-    const [managedResult, hosts, leaseLive, sessionPathExists] = await Promise.all([
+    let readSessionReason: string | null = null;
+    let leaseSessionId = conversation.nativeSessionId;
+    if (!leaseSessionId && conversation.nativeSessionPath && options.adapters.readSessionId) {
+      try {
+        leaseSessionId = (await options.adapters.readSessionId(conversation.nativeSessionPath)) ?? null;
+      } catch (error: unknown) {
+        readSessionReason = error instanceof Error ? error.message : String(error);
+        leaseSessionId = null;
+      }
+    }
+    const [managedResult, hosts, leaseLive, rawSessionPathExists] = await Promise.all([
       readManagedTmux(),
       options.adapters.listHosts().then(
         (rows) => ({ ok: true as const, rows }),
@@ -263,6 +272,10 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
         : conversation.nativeSessionPath ? Promise.resolve("unknown" as Tri) : Promise.resolve(false as Tri),
       sessionPathProbe,
     ]);
+    const sessionPathExists: Tri = readSessionReason !== null ? "unknown" : rawSessionPathExists;
+    if (readSessionReason !== null && !sessionPathReason) {
+      sessionPathReason = readSessionReason;
+    }
 
     const managed = managedResult.ok ? managedResult.sessions : [];
     const unseen = managedResult.ok ? unobservableManagedProcesses([conversation], managed)[0] : undefined;
@@ -465,8 +478,13 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
     // the row meanwhile drops this entirely.
     const observedSeq = observationSeqOf(conversation);
 
-    if (conversation.nativeSessionPath && !conversation.nativeSessionId) {
-      const header = await options.adapters.readSessionId?.(conversation.nativeSessionPath);
+    if (conversation.nativeSessionPath && !conversation.nativeSessionId && options.adapters.readSessionId) {
+      let header: string | null = null;
+      try {
+        header = await options.adapters.readSessionId(conversation.nativeSessionPath);
+      } catch {
+        header = null;
+      }
       if (header) patch.nativeSessionId = header;
     }
 
@@ -554,7 +572,14 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
         // This probe belongs *inside* the critical section. Run before the lock
         // it can be answered by the previous holder and reused by the next.
         const resumePath = spec.resumeSessionPath ?? conversation.nativeSessionPath;
-        const leaseSessionId = conversation.nativeSessionId ?? (resumePath ? await options.adapters.readSessionId?.(resumePath).catch(() => null) ?? null : null);
+        let leaseSessionId = conversation.nativeSessionId;
+        if (!leaseSessionId && resumePath && options.adapters.readSessionId) {
+          try {
+            leaseSessionId = (await options.adapters.readSessionId(resumePath)) ?? null;
+          } catch {
+            leaseSessionId = null;
+          }
+        }
         const leaseLive = resumePath
           ? leaseSessionId ? await options.adapters.isSessionLive(leaseSessionId).catch(() => "unknown" as const) : "unknown"
           : conversation.nativeSessionId ? await options.adapters.isSessionLive(conversation.nativeSessionId).catch(() => "unknown" as const) : false;

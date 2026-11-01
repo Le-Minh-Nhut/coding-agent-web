@@ -1,7 +1,7 @@
 # Verified vertical slice (M0 proof of concept)
 
 Recorded because these are the observations the architecture decision rests on.
-All of it was run on this machine against OMP 18.12.2 with a real agent.
+All of it was run on this machine against OMP 18.12.2 with a real agent (installed binary is now 18.13.0 as of 2026-11-02).
 
 ## Setup used
 

@@ -21,7 +21,7 @@ Read-only preflight inspection conducted prior to launching real-agent verificat
 
 | Check | Target / Command | Value / Observed State |
 | :--- | :--- | :--- |
-| **OMP version** | `omp --version` | `omp/18.12.2` |
+| **OMP version** | `omp --version` | `omp/18.13.0` (updated 2026-11-02; previously `omp/18.12.2`) |
 | **tmux version** | `tmux -V` | `tmux 3.6` |
 | **Node.js version** | `node --version` | `v20.19.5` |
 | **CPU cores** | `nproc` | `16` |

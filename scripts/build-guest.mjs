@@ -3,7 +3,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import * as esbuild from "esbuild";
-import { swapStageToDist } from "./build-guest-utils.mjs";
+import { cleanupFailedBuild, swapStageToDist, sweepStaleBackups } from "./build-guest-utils.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, "..");
@@ -21,7 +21,7 @@ const oldDir = `${distDir}.old-${process.pid}`;
 async function build() {
   const startTime = Date.now();
   // 1. Clean staging directory
-  await fs.rm(stageDir, { recursive: true, force: true });
+  await sweepStaleBackups(distDir);
   await fs.mkdir(stageAssetsDir, { recursive: true });
 
   // 2. Run esbuild bundle into staging
@@ -127,8 +127,7 @@ async function build() {
 }
 
 build().catch(async (err) => {
-  await fs.rm(stageDir, { recursive: true, force: true });
-  await fs.rm(oldDir, { recursive: true, force: true });
+  await cleanupFailedBuild(stageDir, distDir, oldDir);
   console.error("[build-guest] build failed:", err);
   process.exit(1);
 });

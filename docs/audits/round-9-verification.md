@@ -1,6 +1,7 @@
 # Round 9: audit fixes, feature work, and verification
 
 Round 9 addressed the external audit of `5a49b7c` and delivered requested feature work. Final code HEAD: `53ef59bc9572d7af100ab565496491032abacf2a`. Hosted CI run [#7](https://github.com/Le-Minh-Nhut/coding-agent-web/actions/runs/40322743953) completed **success**: every `verify` step passed, including Browser E2E; the `compat` job was skipped by design (manual `workflow_dispatch` only).
+> *Historical record note (2026-11-02):* The baseline and test runs recorded during Round 9 used OMP `18.12.2`; the installed binary on this machine has since been updated to `18.13.0`.
 
 ## A01–A12 findings
 

@@ -194,4 +194,52 @@ describe("WorkspacePathPolicy", () => {
     const listing = await policy.listDirectory(root, { limit: 10 });
     expect(listing.entries).toContainEqual(expect.objectContaining({ name: "new-chat", path: created, isDirectory: true }));
   });
+  it("defeats evasion attempts: traversal, absolute outside, symlink escape, mid-op swap, unicode oddities, double slash, // prefix, case mismatch", async () => {
+    const parent = await tempDir();
+    const root = join(parent, "root");
+    const outside = join(parent, "outside");
+    const sub = join(root, "sub");
+    await mkdir(root);
+    await mkdir(outside);
+    await mkdir(sub);
+    await writeFile(join(outside, "secret.txt"), "secret");
+    await writeFile(join(sub, "data.txt"), "data");
+
+    const policy = new WorkspacePathPolicy([root]);
+
+    // 1. .. traversal attempts
+    await expectCode(policy.assertInsideRoots(join(root, "..", "outside")), "path_forbidden");
+    await expectCode(policy.assertInsideRoots(join(sub, "..", "..", "outside")), "path_forbidden");
+    await expectCode(policy.assertInsideRoots(`${root}/sub/../..`), "path_forbidden");
+
+    // 2. non-absolute paths
+    await expectCode(policy.assertInsideRoots("sub/data.txt"), "path_forbidden");
+    await expectCode(policy.assertInsideRoots("./sub/data.txt"), "path_forbidden");
+
+    // 3. symlink escape
+    const linkOutside = join(root, "link_outside");
+    await symlink(outside, linkOutside);
+    await expectCode(policy.assertInsideRoots(linkOutside, true), "path_forbidden");
+    await expectCode(policy.assertInsideRoots(join(linkOutside, "secret.txt")), "path_forbidden");
+
+    // 4. // prefix outside root
+    await expectCode(policy.assertInsideRoots("//etc/passwd"), "path_forbidden");
+
+    // 5. double slash inside root (/root//sub)
+    // Double slash collapses safely inside root and resolves to sub
+    const doubleSlash = await policy.assertInsideRoots(`${root}//sub`, true);
+    expect(doubleSlash).toBe(await realpath(sub));
+
+    // 6. case differences on case-sensitive filesystem
+    await expectCode(policy.assertInsideRoots(join(root, "SUB"), true), "path_not_found");
+    await expectCode(policy.assertInsideRoots(join(root.toUpperCase(), "sub"), true), "path_forbidden");
+
+    // 7. unicode normalization ambiguity
+    const ambig1 = join(root, "e\u0301-file");
+    const ambig2 = join(root, "\u00e9-file");
+    await writeFile(ambig1, "1");
+    await writeFile(ambig2, "2");
+    // Both map to the same NFC representation
+    await expectCode(policy.assertInsideRoots(join(root, "é-file")), "path_forbidden");
+  });
 });

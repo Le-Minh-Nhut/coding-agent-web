@@ -38,6 +38,24 @@ import { WorkspacePathPolicy } from "./path-policy.js";
 import { redactLogValue } from "./logger.js";
 import { createMetadataStore } from "./store.js";
 
+/**
+ * The relay's self-report for `/api/capabilities`.
+ *
+ * `reachable` stays `null` because nothing this process can observe proves the
+ * phone can reach the relay: a loopback listener probe is not a remote
+ * reachability test, and guessing `true` is the kind of unverified claim
+ * AGENTS.md rule 6 forbids. `null` is the honest "unverified" answer.
+ */
+export function relayCapability(config: { publicOrigin?: string; port: number }) {
+  return {
+    configured: true,
+    origin: config.publicOrigin
+      ? config.publicOrigin.replace(/^http:/, "ws:").replace(/^https:/, "wss:")
+      : `ws://127.0.0.1:${config.port}`,
+    reachable: null,
+  };
+}
+
 export function renderOverlay(port: number, webUrl?: string): string {
   const lines = ["collab:", "  autoStart: control", `  relayUrl: ws://127.0.0.1:${port}`];
   if (webUrl) {
@@ -351,13 +369,7 @@ const capabilityService = new DefaultCapabilityService({
   // The same pinned binary as every other omp call, so a pinned harness reports
   // the stub's capabilities instead of whatever `omp` PATH happens to hold.
   ompBinaryPath: config.ompBinaryPath,
-  relayConfig: {
-    configured: true,
-    origin: config.publicOrigin
-      ? config.publicOrigin.replace(/^http:/, "ws:").replace(/^https:/, "wss:")
-      : `ws://127.0.0.1:${config.port}`,
-    reachable: true,
-  },
+  relayConfig: relayCapability(config),
 });
 
 // ── Supervisor ──────────────────────────────────────────────────────────────
@@ -515,11 +527,21 @@ await app.ready();
 // from another local process would require a credential OMP cannot present (its socket URL is built
 // internally and accepts no headers). Tailscale Serve must proxy only app port, never relayPort.
 const hostRelayServer = createServer();
+const loopbackRelayOrigins = [
+  `http://localhost:${config.port}`, `http://127.0.0.1:${config.port}`, `http://[::1]:${config.port}`,
+  `https://localhost:${config.port}`, `https://127.0.0.1:${config.port}`, `https://[::1]:${config.port}`,
+];
+const customRelayOrigins = [
+  ...(config.publicOrigin ? [config.publicOrigin] : []),
+  ...config.relayAllowedOrigins,
+];
 const relay = createRelay({
   server: app.server,
   attachOnly: true,
   allowHost: false,
-  allowedOrigin: config.relayAllowedOrigins.length > 0 ? config.relayAllowedOrigins : undefined,
+  allowedOrigin: customRelayOrigins.length > 0
+    ? [...loopbackRelayOrigins, ...customRelayOrigins]
+    : undefined,
   authorizeHost: (req) => {
     // The listener is only reachable on loopback; app/Serve-facing listener denies host role.
     // See trust-model comment above: this does not authenticate one local process from another.

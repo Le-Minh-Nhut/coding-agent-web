@@ -8,15 +8,15 @@ running the installed binary on this machine, not read from documentation.
 | Item | Value | How observed |
 | --- | --- | --- |
 | OMP binary | `/home/heheboiz/.local/bin/omp` | `command -v omp` |
-| OMP version | `omp/18.12.2` | `omp --version` |
+| OMP version | `omp/18.13.0` | `omp --version` (measured 2026-11-02; previous baseline was `omp/18.12.2`) |
 | Upstream source read | `main` tarball, extracted at `/tmp/caw-poc/oh-my-pi` | `codeload.github.com/can1357/oh-my-pi/tar.gz/refs/heads/main` |
-| Update available at test time | `18.12.6` | OMP TUI "Update Available" banner |
+| Update available at test time | `18.12.6` (at initial 18.12.2 test time; running 18.13.0 now) | OMP TUI "Update Available" banner |
 | Node | `v20.19.5` | `node -v` |
 | pnpm | `10.32.1` | `pnpm -v` |
 | Bun (used only to build the upstream browser client) | `1.4.4` | `~/.bun/bin/bun --version` |
 | tmux | `3.6` | `tmux -V` |
-| Tailscale | `1.104.1` | `tailscale version` |
-| OS | Ubuntu 26.04.1 LTS, kernel 7.0.0-38 | `cat /etc/os-release`, `uname -a` |
+| Tailscale | `1.104.1` (unverified this session) | `tailscale version` |
+| OS | Ubuntu 26.04 x86_64 (Resolute Raccoon), kernel 7.0.0-38-generic | `cat /etc/os-release`, `uname -a` |
 
 Documentation cached while testing: `collab.md`, `session.md`, `rpc.md`,
 `sdk.md`, `cli-reference.md`, `tools/task.md`, `advisor-watchdog.md` from

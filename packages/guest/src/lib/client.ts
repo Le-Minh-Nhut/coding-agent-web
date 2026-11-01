@@ -232,8 +232,8 @@ export class GuestClient {
 		return true;
 	}
 
-	sendAbort(): void {
-		this.#socket.send({ t: "abort" });
+	sendAbort(): Promise<boolean> {
+		return this.#socket.send({ t: "abort" });
 	}
 
 	sendAgentCmd(cmd: "chat" | "kill" | "revive", agentId: string, text?: string): Promise<boolean> {
@@ -254,7 +254,16 @@ export class GuestClient {
 			resolve(null);
 		}, TRANSCRIPT_TIMEOUT_MS);
 		this.#pendingTranscripts.set(reqId, { resolve, timer });
-		this.#socket.send({ t: "fetch-transcript", reqId, agentId, fromByte });
+		void this.#socket.send({ t: "fetch-transcript", reqId, agentId, fromByte }).then((sent) => {
+			if (!sent) {
+				const pending = this.#pendingTranscripts.get(reqId);
+				if (pending) {
+					clearTimeout(pending.timer);
+					this.#pendingTranscripts.delete(reqId);
+					pending.resolve(null);
+				}
+			}
+		});
 		return promise;
 	}
 

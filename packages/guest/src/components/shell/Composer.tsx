@@ -1,7 +1,7 @@
 import type { CollabUiRequest } from "@oh-my-pi/pi-wire";
 import { SendHorizontal, Square } from "lucide-react";
 import type { KeyboardEvent, ReactNode, RefObject } from "react";
-import { memo, useCallback, useLayoutEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ConnectionPhase, GuestClient } from "../../lib/client";
 
 export interface ComposerProps {
@@ -139,6 +139,35 @@ export const Composer = memo(function Composer({
   const answeringRef = useRef(false);
   const { composingRef, onCompositionStart, onCompositionEnd } =
     useCompositionGuard();
+  const pendingDraftRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!client?.getSnapshot || !client?.subscribe) return;
+    let lastNoticesLength = client.getSnapshot().notices.length;
+    return client.subscribe(() => {
+      const snap = client.getSnapshot();
+      if (snap.notices.length > lastNoticesLength) {
+        const newNotices = snap.notices.slice(lastNoticesLength);
+        lastNoticesLength = snap.notices.length;
+        const promptError = newNotices.find((n) => n.level === "error");
+        if (
+          promptError &&
+          pendingDraftRef.current !== null &&
+          (/unavailable until/i.test(promptError.message) || /prompt/i.test(promptError.message))
+        ) {
+          const rejectedDraft = pendingDraftRef.current;
+          pendingDraftRef.current = null;
+          setText((current) => (current === "" ? rejectedDraft : current));
+          setSendError(promptError.message);
+        }
+      } else {
+        lastNoticesLength = snap.notices.length;
+      }
+      if (snap.working || snap.stream || snap.state?.isStreaming) {
+        pendingDraftRef.current = null;
+      }
+    });
+  }, [client]);
 
   const live = phase === "live";
   const canPrompt = live && !readOnly;
@@ -165,6 +194,7 @@ export const Composer = memo(function Composer({
     // it was refused or dropped by a terminal close — so a draft is never destroyed
     // by a frame that will not be sent.
     const submitted = trimmed;
+    pendingDraftRef.current = submitted;
     void Promise.resolve(client.sendPrompt(submitted))
       .then(
         (accepted) => {
@@ -272,7 +302,14 @@ export const Composer = memo(function Composer({
             <button
               type="button"
               className="sh-btn sh-btn-stop"
-              onClick={() => client.sendAbort()}
+              onClick={() => {
+                void Promise.resolve(client.sendAbort()).then(
+                  (sent) => {
+                    if (!sent) setUiResponseError("stop request not sent — connection lost or offline");
+                  },
+                  () => setUiResponseError("stop request not sent — connection lost or offline"),
+                );
+              }}
               disabled={!live}
               title="stop the current turn"
             >
@@ -324,7 +361,14 @@ export const Composer = memo(function Composer({
             <button
               type="button"
               className="sh-btn sh-btn-stop"
-              onClick={() => client.sendAbort()}
+              onClick={() => {
+                void Promise.resolve(client.sendAbort()).then(
+                  (sent) => {
+                    if (!sent) setSendError("stop request not sent — connection lost or offline");
+                  },
+                  () => setSendError("stop request not sent — connection lost or offline"),
+                );
+              }}
               disabled={!live}
               title="stop the current turn"
             >

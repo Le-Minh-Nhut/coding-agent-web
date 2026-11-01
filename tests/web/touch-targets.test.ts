@@ -25,4 +25,13 @@ describe("Mobile touch targets CSS specification", () => {
     expect(css).toMatch(/\.folder-item\s*{[^}]*min-height:\s*var\(--touch-min\);/s);
     expect(css).toMatch(/\[role="button"\]\s*{[^}]*min-height:\s*var\(--touch-min\);/s);
   });
+
+  it("pins safe-area insets across screen edges and containers", () => {
+    expect(css).toMatch(/--safe-top:\s*env\(safe-area-inset-top,\s*0px\);/);
+    expect(css).toMatch(/--safe-bottom:\s*env\(safe-area-inset-bottom,\s*0px\);/);
+    expect(css).toMatch(/\.app-header\s*{[^}]*padding:[^}]*var\(--safe-top\)/s);
+    expect(css).toMatch(/\.composer-container\s*{[^}]*padding:[^}]*var\(--safe-bottom\)/s);
+    expect(css).toMatch(/\.view-container\s*{[^}]*padding:[^}]*var\(--safe-top\)[^}]*var\(--safe-bottom\)/s);
+    expect(css).toMatch(/\.modal-overlay\s*{[^}]*padding:[^}]*var\(--safe-top\)[^}]*var\(--safe-bottom\)/s);
+  });
 });

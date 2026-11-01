@@ -1,6 +1,6 @@
 # OMP Session Semantics, Persistence, and Concurrency Research
 
-Ground truth for Oh My Pi (OMP) v18.12.2 session persistence, on-disk structure, lifecycle semantics, and concurrent-writer safety.
+Ground truth for Oh My Pi (OMP) v18.12.2 session persistence, on-disk structure, lifecycle semantics, and concurrent-writer safety (installed binary updated to 18.13.0 as of 2026-11-02).
 
 ---
 

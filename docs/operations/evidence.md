@@ -48,7 +48,7 @@ server (`-L caw-compat-<pid>-<rand>`, so the owner's sessions are untouched):
 ## Machine capability probe
 
 `node scripts/compat-check.mjs` → `18 ok, 0 warn, 0 fail`, including:
-OMP 18.12.2 parsed; `--resume`/`--restore`/`--config=`/`--session-dir=` present;
+OMP 18.12.2 parsed (installed binary updated to 18.13.0 as of 2026-11-02); `--resume`/`--restore`/`--config=`/`--session-dir=` present;
 `omp collab list|link` present; `collab list --json` shape complete
 (`instanceId, generation, pid, sessionId, cwd, relayConnected, inputRequired,
 busy, access`); tmux 3.6 with `#{session_id}` format; session store present;

@@ -13,7 +13,7 @@ integration not exercised · **pending** · **blocked**.
 
 Repo and tooling audited; six research reports; two ADRs; the proof-of-concept
 record in `docs/research/proof-of-concept.md`. Observed on this machine against
-OMP 18.12.2: a tmux-hosted agent hosts itself; a private relay replaces the hosted
+OMP 18.12.2 (updated to 18.13.0 as of 2026-11-02): a tmux-hosted agent hosts itself; a private relay replaces the hosted
 one; a browser guest and a terminal both drove the same process; **closing the
 browser does not stop the agent** and a fresh browser adopted the same room;
 resuming an existing native session works under a managed launch; a second writer

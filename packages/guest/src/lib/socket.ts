@@ -73,6 +73,10 @@ export class CollabSocket {
 	#recvChain: Promise<void> = Promise.resolve();
 	/** Frames sealed while disconnected/ungreeted, flushed on the next `welcome`. */
 	#pendingSends: PendingSend[] = [];
+	/** Increments on every connection generation to reject stale unqueued frames. */
+	#connGen = 0;
+	/** Increments on intentional close or fatal failure to discard pending sends across reconnect. */
+	#closeGen = 0;
 
 	constructor(opts: CollabSocketOptions) {
 		this.#opts = opts;
@@ -88,6 +92,7 @@ export class CollabSocket {
 
 	connect(): void {
 		if (this.#ws || this.#retryTimer) return;
+		this.#discardPending();
 		this.#closed = false;
 		this.#retryMissingRoom = false;
 		this.#helloAcknowledged = false;
@@ -101,20 +106,38 @@ export class CollabSocket {
 		// `false` when it never will (refused, or discarded by a terminal path).
 		// `true` therefore never means "queued and maybe dropped".
 		const outcome = deferred<boolean>();
+		if (this.#closed) {
+			outcome.settle(false);
+			return outcome.promise;
+		}
+		const queueable = frame.t === "prompt" || (frame.t === "agent-cmd" && frame.cmd === "chat");
+		if (frame.t !== "hello" && !queueable && !this.#helloAcknowledged) {
+			outcome.settle(false);
+			return outcome.promise;
+		}
+		const connGenAtCall = this.#connGen;
+		const closeGenAtCall = this.#closeGen;
 		const step = this.#sendChain.then(async (): Promise<void> => {
 			try {
-				if ((frame.t === "abort" || frame.t === "agent-cmd" && frame.cmd !== "chat") && !this.#helloAcknowledged) {
+				if (this.#closed || this.#closeGen !== closeGenAtCall) return outcome.settle(false);
+				if (frame.t !== "hello" && !queueable && (!this.#helloAcknowledged || this.#connGen !== connGenAtCall)) {
 					return outcome.settle(false);
 				}
 				const sealed = await seal(await this.#opts.key, frame);
+				if (this.#closed || this.#closeGen !== closeGenAtCall) return outcome.settle(false);
 				const envelope = packEnvelope(targetPeer, sealed);
 				const ws = this.#ws;
 				// Only `hello` may precede the host's `welcome`: anything sent first
 				// would be dropped (or rejected) by the relay-side handshake.
-				if (ws && ws.readyState === WebSocket.OPEN && (frame.t === "hello" || this.#helloAcknowledged)) {
+				if (
+					ws &&
+					ws.readyState === WebSocket.OPEN &&
+					(frame.t === "hello" || (this.#helloAcknowledged && (!queueable ? this.#connGen === connGenAtCall : true)))
+				) {
 					ws.send(envelope);
 					return outcome.settle(true);
 				}
+				if (!queueable || this.#closed || this.#closeGen !== closeGenAtCall) return outcome.settle(false);
 				// The queue is full: refuse THIS frame and keep the socket alive. A full
 				// buffer says nothing about whether the connection can still recover, so
 				// killing it would turn one refused frame into a lost session.
@@ -134,6 +157,8 @@ export class CollabSocket {
 		this.#clearRetry();
 		const wasClosed = this.#closed;
 		this.#closed = true;
+		this.#connGen++;
+		this.#closeGen++;
 		this.#retryMissingRoom = false;
 		this.#helloAcknowledged = false;
 		this.#discardPending();
@@ -150,6 +175,7 @@ export class CollabSocket {
 	}
 
 	#openSocket(): void {
+		this.#connGen++;
 		let ws: WebSocket;
 		try {
 			ws = new WebSocket(`${this.#opts.wsUrl}?role=${this.#opts.role}`);
@@ -225,6 +251,8 @@ export class CollabSocket {
 	}
 
 	#handleClose(code: number, reason: string): void {
+		this.#connGen++;
+		this.#helloAcknowledged = false;
 		if (this.#closed) return;
 		const fatalReason = RELAY_CLOSE_REASONS[code];
 		const closeReason = fatalReason ?? (reason || `connection lost (code ${code})`);
@@ -289,6 +317,8 @@ export class CollabSocket {
 	#failFatal(reason: string): void {
 		if (this.#closed) return;
 		this.#closed = true;
+		this.#connGen++;
+		this.#closeGen++;
 		this.#clearRetry();
 		this.#discardPending();
 		const ws = this.#ws;

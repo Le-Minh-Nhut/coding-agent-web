@@ -44,11 +44,11 @@ Design and evidence: `docs/adr/0001-runtime-architecture.md`,
 | Component | Version tested | Notes |
 | --- | --- | --- |
 | Ubuntu | 26.04 LTS (Linux 7.0) | any modern Linux with tmux will do |
-| OMP | **18.12.2** | `omp --version`; see `docs/research/omp-compatibility.md` |
+| OMP | **18.13.0** | `omp --version`; see `docs/research/omp-compatibility.md` |
 | tmux | 3.6 | required — it is what keeps agents alive |
 | Node.js | 20.19+ | server and tooling |
 | pnpm | 10.x | workspace manager |
-| Tailscale | 1.104.1 | secure remote access from the phone |
+| Tailscale | 1.104.1 (unverified this session) | secure remote access from the phone |
 
 ## Quick start
 
@@ -88,9 +88,14 @@ Then open `http://127.0.0.1:8791` locally, or follow
 `docs/operations/iphone-setup.md` to reach it from your phone.
 
 `publicOrigin` is the origin your phone visits. It matters because the live
-session link handed to the browser is built from it — leave it out and the link
-points at a loopback port your phone cannot reach.
-
+session deep link handed to the browser is built from it — leave it out and the link
+points at a loopback port your phone cannot reach. Setting `publicOrigin` alone is
+sufficient for the phone's browser to open the relay WebSocket; loopback browser
+origins (`http://localhost:<port>`, `http://127.0.0.1:<port>`, `http://[::1]:<port>`
+and their `https:` variants) are always allowed for machine-local browser debugging.
+`relayAllowedOrigins` remains available if you need additional, different browser
+origins (e.g. a separate public web origin), but is not required for the standard
+single-origin Tailscale setup.
 Verify the whole loop yourself:
 
 ```bash

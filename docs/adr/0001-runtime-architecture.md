@@ -1,8 +1,8 @@
 # ADR 0001 — Runtime architecture: tmux-hosted native OMP sessions with a private Collab relay
 
 - Status: accepted
-- Date: 2026-10-24
-- Baseline: OMP 18.12.2, tmux 3.6, Ubuntu 26.04, Tailscale 1.104.1
+- Date: 2026-10-24 (baseline updated 2026-11-02)
+- Baseline: OMP 18.13.0 (initially 18.12.2), tmux 3.6, Ubuntu 26.04, Tailscale 1.104.1 (Tailscale unverified this session)
 
 ## Context
 

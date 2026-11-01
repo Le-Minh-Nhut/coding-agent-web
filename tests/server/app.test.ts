@@ -4,18 +4,19 @@ import { join } from "node:path";
 import { RuntimeError, createSupervisor } from "@caw/runtime";
 import { afterEach, describe, expect, it } from "vitest";
 import { createAuthenticationService } from "../../apps/server/src/auth.js";
-import { createRuntimeSpec, launchWithOverlay } from "../../apps/server/src/server.js";
+import { createRuntimeSpec, launchWithOverlay, relayCapability } from "../../apps/server/src/server.js";
 import { buildApp } from "../../apps/server/src/app.js";
+import { DefaultCapabilityService } from "@caw/omp-adapter";
 import type { Conversation, NativeSessionSummary } from "@caw/contracts";
 import type { RuntimeLaunchSpec, Supervisor } from "@caw/runtime";
-import type { CollabHost, NativeSessionHeader, NativeSessionHistory } from "@caw/omp-adapter";
+import type { CapabilityService, CollabHost, NativeSessionHeader, NativeSessionHistory } from "@caw/omp-adapter";
 import type { ServerConfig } from "../../apps/server/src/config.js";
 import type { WorkspacePathPolicy } from "../../apps/server/src/path-policy.js";
 import { createMetadataStore } from "../../apps/server/src/store.js";
 
 const dirs: string[] = [];
 afterEach(async () => { await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true }))); });
-async function fixture(options: { paths?: WorkspacePathPolicy; tmuxSocketPath?: string; tmuxServerIdentity?: () => Promise<string | null>; supervisor?: Supervisor; runtimeSpec?: (conversation: Conversation, input: { resumeSessionId?: string; model?: string }) => Promise<RuntimeLaunchSpec> | RuntimeLaunchSpec; modelCatalog?: { listModels(): Promise<string[]>; listModelsDetailed(): Promise<{ models: string[]; source: "omp" | "unavailable"; reason: string | null }> }; listNativeSessions?: (conversation: { projectPath: string }) => Promise<Array<Omit<NativeSessionSummary, "hasCollabHost">>>; listCollabHosts?: () => Promise<CollabHost[]>; findLiveHost?: (sessionId: string) => Promise<CollabHost | null>; readNativeHistory?: (sessionId: string, expectedCwd: string, options?: { before?: string }) => Promise<NativeSessionHistory> } = {}) {
+async function fixture(options: { capabilities?: CapabilityService; paths?: WorkspacePathPolicy; tmuxSocketPath?: string; tmuxServerIdentity?: () => Promise<string | null>; supervisor?: Supervisor; runtimeSpec?: (conversation: Conversation, input: { resumeSessionId?: string; model?: string }) => Promise<RuntimeLaunchSpec> | RuntimeLaunchSpec; modelCatalog?: { listModels(): Promise<string[]>; listModelsDetailed(): Promise<{ models: string[]; source: "omp" | "unavailable"; reason: string | null }> }; listNativeSessions?: (conversation: { projectPath: string }) => Promise<Array<Omit<NativeSessionSummary, "hasCollabHost">>>; listCollabHosts?: () => Promise<CollabHost[]>; findLiveHost?: (sessionId: string) => Promise<CollabHost | null>; readNativeHistory?: (sessionId: string, expectedCwd: string, options?: { before?: string }) => Promise<NativeSessionHistory> } = {}) {
   const dir = await mkdtemp(join(tmpdir(), "caw-app-")); dirs.push(dir);
   const auth = createAuthenticationService({ stateDir: dir, setupOutput: () => undefined }); await auth.initAuth();
   const config: ServerConfig = { host: "127.0.0.1", port: 8791, stateDir: dir, allowedRoots: [dir], relayPort: 8792, relayAllowedOrigins: [], maxActiveAgents: 3, authTokenTtlHours: 720, trustTailscaleOrigin: false, logLevel: "silent", insecureCookies: false };
@@ -65,6 +66,26 @@ describe("Fastify API security", () => {
       expect(response.statusCode, url).toBe(200);
       expect(response.json().ok, url).toBe(true);
     }
+    await app.close();
+  });
+  it("H08: the relay capability this server constructs reports reachable: null", async () => {
+    // Exercises the real construction path (`relayCapability` -> DefaultCapabilityService),
+    // not a stand-in, so a regression to `reachable: true` fails here.
+    const { app, headers } = await fixture({
+      capabilities: new DefaultCapabilityService({
+        ompBinaryPath: "/nonexistent/omp",
+        tmuxBinaryPath: "/nonexistent/tmux",
+        relayConfig: relayCapability({ publicOrigin: "https://my-host.ts.net", port: 8791 }),
+      }),
+    });
+    const capRes = await app.inject({ method: "GET", url: "/api/capabilities", headers: { cookie: headers.cookie } });
+    expect(capRes.statusCode).toBe(200);
+    expect(capRes.json().data.relay).toEqual({ configured: true, origin: "wss://my-host.ts.net", reachable: null });
+    expect(capRes.json().data.relay.reachable).not.toBe(true);
+
+    const runRes = await app.inject({ method: "GET", url: "/api/runtime", headers: { cookie: headers.cookie } });
+    expect(runRes.statusCode).toBe(200);
+    expect(runRes.json().data.capabilities.relay.reachable).toBeNull();
     await app.close();
   });
 
