@@ -1,6 +1,7 @@
 import { expect, test, type Browser, type BrowserContext, type Page } from "@playwright/test";
 import { mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import {
   harnessFixture,
   installMockCollabHost,
@@ -65,7 +66,14 @@ const VIEWPORTS = [
   { name: "1280x800", width: 1280, height: 800, dpr: 1, isMobile: false, hasTouch: false },
   { name: "1440x900", width: 1440, height: 900, dpr: 1, isMobile: false, hasTouch: false },
 ] as const;
-const SCREENS_DIR = join(process.cwd(), "docs", "assets", "screens");
+const REPO_ROOT = process.cwd();
+const SCREENS_DIR = resolve(process.env.CAW_SCREENSHOTS_DIR ?? join(tmpdir(), "caw-screens"));
+const docsPath = relative(join(REPO_ROOT, "docs"), SCREENS_DIR);
+if (docsPath === "" || (!isAbsolute(docsPath) && docsPath !== ".." && !docsPath.startsWith(`..${sep}`))) {
+  if (process.env.CAW_SCREENSHOTS_COMMIT !== "1") {
+    throw new Error(`Refusing to write screenshots inside docs/: ${SCREENS_DIR}; set CAW_SCREENSHOTS_COMMIT=1 to opt in.`);
+  }
+}
 
 const MANIFEST_PATH = join(SCREENS_DIR, "manifest.md");
 
