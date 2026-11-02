@@ -290,4 +290,26 @@ describe("R35 GUEST findings", () => {
     expect(store.records.has(record.id)).toBe(true);
     view.unmount(); a.close(); b.close();
   });
+  it("releases a foreign recovered record on composer unmount but fences stale clients", () => {
+    const store = new PromptRecoveryStore(); const a = new GuestClient(A, "a", store); welcome(a);
+    const record = a.recordPrompt("foreign cleanup");
+    const b = new GuestClient(B, "b", store); welcome(b);
+    function Harness() {
+      const [draft, setDraft] = useState("");
+      return <Composer client={b} phase="live" readOnly={false} uiRequest={null} working={false} queuedMessageCount={0} draft={draft} onDraftChange={setDraft} />;
+    }
+    const view = render(<Harness />);
+    fireEvent.click(screen.getByRole("button", { name: "Recover" }));
+    expect(store.records.get(record.id)?.status).toBe("recovered");
+    view.unmount();
+    expect(store.records.get(record.id)?.status).toBe("unconfirmed");
+    const retry = render(<Harness />);
+    expect(screen.getByRole("button", { name: "Recover" })).toBeTruthy();
+    retry.unmount();
+    const newer = new GuestClient(B, "newer", store); welcome(newer);
+    newer.markPromptRecovered(record.id);
+    b.releaseRecoveredPrompts([record.id]);
+    expect(store.records.get(record.id)?.status).toBe("recovered");
+    a.close(); b.close(); newer.close();
+  });
 });

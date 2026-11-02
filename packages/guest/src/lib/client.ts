@@ -373,7 +373,7 @@ export class GuestClient {
    if (!this.#isCurrentClient()) return;
    for (const id of ids) {
      const prompt = this.#recoveryStore.records.get(id);
-     if (prompt?.roomId === this.#roomId && prompt.status === "recovered") this.#recoveryStore.records.set(id, { ...prompt, status: "unconfirmed" });
+     if (prompt?.status === "recovered") this.#recoveryStore.records.set(id, { ...prompt, status: "unconfirmed" });
    }
    this.#recoveryStore.changed();
    this.#unconfirmedPrompts = this.#promptList();
