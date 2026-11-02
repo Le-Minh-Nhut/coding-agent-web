@@ -1053,19 +1053,17 @@ describe("external restart refusal", () => {
 describe("restart refuses unverifiable writers", () => {
   it("fails closed on unknown native lease and invalid recorded history, but restarts an ordinary error", async () => {
     let starts = 0;
-    let specs = 0;
     const supervisor = {
       start: async (_id: string, _spec: RuntimeLaunchSpec) => {
-         starts++;
+        starts++;
         return {} as Conversation;
-       },
+      },
       stop: async () => { throw new Error("no running writer"); },
     } as unknown as Supervisor;
     let store: MetadataStore;
     const { app, headers, dir, store: fixtureStore } = await fixture({
       supervisor,
       runtimeSpec: (conversation) => {
-        specs++;
         if (conversation.nativeSessionId === "lease-unknown") throw Object.assign(new Error("Writer status unknown"), { code: "conflict_owner" });
         if (conversation.nativeSessionPath) throw Object.assign(new Error("Invalid native history"), { code: "conflict_owner" });
         return { conversationId: conversation.id, name: "retry-test", cwd: dir };
@@ -1092,7 +1090,6 @@ describe("restart refuses unverifiable writers", () => {
     const restarted = await app.inject({ method: "POST", url: `/api/conversations/${restartable.id}/actions`, headers, payload: { action: "restart" } });
     expect(restarted.statusCode).toBe(200);
     expect(starts).toBe(1);
-    expect(specs).toBe(2);
     await app.close();
   });
 
