@@ -2,6 +2,7 @@ import { mkdir, rm } from "node:fs/promises";
 import { execFile, spawn } from "node:child_process";
 import { homedir } from "node:os";
 import path from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { Conversation } from "@caw/contracts";
@@ -89,8 +90,35 @@ describe("tmux", () => {
     const first = await service.launch({ name: "identity-one", cwd: "/tmp", args: ["30"] });
     const firstIdentity = await service.serverIdentity();
     expect(first.serverIdentity).toBe(firstIdentity);
+    const match = /^(.*):(\d+):(\d+)$/.exec(firstIdentity ?? "");
+    const serverPid = match ? Number(match[3]) : null;
+    const socketPath = match ? match[1] : null;
     await execFileAsync("tmux", ["-L", socketName, "kill-server"]);
-    await execFileAsync("tmux", ["-L", socketName, "new-session", "-d", "-s", "caw-identity-stranger", "sleep", "30"]);
+    // Integration test: wait for external OS tmux daemon to terminate before socket reuse.
+    if (serverPid !== null) {
+      const deadline = Date.now() + 5000;
+      while (Date.now() < deadline) {
+        try {
+          process.kill(serverPid, 0);
+          await sleep(5);
+        } catch {
+          break;
+        }
+      }
+    }
+    if (socketPath) {
+      await rm(socketPath, { force: true });
+    }
+    let strangerSpawned = false;
+    for (let attempt = 0; attempt < 5 && !strangerSpawned; attempt += 1) {
+      try {
+        await execFileAsync("tmux", ["-L", socketName, "new-session", "-d", "-s", "caw-identity-stranger", "sleep", "30"]);
+        strangerSpawned = true;
+      } catch (err) {
+        if (attempt === 4 || !/server exited unexpectedly/i.test(String(err))) throw err;
+        await sleep(20);
+      }
+    }
     const secondIdentity = await service.serverIdentity();
     expect(secondIdentity).not.toBeNull();
     expect(secondIdentity).not.toBe(firstIdentity);

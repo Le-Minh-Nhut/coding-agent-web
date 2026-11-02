@@ -86,6 +86,7 @@ export class DefaultCapabilityService implements CapabilityService {
     } else {
       try {
         const { stdout } = await execFileAsync(ompPath, ["--version"], {
+          shell: false,
           timeout: 5000,
         });
         const version = parseOmpVersion(stdout);
@@ -118,6 +119,7 @@ export class DefaultCapabilityService implements CapabilityService {
     } else {
       try {
         const { stdout } = await execFileAsync(tmuxPath, ["-V"], {
+          shell: false,
           timeout: 5000,
         });
         const version = parseTmuxVersion(stdout);

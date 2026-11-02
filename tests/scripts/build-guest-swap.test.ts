@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -52,14 +52,18 @@ it("preserves oldDir backup when rollback rename fails (Matrix 3)", async () => 
     rmSync(temp, { recursive: true, force: true });
   }
 });
-it("sweeps only dead-PID backup directories", async () => {
+it("sweeps dead-PID backup directories when dist is valid", async () => {
   const temp = mkdtempSync(join(tmpdir(), "caw-build-sweep-"));
   const dist = join(temp, "dist");
-  const dead = `${dist}.old-2147483647`;
+  const dead = `${dist}.old-4194303`;
   const current = `${dist}.old-${process.pid}`;
   const live = `${dist}.old-1`;
   const malformed = `${dist}.old-not-a-pid`;
   try {
+    mkdirSync(dist);
+    writeFileSync(join(dist, "index.html"), "valid dist");
+    mkdirSync(join(dist, "assets"));
+    writeFileSync(join(dist, "assets", "app.js"), "valid bundle");
     mkdirSync(dead);
     mkdirSync(current);
     mkdirSync(live);
@@ -70,6 +74,47 @@ it("sweeps only dead-PID backup directories", async () => {
     expect(existsSync(live)).toBe(true);
     expect(existsSync(malformed)).toBe(true);
   } finally {
+    rmSync(temp, { recursive: true, force: true });
+  }
+});
+
+it("preserves timestamp-named backups outside plausible PID range", async () => {
+  const temp = mkdtempSync(join(tmpdir(), "caw-build-timestamp-backup-"));
+  const dist = join(temp, "dist");
+  const timestampBackup = `${dist}.old-1750000000000`;
+  try {
+    mkdirSync(timestampBackup);
+    writeFileSync(join(timestampBackup, "sentinel.txt"), "KEEP");
+    await sweepStaleBackups(dist);
+    expect(existsSync(timestampBackup)).toBe(true);
+    expect(readFileSync(join(timestampBackup, "sentinel.txt"), "utf8")).toBe("KEEP");
+  } finally {
+    rmSync(temp, { recursive: true, force: true });
+  }
+});
+
+
+it("ignores missing parent directory without throwing (R30-02)", async () => {
+  const temp = mkdtempSync(join(tmpdir(), "caw-build-noparent-"));
+  const dist = join(temp, "nonexistent-parent", "dist");
+  try {
+    await expect(sweepStaleBackups(dist)).resolves.toBeUndefined();
+  } finally {
+    rmSync(temp, { recursive: true, force: true });
+  }
+});
+
+// Root bypasses POSIX permission bits, so skip EACCES induction under root.
+it.skipIf(process.getuid?.() === 0)("rethrows real fs errors like EACCES from sweepStaleBackups (R30-02)", async () => {
+  const temp = mkdtempSync(join(tmpdir(), "caw-build-eacces-"));
+  const restrictedParent = join(temp, "restricted");
+  const dist = join(restrictedParent, "dist");
+  try {
+    mkdirSync(restrictedParent);
+    chmodSync(restrictedParent, 0);
+    await expect(sweepStaleBackups(dist)).rejects.toMatchObject({ code: "EACCES" });
+  } finally {
+    chmodSync(restrictedParent, 0o755);
     rmSync(temp, { recursive: true, force: true });
   }
 });

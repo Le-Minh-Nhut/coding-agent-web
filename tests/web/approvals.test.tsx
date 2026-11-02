@@ -138,6 +138,21 @@ describe("Approval handling & FIFO queueing", () => {
     fireEvent.click(second);
     expect(sentFrames.find((frame) => frame.t === "ui-response")).toEqual({ t: "ui-response", reqId: 102, value: "second" });
   });
+  it("renders inline code formatting in approval request title", async () => {
+    const { container } = await mountView();
+    emitFrame({
+      t: "ui-request",
+      request: {
+        reqId: 105,
+        kind: "select",
+        title: "Allow execution of `rm -rf /tmp/caw-build-cache` on host?",
+        options: ["Approve", "Deny"],
+      },
+    });
+    const codeEl = container.querySelector(".card code");
+    expect(codeEl).not.toBeNull();
+    expect(codeEl?.textContent).toBe("rm -rf /tmp/caw-build-cache");
+  });
 
   it("keeps approval request visible when socket refuses response", async () => {
     const { container } = await mountView();

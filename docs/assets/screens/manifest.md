@@ -1,8 +1,14 @@
 # Screenshot Inventory & Geometry Report
 
+<!-- Policy: Option B (External Evidence) — see docs/operations/screenshot-policy.md -->
+<!-- 83 baseline PNGs tracked in git (375x812, 390x844, 430x932, 768x1024, 1280x800). -->
+<!-- 26 additional PNGs (375x667: 13, 1440x900: 13) are external evidence generated into scratch dirs. -->
+
 Generated: 2026-11-01T17:58:49.859Z
 Total screenshots: 109
 Viewports tested: 375x667, 375x812, 390x844, 430x932, 768x1024, 1280x800, 1440x900
+Tracked in repository: 83
+External evidence artifacts: 26
 
 ## 1. Verified Interactions (Tested at 390×844)
 

@@ -16,12 +16,12 @@ const publicDir = process.env.CAW_GUEST_PUBLIC_DIR
   : path.join(guestDir, "public");
 const stageDir = `${distDir}.tmp-${process.pid}`;
 const stageAssetsDir = path.join(stageDir, "assets");
-const oldDir = `${distDir}.old-${process.pid}`;
+const oldDir = `${distDir}.old-${Date.now()}`;
 
 async function build() {
   const startTime = Date.now();
-  // 1. Clean staging directory
-  await sweepStaleBackups(distDir);
+  // 1. Prepare staging; do not sweep backups before a successful publish.
+  await fs.rm(stageDir, { recursive: true, force: true });
   await fs.mkdir(stageAssetsDir, { recursive: true });
 
   // 2. Run esbuild bundle into staging
@@ -115,6 +115,7 @@ async function build() {
   await fs.writeFile(path.join(stageDir, "index.html"), html, "utf-8");
 
   await swapStageToDist(stageDir, distDir, oldDir);
+  await sweepStaleBackups(distDir);
 
   const duration = Date.now() - startTime;
   console.log(

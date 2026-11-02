@@ -1,7 +1,7 @@
 import React, { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { api, type SavedConversationHistory } from "../api.js";
 import { chainMutation, MUTATION_CANCELLED } from "../mutation-order.js";
-import { MarkdownCodeBlock, renderMarkdown } from "../sanitize.js";
+import { MarkdownCodeBlock, parseInline, renderMarkdown } from "../sanitize.js";
 import { ActivityPanel } from "./ActivityPanel.js";
 import { SubagentPanel } from "./SubagentPanel.js";
 import {
@@ -84,6 +84,8 @@ const NON_SUBMISSION_REFUSALS: ReadonlySet<string> = new Set([
   STARTUP_PROMPT_REFUSAL,
   "prompting is unavailable until the session transition completes",
   "Prompt was not submitted. Please resend it when the host is ready.",
+  "session changed before a guest prompt was submitted. Rejoin and resend any prompt not shown in the conversation",
+  "session switched; prompts not shown in the conversation were not submitted. Rejoin and resend them",
 ]);
 
 
@@ -553,7 +555,17 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
       }
       setSendError(frame.message);
     }
-    if (frame.t === "bye") setSendError(frame.reason);
+    if (frame.t === "bye") {
+      if (NON_SUBMISSION_REFUSALS.has(frame.reason)) {
+        const pendingOnConn = pendingPromptRef.current.filter((pending) => pending.physicalConnection === physicalConnectionRef.current && !pending.refusalMessage);
+        if (pendingOnConn.length === 1) {
+          const prompt = pendingOnConn[0]!;
+          prompt.refusalMessage = frame.reason;
+          if (prompt.sent) recoverRefusedPrompt(prompt);
+        }
+      }
+      setSendError(frame.reason);
+    }
     if (frame.t === "transcript") {
       const request = transcriptRequestsRef.current.get(frame.reqId);
       if (request) {
@@ -1507,7 +1519,7 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
                 </span>
               )}
             </div>
-            <p style={{ marginBottom: "12px", fontSize: "0.95rem" }}>{activeUiRequest.title}</p>
+            <p style={{ marginBottom: "12px", fontSize: "0.95rem" }}>{parseInline(activeUiRequest.title)}</p>
 
             {(transcript.readOnly || linkAccess === "view") ? (
               <p role="note">Read-only link — this request cannot be answered here.</p>

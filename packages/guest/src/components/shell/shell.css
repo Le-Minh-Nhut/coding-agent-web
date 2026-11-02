@@ -554,6 +554,53 @@
   color: var(--err);
 }
 
+/* ---- recoverable prompt strip (unconfirmed / refused prompts) ---- */
+.sh-recoverable-prompts {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.sh-recoverable-prompt {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 10px;
+  font-size: 12px;
+  border-radius: var(--radius-sm, 6px);
+  background: var(--bg-card);
+  border: 1px solid var(--border-soft);
+  color: var(--fg);
+}
+
+.sh-recoverable-prompt-refused {
+  border-color: var(--err);
+  background: color-mix(in srgb, var(--err) 8%, var(--bg-card));
+}
+
+.sh-recoverable-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sh-recoverable-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.sh-recoverable-actions .sh-btn {
+  height: 24px;
+  padding: 0 8px;
+  font-size: 11px;
+}
+
 /* ---- banners ---- */
 .sh-banner {
   position: fixed;

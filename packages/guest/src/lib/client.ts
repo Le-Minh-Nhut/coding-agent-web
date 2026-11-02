@@ -47,6 +47,26 @@ export interface Notice {
 	at: number;
 }
 
+export interface UnconfirmedPrompt {
+	id: number;
+	text: string;
+	at: number;
+	status: "unconfirmed" | "refused";
+	error?: string;
+}
+
+export const NON_SUBMISSION_REFUSALS: ReadonlySet<string> = new Set([
+	"prompting is unavailable until the host finishes starting up",
+	"prompting is unavailable until the session transition completes",
+	"Prompt was not submitted. Please resend it when the host is ready.",
+	"session switched; prompts not shown in the conversation were not submitted. Rejoin and resend them",
+	"session changed before a guest prompt was submitted. Rejoin and resend any prompt not shown in the conversation",
+]);
+
+export function isPromptRejection(message: string): boolean {
+	return NON_SUBMISSION_REFUSALS.has(message);
+}
+
 export interface GuestSnapshot {
 	phase: ConnectionPhase;
 	endedReason: string | null;
@@ -72,9 +92,13 @@ export interface GuestSnapshot {
 	notices: readonly Notice[];
 	/** Snapshot download progress between `welcome` and its final chunk, else null. */
 	loading: { received: number; total: number } | null;
+	/** Locally tracked submissions awaiting host observation or marked refused. */
+	unconfirmedPrompts: readonly UnconfirmedPrompt[];
 }
 
 const MAX_NOTICES = 50;
+// ponytail: MAX_UNCONFIRMED_PROMPTS = 256 aligns with socket.MAX_PENDING_SENDS (256); when cap reached, refused entries are evicted first, but unconfirmed entries are never evicted, so the array can exceed the cap; the O(n) clone per insert is a deliberate ceiling at human submission volumes (~1.9 MB / 7.8 ms at 1k records; ~11.4 MB / 209 ms at 10k).
+const MAX_UNCONFIRMED_PROMPTS = 256;
 const TRANSCRIPT_TIMEOUT_MS = 10_000;
 /** Mirrors the TUI guest's WELCOME_TIMEOUT_MS: a host that never answers hello ends the join. */
 const WELCOME_TIMEOUT_MS = 30_000;
@@ -155,6 +179,8 @@ export class GuestClient {
 	#uiRequest: CollabUiRequest | null = null;
 	#uiRequestQueue: CollabUiRequest[] = [];
 	#notices: readonly Notice[] = [];
+	#promptSeq = 0;
+	#unconfirmedPrompts: readonly UnconfirmedPrompt[] = [];
 	#snapshot: GuestSnapshot;
 	/**
 	 * Published entries array, cached across commits: rebuilt only when
@@ -214,8 +240,64 @@ export class GuestClient {
 	 * connect. `false` means the frame was refused (closed socket / full queue);
 	 * the caller must keep the user's draft and say so.
 	 */
-	sendPrompt(text: string): Promise<boolean> {
-		return this.#socket.send({ t: "prompt", text });
+	async sendPrompt(text: string): Promise<boolean> {
+		const prompt = this.recordPrompt(text);
+		const sent = await this.#socket.send({ t: "prompt", text });
+		if (!sent) {
+			this.markPromptRefused(prompt.id, "prompt not sent — press send to retry");
+		}
+		return sent;
+	}
+
+	recordPrompt(text: string): UnconfirmedPrompt {
+		const prompt: UnconfirmedPrompt = {
+			id: ++this.#promptSeq,
+			text,
+			at: Date.now(),
+			status: "unconfirmed",
+		};
+		const next = [...this.#unconfirmedPrompts, prompt];
+		// ponytail: MAX_UNCONFIRMED_PROMPTS = 256 aligns with socket.MAX_PENDING_SENDS (256); when cap reached, refused entries are evicted first, but unconfirmed entries are never evicted, so the array can exceed the cap; the O(n) clone per insert is a deliberate ceiling at human submission volumes (~1.9 MB / 7.8 ms at 1k records; ~11.4 MB / 209 ms at 10k).
+		if (next.length > MAX_UNCONFIRMED_PROMPTS) {
+			const oldestRefusedIdx = next.findIndex(p => p.status === "refused");
+			if (oldestRefusedIdx !== -1) {
+				next.splice(oldestRefusedIdx, 1);
+			}
+		}
+		this.#unconfirmedPrompts = next;
+		this.#commit();
+		return prompt;
+	}
+
+	markPromptRefused(id: number, error: string): void {
+		let changed = false;
+		this.#unconfirmedPrompts = this.#unconfirmedPrompts.map(p => {
+			if (p.id === id && p.status !== "refused") {
+				changed = true;
+				return { ...p, status: "refused", error };
+			}
+			return p;
+		});
+		if (changed) this.#commit();
+	}
+
+	dismissPrompt(id: number): void {
+		const next = this.#unconfirmedPrompts.filter(p => p.id !== id);
+		if (next.length !== this.#unconfirmedPrompts.length) {
+			this.#unconfirmedPrompts = next;
+			this.#commit();
+		}
+	}
+
+	confirmPrompt(predicate?: (p: UnconfirmedPrompt) => boolean): void {
+		if (this.#unconfirmedPrompts.length === 0) return;
+		const target = predicate
+			? this.#unconfirmedPrompts.find(p => p.status === "unconfirmed" && predicate(p))
+			: this.#unconfirmedPrompts.find(p => p.status === "unconfirmed");
+		if (target) {
+			this.#unconfirmedPrompts = this.#unconfirmedPrompts.filter(p => p.id !== target.id);
+			this.#commit();
+		}
 	}
 
 	async sendUiResponse(reqId: number, value?: CollabUiResponseValue): Promise<boolean> {
@@ -406,6 +488,15 @@ export class GuestClient {
 				// the transcript per chunk, and a 50 MB session is ~100 chunks.
 				const pending = this.#pendingSnapshot;
 				if (pending === null) return;
+				for (const entry of frame.entries) {
+					if (entry.type === "message" && entry.message.role === "user" && typeof entry.message.content === "string") {
+						const text = entry.message.content.trim();
+						this.confirmPrompt(p => p.text.trim() === text);
+					} else if (entry.type === "custom_message" && entry.customType === "collab-prompt" && typeof entry.content === "string") {
+						const text = entry.content.trim();
+						this.confirmPrompt(p => p.text.trim() === text);
+					}
+				}
 				pending.entries.push(...frame.entries);
 				// Complete on `final` or once every promised entry arrived, so a
 				// lost final chunk doesn't strand a fully received transcript.
@@ -422,6 +513,13 @@ export class GuestClient {
 				break;
 			}
 			case "entry":
+				if (frame.entry.type === "message" && frame.entry.message.role === "user") {
+					const content = typeof frame.entry.message.content === "string" ? frame.entry.message.content.trim() : "";
+					this.confirmPrompt(p => p.text.trim() === content);
+				} else if (frame.entry.type === "custom_message" && frame.entry.customType === "collab-prompt") {
+					const content = typeof frame.entry.content === "string" ? frame.entry.content.trim() : "";
+					this.confirmPrompt(p => p.text.trim() === content);
+				}
 				// The committed row supersedes the finished stream ghost, even when
 				// the row is buffered behind an in-flight snapshot.
 				if (this.#streamDone && frame.entry.type === "message" && frame.entry.message.role === "assistant") {
@@ -445,6 +543,7 @@ export class GuestClient {
 				// This covers a connected guest that misses the discrete `agent_start`
 				// without receiving a new `welcome` (for example, mid-stream).
 				this.#working = frame.state.isStreaming;
+
 				if (!frame.state.isStreaming) {
 					// Host idle implies no tool can be running, so clear any card
 					// pinned by a dropped `tool_execution_end` off this signal.
@@ -490,6 +589,13 @@ export class GuestClient {
 				break;
 			}
 			case "bye":
+				if (isPromptRejection(frame.reason)) {
+					for (const p of this.#unconfirmedPrompts) {
+						if (p.status === "unconfirmed") {
+							this.markPromptRefused(p.id, frame.reason);
+						}
+					}
+				}
 				this.#end(frame.reason);
 				return; // #end already committed
 			case "error":
@@ -498,8 +604,19 @@ export class GuestClient {
 					// hello (e.g. protocol mismatch): no welcome will follow.
 					// End with the host's reason instead of waiting out the
 					// welcome timeout.
+					if (isPromptRejection(frame.message)) {
+						for (const p of this.#unconfirmedPrompts) {
+							if (p.status === "unconfirmed") {
+								this.markPromptRefused(p.id, frame.message);
+							}
+						}
+					}
 					this.#end(frame.message);
 					return; // #end already committed
+				}
+				if (isPromptRejection(frame.message)) {
+					const pending = [...this.#unconfirmedPrompts].reverse().find(p => p.status === "unconfirmed");
+					if (pending) this.markPromptRefused(pending.id, frame.message);
 				}
 				this.#pushNotice("error", frame.message);
 				break;
@@ -551,6 +668,11 @@ export class GuestClient {
 	#applyEvent(event: Extract<HostFrame, { t: "event" }>["event"]): void {
 		switch (event.type) {
 			case "message_start":
+				if (event.message.role === "assistant") {
+					this.#stream = event.message;
+					this.#streamDone = false;
+				}
+				break;
 			case "message_update":
 				if (event.message.role === "assistant") {
 					this.#stream = event.message;
@@ -601,6 +723,10 @@ export class GuestClient {
 				this.#working = false;
 				break;
 			case "notice":
+				if (event.level === "error" && isPromptRejection(event.message)) {
+					const pending = [...this.#unconfirmedPrompts].reverse().find(p => p.status === "unconfirmed");
+					if (pending) this.markPromptRefused(pending.id, event.message);
+				}
 				this.#pushNotice(event.level, event.message);
 				break;
 			case "auto_retry_start":
@@ -669,6 +795,7 @@ export class GuestClient {
 			readOnly: this.#readOnly,
 			uiRequest: this.#uiRequest,
 			notices: this.#notices,
+			unconfirmedPrompts: this.#unconfirmedPrompts,
 			loading: this.#pendingSnapshot && {
 				received: this.#pendingSnapshot.entries.length,
 				total: this.#pendingSnapshot.total,

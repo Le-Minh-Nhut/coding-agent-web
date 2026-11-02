@@ -2,15 +2,26 @@ import * as fs from "node:fs/promises";
 
 import * as path from "node:path";
 
-// ponytail: dead-PID sweep is sufficient; PID reuse only keeps stale backup alive, never deletes live one.
+
+// Linux's default pid_max is 4194304; timestamp-named backups are intentionally not PID-swept.
+const MAX_PLAUSIBLE_PID = 4_194_304;
+
+// ponytail: timestamps are modern backup names; swap removes them on success, failures preserve them. Sweep only legacy PID names; timestamps accumulate for manual recovery.
 export async function sweepStaleBackups(distDir) {
   const prefix = `${path.basename(distDir)}.old-`;
   const parent = path.dirname(distDir);
-  for (const entry of await fs.readdir(parent, { withFileTypes: true })) {
+  let entries;
+  try {
+    entries = await fs.readdir(parent, { withFileTypes: true });
+  } catch (err) {
+    if (err?.code === "ENOENT") return;
+    throw err;
+  }
+  for (const entry of entries) {
     const { name } = entry;
     if (!entry.isDirectory() || !name.startsWith(prefix) || !/^\d+$/.test(name.slice(prefix.length))) continue;
     const pid = Number(name.slice(prefix.length));
-    if (!Number.isSafeInteger(pid) || pid <= 0 || pid === process.pid) continue;
+    if (!Number.isSafeInteger(pid) || pid <= 0 || pid > MAX_PLAUSIBLE_PID || pid === process.pid) continue;
     try {
       process.kill(pid, 0);
       continue;

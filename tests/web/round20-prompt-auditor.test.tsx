@@ -100,12 +100,34 @@ it("V20 recovery remains copyable when a refused host disappears and Retry canno
 it.each([
  "prompting is unavailable until the session transition completes",
  "Prompt was not submitted. Please resend it when the host is ready.",
+ "session changed before a guest prompt was submitted. Rejoin and resend any prompt not shown in the conversation",
 ])("V20 explicit OMP non-submission keeps the prompt recoverable: %s",async(message)=>{
  const f=await fixture();await f.send("HOST_DID_NOT_SUBMIT_A");f.type("NEW_UNSENT_B");
  await f.emit({t:"error",message});
  console.log("AUDIT20 actual host non-submission",JSON.stringify({message,draft:f.input().value,recovery:f.recovery()}));
  expect(f.input().value).toBe("NEW_UNSENT_B");
  expect(f.recovery()).toContain("HOST_DID_NOT_SUBMIT_A");
+});
+it.each([
+ "session changed before a guest prompt was submitted. Rejoin and resend any prompt not shown in the conversation",
+ "session switched; prompts not shown in the conversation were not submitted. Rejoin and resend them",
+])("V20 host bye frame with session non-submission reason recovers prompt: %s",async(reason)=>{
+ const f=await fixture();
+ await f.send("BYE_PROMPT_NOT_SUBMITTED");
+ f.type("NEW_UNSENT_AFTER_BYE");
+ await f.emit({t:"bye",reason});
+ expect(f.input().value).toBe("NEW_UNSENT_AFTER_BYE");
+ expect(f.recovery()).toContain("BYE_PROMPT_NOT_SUBMITTED");
+});
+it("V20 host bye frame with multiple pending prompts avoids fabricated attribution",async()=>{
+ const f=await fixture();
+ await f.send("PROMPT_ONE");
+ await f.send("PROMPT_TWO");
+ f.type("NEW_DRAFT");
+ await f.emit({t:"bye",reason:"session switched; prompts not shown in the conversation were not submitted. Rejoin and resend them"});
+ // With multiple prompts, attribution is ambiguous; neither is fabricated as refused while active
+ expect(f.recovery()).toBe("");
+ expect(f.input().value).toBe("NEW_DRAFT");
 });
 
 it("V20 an unrelated host error does not falsely refuse the pending prompt",async()=>{

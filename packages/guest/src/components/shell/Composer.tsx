@@ -2,7 +2,8 @@ import type { CollabUiRequest } from "@oh-my-pi/pi-wire";
 import { SendHorizontal, Square } from "lucide-react";
 import type { KeyboardEvent, ReactNode, RefObject } from "react";
 import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import type { ConnectionPhase, GuestClient } from "../../lib/client";
+import type { ConnectionPhase, GuestClient, UnconfirmedPrompt } from "../../lib/client";
+import { isPromptRejection } from "../../lib/client";
 
 export interface ComposerProps {
   client: GuestClient;
@@ -133,38 +134,56 @@ export const Composer = memo(function Composer({
   const [text, setText] = useState("");
   const [sendError, setSendError] = useState<string | null>(null);
   const [uiResponseError, setUiResponseError] = useState<string | null>(null);
+  const [unconfirmedPrompts, setUnconfirmedPrompts] = useState<readonly UnconfirmedPrompt[]>(() =>
+    client?.getSnapshot ? client.getSnapshot().unconfirmedPrompts ?? [] : []
+  );
+  const [localUnconfirmed, setLocalUnconfirmed] = useState<UnconfirmedPrompt[]>([]);
+  const [copiedId, setCopiedId] = useState<number | null>(null);
+  const localUnconfirmedRef = useRef<UnconfirmedPrompt[]>([]);
+  localUnconfirmedRef.current = localUnconfirmed;
   const taRef = useRef<HTMLTextAreaElement | null>(null);
+  const pendingDraftRef = useRef<string | null>(null);
   /** True from the first press until that send settles: see the re-entry guard in `send`. */
   const sendingRef = useRef(false);
   const answeringRef = useRef(false);
   const { composingRef, onCompositionStart, onCompositionEnd } =
     useCompositionGuard();
-  const pendingDraftRef = useRef<string | null>(null);
-
   useEffect(() => {
     if (!client?.getSnapshot || !client?.subscribe) return;
-    let lastNoticesLength = client.getSnapshot().notices.length;
+    let lastNoticeId = client.getSnapshot().notices.at(-1)?.id ?? 0;
     return client.subscribe(() => {
       const snap = client.getSnapshot();
-      if (snap.notices.length > lastNoticesLength) {
-        const newNotices = snap.notices.slice(lastNoticesLength);
-        lastNoticesLength = snap.notices.length;
-        const promptError = newNotices.find((n) => n.level === "error");
-        if (
-          promptError &&
-          pendingDraftRef.current !== null &&
-          (/unavailable until/i.test(promptError.message) || /prompt/i.test(promptError.message))
-        ) {
-          const rejectedDraft = pendingDraftRef.current;
-          pendingDraftRef.current = null;
-          setText((current) => (current === "" ? rejectedDraft : current));
-          setSendError(promptError.message);
-        }
-      } else {
-        lastNoticesLength = snap.notices.length;
+      if (snap.unconfirmedPrompts) {
+        setUnconfirmedPrompts(snap.unconfirmedPrompts);
       }
-      if (snap.working || snap.stream || snap.state?.isStreaming) {
-        pendingDraftRef.current = null;
+      const currentMaxId = snap.notices.at(-1)?.id ?? 0;
+      if (currentMaxId < lastNoticeId) {
+        lastNoticeId = currentMaxId;
+      }
+      const newNotices = snap.notices.filter((n) => n.id > lastNoticeId);
+      if (newNotices.length > 0) {
+        lastNoticeId = newNotices[newNotices.length - 1].id;
+        const promptError = newNotices.find((n) => n.level === "error" && isPromptRejection(n.message));
+        if (promptError) {
+          const promptList = snap.unconfirmedPrompts ?? localUnconfirmedRef.current;
+          const reversed = [...promptList].reverse();
+          const refused =
+            reversed.find((p) => p.status === "refused") ??
+            reversed.find((p) => p.status === "unconfirmed");
+          const textToRestore = refused ? refused.text : pendingDraftRef.current;
+          if (textToRestore) {
+            const currentDraft = taRef.current ? taRef.current.value : text;
+            if (currentDraft.trim() === "") {
+              setText(textToRestore);
+              if (refused) {
+                if (client.dismissPrompt) client.dismissPrompt(refused.id);
+                else setLocalUnconfirmed((prev) => prev.filter((p) => p.id !== refused.id));
+              }
+              pendingDraftRef.current = null;
+            }
+            setSendError(promptError.message);
+          }
+        }
       }
     });
   }, [client]);
@@ -195,6 +214,12 @@ export const Composer = memo(function Composer({
     // by a frame that will not be sent.
     const submitted = trimmed;
     pendingDraftRef.current = submitted;
+    if (!client.getSnapshot) {
+      setLocalUnconfirmed((prev) => [
+        ...prev,
+        { id: Date.now(), text: submitted, at: Date.now(), status: "unconfirmed" },
+      ]);
+    }
     void Promise.resolve(client.sendPrompt(submitted))
       .then(
         (accepted) => {
@@ -232,6 +257,32 @@ export const Composer = memo(function Composer({
     },
     [client],
   );
+
+  const handleRecover = (prompt: UnconfirmedPrompt): void => {
+    const currentDraft = taRef.current ? taRef.current.value : text;
+    if (currentDraft.trim() === "") {
+      setText(prompt.text);
+      if (client.dismissPrompt) client.dismissPrompt(prompt.id);
+      else setLocalUnconfirmed((prev) => prev.filter((p) => p.id !== prompt.id));
+    } else {
+      setText(`${currentDraft}\n${prompt.text}`);
+    }
+  };
+
+  const handleCopy = async (prompt: UnconfirmedPrompt): Promise<void> => {
+    try {
+      await navigator.clipboard.writeText(prompt.text);
+      setCopiedId(prompt.id);
+      setTimeout(() => setCopiedId((id) => (id === prompt.id ? null : id)), 1500);
+    } catch {
+      // ignore clipboard error
+    }
+  };
+
+  const handleDismiss = (id: number): void => {
+    if (client.dismissPrompt) client.dismissPrompt(id);
+    else setLocalUnconfirmed((prev) => prev.filter((p) => p.id !== id));
+  };
 
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>): void => {
     if (shouldSubmitOnEnter(e, composingRef.current)) {
@@ -321,8 +372,52 @@ export const Composer = memo(function Composer({
     );
   }
 
+  const activeUnconfirmed = client?.getSnapshot
+    ? (client.getSnapshot().unconfirmedPrompts ?? localUnconfirmed)
+    : localUnconfirmed;
+  const visibleRecoveries = activeUnconfirmed.filter((p) => p.text !== text);
+
   return (
     <div className="sh-composer">
+      {visibleRecoveries.length > 0 && (
+        <div className="sh-recoverable-prompts">
+          {visibleRecoveries.map((sub) => (
+            <div
+              key={sub.id}
+              className={`sh-recoverable-prompt${sub.status === "refused" ? " sh-recoverable-prompt-refused" : ""}`}
+              role="status"
+            >
+              <span className="sh-recoverable-text" title={sub.text}>
+                {sub.status === "refused" ? "Refused — " : "Unconfirmed — "}
+                {sub.text}
+              </span>
+              <span className="sh-recoverable-actions">
+                <button
+                  type="button"
+                  className="sh-btn"
+                  onClick={() => handleRecover(sub)}
+                >
+                  Recover
+                </button>
+                <button
+                  type="button"
+                  className="sh-btn"
+                  onClick={() => void handleCopy(sub)}
+                >
+                  {copiedId === sub.id ? "Copied" : "Copy"}
+                </button>
+                <button
+                  type="button"
+                  className="sh-btn"
+                  onClick={() => handleDismiss(sub.id)}
+                >
+                  Dismiss
+                </button>
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
       <div className="sh-composer-inner">
         <textarea
           ref={taRef}

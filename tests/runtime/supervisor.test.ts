@@ -2006,6 +2006,24 @@ describe("supervisor.refresh", () => {
     expect(refreshed?.ownership).toBe("managed");
     expect(refreshed?.hostInstanceId).toBeNull();
   });
+  it("keeps state unknown and refuses stop when host lineage probe returns unknown", async () => {
+    const world = makeWorld();
+    world.seed({ id: "c1", nativeSessionId: "native-A", state: "running", tmuxSessionId: "$1", tmuxSessionName: "caw-c1", tmuxPanePid: 1002, tmuxServerIdentity: "private-socket:1" });
+    world.tmuxSessions.push({ id: "$1", name: "caw-c1", alive: true, panePid: 1002, serverIdentity: "private-socket:1" });
+    world.hosts.push(hostRow({ pid: 2000, sessionId: "native-A", instanceId: "host-A" }));
+    world.adapters.isProcessDescendant = async () => "unknown";
+    const supervisor = createSupervisor({ store: world.store, adapters: world.adapters, clock: instantClock, maxActive: 3 });
+
+    const refreshed = await supervisor.refresh("c1");
+    expect(refreshed?.state).toBe("unknown");
+    expect(refreshed?.hostInstanceId).toBeNull();
+    expect(refreshed?.statusDetail).toMatch(/lineage could not be determined/i);
+
+    await expect(supervisor.stop("c1")).rejects.toMatchObject({
+      code: "agent_not_running",
+      message: expect.stringMatching(/lineage could not be verified/i),
+    });
+  });
 
   it("persists a model the host reports without touching the next-launch preference", async () => {
     const world = makeWorld();
