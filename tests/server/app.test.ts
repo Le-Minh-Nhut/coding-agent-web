@@ -13,6 +13,7 @@ import type { CapabilityService, CollabHost, NativeSessionHeader, NativeSessionH
 import type { ServerConfig } from "../../apps/server/src/config.js";
 import type { WorkspacePathPolicy } from "../../apps/server/src/path-policy.js";
 import { createMetadataStore } from "../../apps/server/src/store.js";
+import type { MetadataStore } from "../../apps/server/src/store.js";
 
 const dirs: string[] = [];
 afterEach(async () => { await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true }))); });
@@ -1046,6 +1047,69 @@ describe("external restart refusal", () => {
     expect(response.json().error.code).toBe("conflict_owner");
     expect(starts).toBe(0);
     expect(specs).toBe(0);
+    await app.close();
+  });
+});
+describe("restart refuses unverifiable writers", () => {
+  it("fails closed on unknown native lease and invalid recorded history, but restarts an ordinary error", async () => {
+    let starts = 0;
+    let specs = 0;
+    const supervisor = {
+      start: async (_id: string, _spec: RuntimeLaunchSpec) => {
+         starts++;
+        return {} as Conversation;
+       },
+      stop: async () => { throw new Error("no running writer"); },
+    } as unknown as Supervisor;
+    let store: MetadataStore;
+    const { app, headers, dir, store: fixtureStore } = await fixture({
+      supervisor,
+      runtimeSpec: (conversation) => {
+        specs++;
+        if (conversation.nativeSessionId === "lease-unknown") throw Object.assign(new Error("Writer status unknown"), { code: "conflict_owner" });
+        if (conversation.nativeSessionPath) throw Object.assign(new Error("Invalid native history"), { code: "conflict_owner" });
+        return { conversationId: conversation.id, name: "retry-test", cwd: dir };
+      },
+    });
+    store = fixtureStore;
+    const project = await store.createProject({ path: dir });
+
+    const unknownLease = await store.createConversation({ projectId: project.id, nativeSessionId: "lease-unknown" });
+    const leaseRefusal = await app.inject({ method: "POST", url: `/api/conversations/${unknownLease.id}/actions`, headers, payload: { action: "restart" } });
+    expect(leaseRefusal.statusCode).toBe(409);
+    expect(leaseRefusal.json().error.code).toBe("conflict_owner");
+    expect(starts).toBe(0);
+
+    const invalidHistory = await store.createConversation({ projectId: project.id });
+    await store.updateConversation(invalidHistory.id, { nativeSessionPath: join(dir, "journal.jsonl") });
+    const historyRefusal = await app.inject({ method: "POST", url: `/api/conversations/${invalidHistory.id}/actions`, headers, payload: { action: "restart" } });
+    expect(historyRefusal.statusCode).toBe(409);
+    expect(historyRefusal.json().error.code).toBe("conflict_owner");
+    expect(starts).toBe(0);
+
+    const restartable = await store.createConversation({ projectId: project.id });
+    await store.updateConversation(restartable.id, { state: "error" });
+    const restarted = await app.inject({ method: "POST", url: `/api/conversations/${restartable.id}/actions`, headers, payload: { action: "restart" } });
+    expect(restarted.statusCode).toBe(200);
+    expect(starts).toBe(1);
+    expect(specs).toBe(2);
+    await app.close();
+  });
+
+  it("refuses a managed tmux session when its server identity is unknown", async () => {
+    let starts = 0;
+    const supervisor = { start: async () => { starts++; throw new Error("writer must not start"); } } as unknown as Supervisor;
+    const { app, headers, dir, store } = await fixture({
+      supervisor,
+      runtimeSpec: () => ({ conversationId: "unused", name: "unused", cwd: dir }),
+    });
+    const project = await store.createProject({ path: dir });
+    const conversation = await store.createConversation({ projectId: project.id });
+    await store.updateConversation(conversation.id, { tmuxSessionId: "$7" });
+    const response = await app.inject({ method: "POST", url: `/api/conversations/${conversation.id}/actions`, headers, payload: { action: "restart" } });
+    expect(response.statusCode).toBe(409);
+    expect(response.json().error.code).toBe("conflict_owner");
+    expect(starts).toBe(0);
     await app.close();
   });
 });
