@@ -92,4 +92,21 @@ it("V18 refused recovery is keyed by conversation: A's strip never appears in B 
  expect(leakedIntoB).toBe(false);
  expect(backInA).toBe(true);
 });
+it("repro: App remount forgets same-record Recover dedupe",async()=>{
+ const f=await fixture(true);f.type("DRAFT_B");f.type("UNCERTAIN_A");await f.send();f.type("DRAFT_B");await f.refuse();
+ fireEvent.click(f.view.getByRole("button",{name:"Recover to draft"}));
+ expect(f.input().value).toBe("DRAFT_B\n\nUNCERTAIN_A");
+ fireEvent.click(screen.getByTitle("Back"));fireEvent.click(await screen.findByText("Chat"));
+ await waitFor(()=>expect(f.socket()).not.toBeNull());await f.welcome();
+ fireEvent.click(f.view.getByRole("button",{name:"Recover to draft"}));
+ expect(f.input().value).toBe("DRAFT_B\n\nUNCERTAIN_A");
+});
+it("recovery identity uses exact multiline whole-line blocks, not substrings",async()=>{
+ const f=await fixture();f.type("BLOCK_BUG\nTAIL");await f.send();f.type("DRAFT");await f.refuse();
+ fireEvent.click(f.view.getByRole("button",{name:"Recover to draft"}));
+ expect(f.input().value).toBe("DRAFT\n\nBLOCK_BUG\nTAIL");
+ f.type("debug\nTAIL");
+ fireEvent.click(f.view.getByRole("button",{name:"Recover to draft"}));
+ expect(f.input().value).toBe("debug\nTAIL\n\nBLOCK_BUG\nTAIL");
+});
 

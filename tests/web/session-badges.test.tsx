@@ -40,9 +40,11 @@ async function renderWith(sessions: SessionWithHost[], onSelectConversation = ()
   } as never);
   vi.mocked(api.listNativeSessions).mockResolvedValue({ ok: true, data: sessions } as never);
 
+  let unmount!: () => void;
   await act(async () => {
-    render(<ProjectDetailView projectId="p1" onBack={() => {}} onSelectConversation={onSelectConversation} />);
+    unmount = render(<ProjectDetailView projectId="p1" onBack={() => {}} onSelectConversation={onSelectConversation} />).unmount;
   });
+  return unmount;
 }
 
 function externalConversation(): Conversation {
@@ -145,6 +147,45 @@ describe("native session liveness badge", () => {
     expect(screen.getByText("Tracked session")).toBeTruthy();
     expect(within(screen.getByText("Tracked session").closest(".card")!).queryByRole("button", { name: "Resume in app" })).toBeNull();
     expect(screen.getAllByRole("button", { name: "Resume in app" })).toHaveLength(1);
+  });
+  it("retries only failed managed stopped sessions without creating a row", async () => {
+    const onSelectConversation = vi.fn();
+    const failed = { ...externalConversation(), id: "managed-chat", ownership: "managed" as const, state: "error" as const, modelPreference: "preferred-model" };
+    vi.mocked(api.listConversations).mockResolvedValue({ ok: true, data: [failed] } as never);
+    vi.mocked(api.restartConversation).mockResolvedValue({ ok: true, data: failed } as never);
+    await renderWith([session({ live: false, tracked: true })], onSelectConversation);
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Retry" })); });
+    expect(api.restartConversation).toHaveBeenCalledWith(failed.id);
+    expect(api.createConversation).not.toHaveBeenCalled();
+    expect(onSelectConversation).toHaveBeenCalledWith(failed.id);
+  });
+  it("does not navigate after Retry settles in a different project view", async () => {
+    const onSelectConversation = vi.fn();
+    const failed = { ...externalConversation(), id: "managed-chat", ownership: "managed" as const, state: "error" as const };
+    let settle!: (value: { ok: true; data: typeof failed }) => void;
+    vi.mocked(api.listConversations).mockResolvedValue({ ok: true, data: [failed] } as never);
+    vi.mocked(api.restartConversation).mockImplementation(() => new Promise((resolve) => { settle = resolve; }) as never);
+    const unmount = await renderWith([session({ live: false, tracked: true })], onSelectConversation);
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    unmount();
+    await act(async () => { settle({ ok: true, data: failed }); });
+    expect(onSelectConversation).not.toHaveBeenCalled();
+  });
+  it("does not offer Retry for externally managed live sessions or unsafe writer conflicts", async () => {
+    const external = externalConversation();
+    vi.mocked(api.listConversations).mockResolvedValue({ ok: true, data: [external] } as never);
+    await renderWith([session({ live: true, tracked: true })]);
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+  });
+  it("keeps server conflict refusal visible and does not create a second row", async () => {
+    const failed = { ...externalConversation(), id: "managed-chat", ownership: "managed" as const, state: "error" as const };
+    vi.mocked(api.listConversations).mockResolvedValue({ ok: true, data: [failed] } as never);
+    vi.mocked(api.restartConversation).mockResolvedValue({ ok: false, error: { code: "conflict_owner", message: "Writer lease cannot be verified." } } as never);
+    await renderWith([session({ live: false, tracked: true })]);
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await act(async () => {});
+    expect(screen.getByRole("alert").textContent).toContain("no second agent was started");
+    expect(api.createConversation).not.toHaveBeenCalled();
   });
 
   it("shows persisted lifecycle details beside the conversation state", async () => {

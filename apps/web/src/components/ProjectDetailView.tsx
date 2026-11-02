@@ -82,6 +82,19 @@ export function ProjectDetailView({
       setError("This session already has a writer or its lease cannot be verified. Attach in the terminal instead; no second agent was started.");
     } else setError(result.error.message);
   };
+  const handleRetry = async (sessionId: string) => {
+    const conversation = conversations.find((item) => item.nativeSessionId === sessionId && item.ownership === "managed" && (item.state === "error" || item.state === "stopped"));
+    if (!conversation || resumingSessionId) return;
+    const generation = viewGenerationRef.current;
+    setResumingSessionId(sessionId);
+    setError(null);
+    const result = await api.restartConversation(conversation.id);
+    if (generation !== viewGenerationRef.current) return;
+    setResumingSessionId(null);
+    if (result.ok) onSelectConversation(conversation.id);
+    else if (result.error.code === "conflict_owner") setError("This session already has a writer or its lease cannot be verified. Attach in the terminal instead; no second agent was started.");
+    else setError(result.error.message);
+  };
 
   const handleAttachLive = async (session: NativeSessionSummary) => {
     if (attachingSessionId !== null || session.tracked || session.live !== true || !hasLiveCollabHost(session)) return;
@@ -215,6 +228,11 @@ export function ProjectDetailView({
                     onClick={() => handleResume(sess)}
                   >
                     {resumingSessionId === sess.sessionId ? "Resuming…" : "Resume in app"}
+                  </button>
+                )}
+                {sess.tracked && sess.live === false && conversations.some((item) => item.nativeSessionId === sess.sessionId && item.ownership === "managed" && (item.state === "error" || item.state === "stopped")) && (
+                  <button type="button" className="primary" disabled={resumingSessionId !== null} onClick={(event) => { event.stopPropagation(); void handleRetry(sess.sessionId); }}>
+                    {resumingSessionId === sess.sessionId ? "Retrying…" : "Retry"}
                   </button>
                 )}
               </div>

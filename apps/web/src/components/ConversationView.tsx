@@ -21,6 +21,7 @@ export interface RefusedRecovery {
   text: string;
   unconfirmed?: boolean;
   echoed?: boolean;
+  recoveredText?: string;
 }
 
 interface ConversationViewProps {
@@ -28,11 +29,10 @@ interface ConversationViewProps {
   draft?: string;
   onDraftChange?: (draft: string) => void;
   onBack: () => void;
-  /** App-owned recovery list for this conversation; omit to use per-mount internal state. */
+  /** App-owned recovery list and dedupe state survive Back/reopen. */
   refusedRecoveries?: RefusedRecovery[];
   onRefusedRecoveriesChange?: (next: RefusedRecovery[]) => void;
 }
-
 interface DisplayMessage {
   id: string;
   role: "user" | "assistant" | "tool" | "notice";
@@ -197,7 +197,6 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
   const refusedRecoveriesRef = useRef(refusedRecoveries);
   refusedRecoveriesRef.current = refusedRecoveries;
   const refusedIdRef = useRef(0);
-  const recoveredPromptIdsRef = useRef(new Map<number, string>());
   const appendRefusedRecovery = (text: string, unconfirmed = false): void => {
     const list = refusedRecoveriesRef.current;
     // Seed from the list so a caller-supplied list keeps unique ids across remounts.
@@ -262,6 +261,7 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
   const modelInputRef = useRef<HTMLInputElement | null>(null);
   const socketRef = useRef<CollabSocket | null>(null);
   const pendingUiResponsesRef = useRef(new Map<number, object>());
+  const [pendingUiResponseIds, setPendingUiResponseIds] = useState<Set<number>>(() => new Set());
   const sendingPromptTextsRef = useRef(new Map<string, object>());
   const pendingPromptRef = useRef<PendingPrompt[]>([]);
   const localIdRef = useRef(0);
@@ -477,7 +477,8 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     if ((frame.t === "welcome" || frame.t === "state") && next.error === null) setSendError(null);
   };
 
-  const flushPendingStream = (): void => {
+  const flushPendingStream = (expectedConnection?: number): void => {
+    if (expectedConnection !== undefined && physicalConnectionRef.current !== expectedConnection) return;
     if (renderTimerRef.current !== null) clearTimeout(renderTimerRef.current);
     renderTimerRef.current = null;
     const frame = pendingStreamFrameRef.current;
@@ -489,10 +490,19 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
   handleHostFrameRef.current = (frame) => {
     if (frame.t === "event" && frame.event.type === "message_update" && frame.event.message.role === "assistant") {
       pendingStreamFrameRef.current = frame;
-      if (renderTimerRef.current === null) renderTimerRef.current = setTimeout(flushPendingStream, 100);
+      if (renderTimerRef.current === null) {
+        const connection = physicalConnectionRef.current;
+        renderTimerRef.current = setTimeout(() => flushPendingStream(connection), 100);
+      }
       return;
     }
-    flushPendingStream();
+    flushPendingStream(physicalConnectionRef.current);
+    if (frame.t === "ui-request-end") {
+      const requests = transcriptRef.current.uiRequests;
+      if (requests.current?.reqId !== frame.reqId && !requests.queue.some((request) => request.reqId === frame.reqId)) return;
+      pendingUiResponsesRef.current.delete(frame.reqId);
+      setPendingUiResponseIds((previous) => { const next = new Set(previous); next.delete(frame.reqId); return next; });
+    }
     const hadPendingSnapshot = transcriptRef.current.pendingSnapshot !== null;
     // The queued live frames are gone once the completing snapshot is reduced, so
     // capture them first: a pre-snapshot prompt whose echo arrived live was already
@@ -861,8 +871,11 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
       if (!isCurrent()) return;
       const socket = new CollabSocket({ wsUrl: parsed.wsUrl, role: "guest", key });
       socket.onOpen = () => {
-        if (!isCurrent() || socketRef.current !== socket) return;
+        clearTimeout(renderTimerRef.current ?? undefined);
         physicalConnectionRef.current++;
+        // host.ts:836-841 replays unanswered requests after welcome; its IDs are never reused.
+        pendingUiResponsesRef.current.clear();
+        setPendingUiResponseIds(new Set());
         setStatus("connecting");
         void socket.send({ t: "hello", proto: 3, name: "Mobile Web Controller", ...(writeToken ? { writeToken: encodeBase64Url(writeToken) } : {}) });
       };
@@ -1025,19 +1038,24 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
    */
   const recoverRefusedPromptText = (item: RefusedRecovery): void => {
     const currentDraft = inputValueRef.current;
-    // Same id no-ops while its whole-line block remains; editing/removing that block makes Recover available again.
-    if (recoveredPromptIdsRef.current.get(item.id) === item.text) {
+    if (item.recoveredText === item.text) {
       if (("\n" + currentDraft + "\n").includes("\n" + item.text + "\n")) return;
-      recoveredPromptIdsRef.current.delete(item.id);
+      const updated = refusedRecoveriesRef.current.map((recovery) => recovery.id === item.id ? { ...recovery, recoveredText: undefined } : recovery);
+      refusedRecoveriesRef.current = updated;
+      setRefusedRecoveries(updated);
     }
     if (currentDraft.trim() && currentDraft !== item.text) {
       updateDraft(`${currentDraft}\n\n${item.text}`);
-      recoveredPromptIdsRef.current.set(item.id, item.text);
+      const updated = refusedRecoveriesRef.current.map((recovery) => recovery.id === item.id ? { ...recovery, recoveredText: item.text } : recovery);
+      refusedRecoveriesRef.current = updated;
+      setRefusedRecoveries(updated);
       composerRef.current?.focus();
       return;
     }
     updateDraft(item.text);
-    recoveredPromptIdsRef.current.set(item.id, item.text);
+    const updated = refusedRecoveriesRef.current.map((recovery) => recovery.id === item.id ? { ...recovery, recoveredText: item.text } : recovery);
+    refusedRecoveriesRef.current = updated;
+    setRefusedRecoveries(updated);
     removeRefusedRecovery(item.id);
     composerRef.current?.focus();
   };
@@ -1071,12 +1089,21 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     const socket = socketRef.current;
     const operationGeneration = operationGenerationRef.current;
     const connectionGeneration = connectionGenerationRef.current;
+    const physicalConnection = physicalConnectionRef.current;
     const conversationAtResponse = conversationIdRef.current;
     void socket.send({ t: "ui-response", reqId: targetReqId, value }).then((sent) => {
-      if (pendingUiResponsesRef.current.get(targetReqId) === responseToken) pendingUiResponsesRef.current.delete(targetReqId);
-      if (!viewActiveRef.current || operationGenerationRef.current !== operationGeneration || connectionGenerationRef.current !== connectionGeneration || conversationIdRef.current !== conversationAtResponse) return;
-      if (sent) updateTranscript({ t: "ui-request-end", reqId: targetReqId });
-      else setSendError("Not connected — approval response not sent. Request remains open; retry when connected.");
+      if (pendingUiResponsesRef.current.get(targetReqId) !== responseToken) return;
+      if (!viewActiveRef.current || operationGenerationRef.current !== operationGeneration || connectionGenerationRef.current !== connectionGeneration || physicalConnectionRef.current !== physicalConnection || conversationIdRef.current !== conversationAtResponse) {
+        pendingUiResponsesRef.current.delete(targetReqId);
+        return;
+      }
+      if (!sent) {
+        pendingUiResponsesRef.current.delete(targetReqId);
+        setSendError("Not connected — approval response not sent. Request remains open; retry when connected.");
+      } else {
+        setPendingUiResponseIds((previous) => new Set(previous).add(targetReqId));
+        setSendError(null);
+      }
     });
   };
 
@@ -1498,6 +1525,7 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
               )}
             </div>
             <p style={{ marginBottom: "12px", fontSize: "0.95rem" }}>{parseInline(activeUiRequest.title)}</p>
+            {pendingUiResponseIds.has(activeUiRequest.reqId) && <p role="status">Response sent; awaiting host to settle this request.</p>}
 
             {(transcript.readOnly || linkAccess === "view") ? (
               <p role="note">Read-only link — this request cannot be answered here.</p>

@@ -246,6 +246,54 @@ describe("Approval handling & FIFO queueing", () => {
     expect(responses).toHaveLength(1);
     expect(responses[0]).toEqual({ t: "ui-response", reqId: 301, value: "Approve Once" });
   });
+  it("keeps approval pending after local send until host ui-request-end", async () => {
+    const { container } = await mountView();
+    emitFrame({ t: "welcome", proto: 3, header: { type: "session", id: "s", cwd: "/", timestamp: "" }, state: { isStreaming: false, queuedMessageCount: 0, cwd: "/", participants: [] }, agents: [], entryCount: 0 });
+    emitFrame({ t: "ui-request", request: { reqId: 320, kind: "select", title: "Host must settle", options: ["Approve"] } });
+    const approve = Array.from(container.querySelectorAll("button")).find((button) => button.textContent?.includes("Approve"))!;
+    await act(async () => { fireEvent.click(approve); await Promise.resolve(); });
+    expect(container.textContent).toContain("Host must settle");
+    expect(container.textContent).toMatch(/awaiting host/i);
+    fireEvent.click(approve);
+    expect(sentFrames.filter((frame) => frame.t === "ui-response" && frame.reqId === 320)).toHaveLength(1);
+  });
+  it("re-enables an unanswered approval after reconnect and deduplicates host replay", async () => {
+    const { container } = await mountView();
+    emitFrame({ t: "welcome", proto: 3, header: { type: "session", id: "s", cwd: "/", timestamp: "" }, state: { isStreaming: false, queuedMessageCount: 0, cwd: "/", participants: [] }, agents: [], entryCount: 0 });
+    emitFrame({ t: "ui-request", request: { reqId: 321, kind: "select", title: "Retry after reconnect", options: ["Approve"] } });
+    await act(async () => { fireEvent.click(Array.from(container.querySelectorAll("button")).find((button) => button.textContent?.includes("Approve"))!); await Promise.resolve(); });
+    fireEvent.click(Array.from(container.querySelectorAll("button")).find((button) => button.textContent?.includes("Approve"))!);
+    expect(sentFrames.filter((frame) => frame.t === "ui-response" && frame.reqId === 321)).toHaveLength(1);
+    activeSocket!.onClose?.("lost", true, false);
+    activeSocket!.onOpen?.();
+    emitFrame({ t: "ui-request", request: { reqId: 321, kind: "select", title: "Retry after reconnect", options: ["Approve"] } });
+    expect(container.textContent).toContain("Retry after reconnect");
+    expect(container.textContent).not.toMatch(/awaiting host/i);
+    await act(async () => { fireEvent.click(Array.from(container.querySelectorAll("button")).find((button) => button.textContent?.includes("Approve"))!); await Promise.resolve(); });
+    expect(sentFrames.filter((frame) => frame.t === "ui-response" && frame.reqId === 321)).toHaveLength(2);
+    expect(container.textContent).toContain("Retry after reconnect");
+    expect(container.textContent).toMatch(/awaiting host/i);
+    emitFrame({ t: "ui-request-end", reqId: 321 });
+    expect(container.textContent).not.toContain("Retry after reconnect");
+  });
+
+  it("ignores stale local send completion after physical reconnect", async () => {
+    const { container } = await mountView();
+    emitFrame({ t: "welcome", proto: 3, header: { type: "session", id: "s", cwd: "/", timestamp: "" }, state: { isStreaming: false, queuedMessageCount: 0, cwd: "/", participants: [] }, agents: [], entryCount: 0 });
+    let finish!: (sent: boolean) => void;
+    vi.spyOn(CollabSocket.prototype, "send").mockImplementation((frame) => {
+      if ((frame as GuestFrame).t === "ui-response") return new Promise<boolean>((resolve) => { finish = resolve; });
+      return Promise.resolve(true);
+    });
+    emitFrame({ t: "ui-request", request: { reqId: 319, kind: "select", title: "Connection scoped", options: ["Approve"] } });
+    fireEvent.click(Array.from(container.querySelectorAll("button")).find((button) => button.textContent?.includes("Approve"))!);
+    activeSocket!.onClose?.("lost", true, false);
+    activeSocket!.onOpen?.();
+    await act(async () => { finish(true); await Promise.resolve(); });
+    expect(container.textContent).toContain("Connection scoped");
+    expect(container.textContent).not.toMatch(/awaiting host/i);
+  });
+
 
   it("advances to the next queued request when current one is answered or ended", async () => {
     const { container } = await mountView();
@@ -277,15 +325,9 @@ describe("Approval handling & FIFO queueing", () => {
       fireEvent.click(approveBtn!);
       await Promise.resolve();
     });
-
-    // Now end Question 2 from host via ui-request-end
-    emitFrame({
-      t: "ui-request-end",
-      reqId: 402,
-    });
-
-    // ui-request-end reports settlement, not a timeout.
-    expect(container.textContent).not.toContain("Previous approval request timed out");
+    expect(container.textContent).toContain("Question 1");
+    emitFrame({ t: "ui-request-end", reqId: 401 });
+    expect(container.textContent).toContain("Question 2");
   });
 
   it("removes a queued request when ui-request-end arrives for it without disturbing current", async () => {
@@ -323,13 +365,17 @@ describe("Approval handling & FIFO queueing", () => {
     expect(container.textContent).toContain("Active Question 501");
     expect(container.textContent).not.toContain("+1 queued");
 
-    // When 501 is answered, there is no second request to advance to
+    // Local transport acceptance is not host settlement.
     const approveBtn = Array.from(container.querySelectorAll("button")).find((button) => button.textContent?.includes("ok"));
     await act(async () => {
       fireEvent.click(approveBtn!);
       await Promise.resolve();
     });
+    expect(container.textContent).toContain("Active Question 501");
+    expect(container.textContent).toMatch(/awaiting host/i);
+    emitFrame({ t: "ui-request-end", reqId: 501 });
     expect(container.textContent).not.toContain("Approval Requested");
+
   });
 
   it("makes answering after settling impossible (for both timed-out and answered requests)", async () => {
