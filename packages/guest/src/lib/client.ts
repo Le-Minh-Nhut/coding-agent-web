@@ -855,7 +855,8 @@ export class GuestClient {
 			readOnly: this.#readOnly,
 			uiRequest: this.#uiRequest,
 			notices: this.#notices,
-			unconfirmedPrompts: [...this.#recoveryStore.records.values()],
+            // Keep foreign-room records visible with origin labels; the contract permits explicit recovery/copy/dismiss across rooms, while host mutations stay room-scoped.
+            unconfirmedPrompts: [...this.#recoveryStore.records.values()],
 			loading: this.#pendingSnapshot && {
 				received: this.#pendingSnapshot.entries.length,
 				total: this.#pendingSnapshot.total,

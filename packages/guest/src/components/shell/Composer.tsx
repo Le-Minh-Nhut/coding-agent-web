@@ -150,9 +150,8 @@ export const Composer = memo(function Composer({
   const taRef = useRef<HTMLTextAreaElement | null>(null);
 	const textRef = useRef(text);
 	textRef.current = text;
-  /** True from the first press until that send settles: see the re-entry guard in `send`. */
-  const sendingRef = useRef(false);
-  const answeringRef = useRef(false);
+  const sendingClientRef = useRef<GuestClient | null>(null);
+  const answeringClientRef = useRef<GuestClient | null>(null);
   const { composingRef, onCompositionStart, onCompositionEnd } =
     useCompositionGuard();
   useEffect(() => {
@@ -191,8 +190,8 @@ export const Composer = memo(function Composer({
 
   const send = useCallback((): void => {
     const submitted = text.trim();
-    if (!submitted || !live || readOnly || sendingRef.current) return;
-    sendingRef.current = true;
+    if (!submitted || !live || readOnly || sendingClientRef.current === client) return;
+    sendingClientRef.current = client;
     const sendingClient = client;
     const recovered = activeUnconfirmed;
     void Promise.resolve(sendingClient.sendPrompt(submitted)).then(accepted => {
@@ -210,22 +209,22 @@ export const Composer = memo(function Composer({
       if (textRef.current === submitted) setText("");
       setSendError(null);
     }, () => { if (currentClientRef.current === sendingClient) setSendError("prompt not sent — press send to retry"); })
-      .finally(() => { sendingRef.current = false; });
+      .finally(() => { if (currentClientRef.current === sendingClient && sendingClientRef.current === sendingClient) sendingClientRef.current = null; });
   }, [client, live, readOnly, text]);
 
   const submitUiResponse = useCallback((reqId: number, value?: string): void => {
-    if (answeringRef.current) return;
-    answeringRef.current = true;
+    if (answeringClientRef.current === client) return;
+    answeringClientRef.current = client;
     setUiResponseError(null);
     const answeringClient = client;
     void Promise.resolve(answeringClient.sendUiResponse(reqId, value)).then(accepted => {
       if (currentClientRef.current === answeringClient && !accepted) setUiResponseError("response not sent — retry or check connection");
     }, () => { if (currentClientRef.current === answeringClient) setUiResponseError("response not sent — retry or check connection"); })
-      .finally(() => { answeringRef.current = false; });
+      .finally(() => { if (currentClientRef.current === answeringClient && answeringClientRef.current === answeringClient) answeringClientRef.current = null; });
   }, [client]);
 
 	const handleRecover = (prompt: UnconfirmedPrompt): void => {
-		if (prompt.status === "recovered" || prompt.status === "echoed" || recoveringRef.current.has(prompt.id)) return;
+    if (prompt.status === "recovered" || recoveringRef.current.has(prompt.id)) return;
 		const currentDraft = text;
 		const recoveredDraft = currentDraft.trim() === "" ? prompt.text : `${currentDraft}\n${prompt.text}`;
 		recoveringRef.current.add(prompt.id);
@@ -360,7 +359,7 @@ export const Composer = memo(function Composer({
 					{sub.roomId && <small> · room {sub.roomId}{sub.sessionId ? ` / session ${sub.sessionId}` : ""}</small>}
 				</span>
 				<span className="sh-recoverable-actions">
-					{sub.status !== "recovered" && sub.status !== "echoed" && <button type="button" className="sh-btn" onClick={() => handleRecover(sub)}>Recover</button>}
+                {sub.status !== "recovered" && <button type="button" className="sh-btn" onClick={() => handleRecover(sub)}>Recover</button>}
 					<button type="button" className="sh-btn" onClick={() => void handleCopy(sub)}>{copiedId === sub.id ? "Copied" : "Copy"}</button>
 					<button type="button" className="sh-btn" onClick={() => handleDismiss(sub.id)}>Dismiss</button>
 				</span>

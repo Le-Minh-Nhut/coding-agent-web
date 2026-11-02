@@ -64,6 +64,7 @@ export function App(): ReactNode {
       next.connect();
     } catch (err) {
       client?.restoreRecoveryOwnership();
+      next.close();
       setConnectError(err instanceof Error ? err.message : String(err));
       return;
     }

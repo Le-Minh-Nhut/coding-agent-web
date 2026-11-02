@@ -483,7 +483,7 @@ describe("R30-04: prompt recovery when user types meanwhile and adversarial scen
     await waitFor(() => {
       expect(client.getSnapshot().unconfirmedPrompts).toHaveLength(1);
       expect(client.getSnapshot().unconfirmedPrompts[0].status).toBe("echoed");
-      expect(view.queryByRole("button", { name: "Recover" })).toBeNull();
+      expect(view.getByRole("button", { name: "Recover" })).toBeTruthy();
       expect(view.getByRole("button", { name: "Copy" })).toBeTruthy();
       expect(view.getByRole("button", { name: "Dismiss" })).toBeTruthy();
     });
