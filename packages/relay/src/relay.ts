@@ -382,7 +382,7 @@ export function createRelay(options: RelayOptions = {}): Relay {
     ws.on("message", (data: RawData, isBinary: boolean) => {
       if (!isBinary) return;
       const live = rooms.get(roomId);
-      if (!live || live.host.readyState !== WebSocket.OPEN) return;
+      if (!live || live.guests.get(peerId) !== ws || live.host.readyState !== WebSocket.OPEN) return;
       const frame = toBuffer(data);
       if (frame.length < ENVELOPE_HEADER_LENGTH) return;
       // Rewrite the prefix in place; the sealed payload bytes are never touched or copied.
