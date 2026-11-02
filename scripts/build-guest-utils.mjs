@@ -7,7 +7,7 @@ import * as path from "node:path";
 const MAX_PLAUSIBLE_PID = 4_194_304;
 
 // ponytail: timestamps are modern backup names; swap removes them on success, failures preserve them. Sweep only legacy PID names; timestamps accumulate for manual recovery.
-export async function sweepStaleBackups(distDir) {
+export async function sweepStaleBackups(distDir, rm = fs.rm) {
   const prefix = `${path.basename(distDir)}.old-`;
   const parent = path.dirname(distDir);
   let entries;
@@ -29,7 +29,7 @@ export async function sweepStaleBackups(distDir) {
       if (err?.code !== "ESRCH") continue;
     }
     try {
-      await fs.rm(path.join(parent, name), { recursive: true, force: true });
+      await rm(path.join(parent, name), { recursive: true, force: true });
     } catch (err) {
       console.error(`[build-guest] could not remove stale backup ${name}:`, err);
     }
@@ -68,14 +68,15 @@ export async function swapStageToDist(stageDir, distDir, oldDir, rename = fs.ren
   }
 }
 
-export async function finishPublishedBuild(oldDir, distDir) {
+// Injection seam keeps post-publish cleanup failures deterministic in tests.
+export async function finishPublishedBuild(oldDir, distDir, rm = fs.rm) {
   try {
-    await fs.rm(oldDir, { recursive: true, force: true });
+    await rm(oldDir, { recursive: true, force: true });
   } catch (err) {
     console.error(`[build-guest] warning: could not remove backup ${oldDir}:`, err);
   }
   try {
-    await sweepStaleBackups(distDir);
+    await sweepStaleBackups(distDir, rm);
   } catch (err) {
     console.error(`[build-guest] warning: could not sweep stale backups for ${distDir}:`, err);
   }

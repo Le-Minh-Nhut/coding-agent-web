@@ -1,3 +1,4 @@
+import { finishPublishedBuild, swapStageToDist } from "../../scripts/build-guest-utils.mjs";
 import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import * as fs from "node:fs/promises";
@@ -80,6 +81,32 @@ it("propagates publish error and preserves backup when rollback fails", async ()
     expect(errorLog).toHaveBeenCalledWith(expect.stringContaining("rollback failed to restore"), rollbackError);
   } finally {
     errorLog.mockRestore();
+    rmSync(temp, { recursive: true, force: true });
+  }
+});
+
+it("keeps published dist when injected backup removal fails", async () => {
+  const temp = mkdtempSync(join(tmpdir(), "caw-build-cleanup-fail-"));
+  const dist = join(temp, "dist");
+  const stage = join(temp, "stage");
+  const old = join(temp, "dist.old-123");
+  const publishError = Object.assign(new Error("cleanup failed"), { code: "EACCES" });
+  try {
+    mkdirSync(dist);
+    mkdirSync(stage);
+    writeFileSync(join(dist, "index.html"), "OLD");
+    writeFileSync(join(stage, "index.html"), "NEW");
+    await swapStageToDist(stage, dist, old);
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    const rm = vi.fn(async () => { throw publishError; });
+    try {
+      await expect(finishPublishedBuild(old, dist, rm)).resolves.toBeUndefined();
+      expect(errorLog).toHaveBeenCalledWith(expect.stringContaining(`warning: could not remove backup ${old}`), publishError);
+      expect(readFileSync(join(dist, "index.html"), "utf8")).toBe("NEW");
+    } finally {
+      errorLog.mockRestore();
+    }
+  } finally {
     rmSync(temp, { recursive: true, force: true });
   }
 });
