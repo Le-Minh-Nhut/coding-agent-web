@@ -363,10 +363,6 @@ export class GuestClient {
 		this.#unconfirmedPrompts = this.#promptList();
 		this.#commit();
 	}
-	confirmPrompt(predicate?: (p: UnconfirmedPrompt) => boolean): void {
-		const target = this.#promptList().find(prompt => (prompt.status === "unconfirmed" || prompt.status === "queued_local") && (!predicate || predicate(prompt)));
-		if (target) this.dismissPrompt(target.id);
-	}
 	#promptList(): readonly UnconfirmedPrompt[] {
 		return [...this.#recoveryStore.records.values()].filter(prompt => prompt.roomId === this.#roomId);
 	}

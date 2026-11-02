@@ -1,16 +1,16 @@
 # OMP Compatibility Matrix
 
-Compatibility baseline for Coding Agent Web. Every claim here was produced by
-running the installed binary on this machine, not read from documentation.
+Only wire-format facts directly checked against the installed OMP binary are verified. Other binary behavior was observed during earlier compatibility runs; upstream-source citations and cached docs below may describe a different revision, so they do not establish that behavior matches the installed build.
 
 ## Tested baseline
 
 | Item | Value | How observed |
 | --- | --- | --- |
 | OMP binary | `/home/heheboiz/.local/bin/omp` | `command -v omp` |
-| OMP version | `omp/18.13.0` | `omp --version` (measured 2026-11-02; previous baseline was `omp/18.12.2`) |
-| Upstream source read | `main` tarball, extracted at `/tmp/caw-poc/oh-my-pi` | `codeload.github.com/can1357/oh-my-pi/tar.gz/refs/heads/main` |
-| Update available at test time | `18.12.6` (at initial 18.12.2 test time; running 18.13.0 now) | OMP TUI "Update Available" banner |
+| OMP version | `omp/18.15.0` | `omp --version` (measured 2026-11-03) |
+| OMP binary SHA-256 | `6737ee2415555a3656cc7b89c14d1c25c18658ee4c0fd4f7309705149ccb7b0f` (`276,785,328` bytes) | `sha256sum`, `ls -l` |
+| Upstream source read | `main` tarball, extracted at `/tmp/caw-poc/oh-my-pi` | `codeload.github.com/can1357/oh-my-pi/tar.gz/refs/heads/main` (may not match installed binary) |
+| Update available at test time | `18.12.6` (at initial 18.12.2 test time; running 18.15.0 now) | OMP TUI "Update Available" banner |
 | Node | `v20.19.5` | `node -v` |
 | pnpm | `10.32.1` | `pnpm -v` |
 | Bun (used only to build the upstream browser client) | `1.4.4` | `~/.bun/bin/bun --version` |
@@ -38,6 +38,7 @@ Documentation cached while testing: `collab.md`, `session.md`, `rpc.md`,
 | Terminal continuity | `tmux attach -t <session>` / `tmux capture-pane -pt <session>` while a guest is active | Same process, same turn; no second agent |
 | Session identity | Session files under `~/.omp/agent/sessions/<encoded-cwd>/<timestamp>_<uuidv7>.jsonl` | Header line carries `cwd`, `id`, `timestamp`, `version` |
 | Liveness lease | `@omp-file-lock-<xxh64(lockPath,seed) hex×2>` bound on Linux abstract Unix sockets | Reproduced for a live session; present in `/proc/net/unix` |
+| Session lease command | `omp session lease --json -- <id> ...` | Present in installed `18.15.0`; not present in `18.13.0` |
 | Concurrent writer behavior | Second process resuming a live session | **Forks**: "Session … is open for writing in another omp process, so this session now saves to … instead of mixing its entries into that file." (`packages/coding-agent/src/modes/persistence-failure.ts:38`) |
 
 ## Gaps and limits found
