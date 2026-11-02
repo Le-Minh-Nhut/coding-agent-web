@@ -8,3 +8,6 @@
 
 3. **Output guard**:
    `tests/e2e/screens.spec.ts` defaults to `$TMPDIR/caw-screens` and refuses to write inside `docs/` unless `CAW_SCREENSHOTS_COMMIT=1` is explicitly set. Standard `pnpm test:e2e` runs never modify committed screenshots.
+
+Baseline SHA: 0b4dbd4a1b864cdd40a38a36566fe9c14fec791d
+Tested SHA: f0266bb9b55a80afda9623efe5107a2bdda8c8d4

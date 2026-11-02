@@ -9,6 +9,8 @@ Total screenshots: 109
 Viewports tested: 375x667, 375x812, 390x844, 430x932, 768x1024, 1280x800, 1440x900
 Tracked in repository: 83
 External evidence artifacts: 26
+Baseline SHA: 0b4dbd4a1b864cdd40a38a36566fe9c14fec791d
+Tested SHA: f0266bb9b55a80afda9623efe5107a2bdda8c8d4
 
 ## 1. Verified Interactions (Tested at 390×844)
 
