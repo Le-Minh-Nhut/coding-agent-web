@@ -153,20 +153,35 @@ it("V20 an unrelated host error does not falsely refuse the pending prompt",asyn
 });
 
 // A genuine live echo settles one matching attempt; identity is unknowable on this protocol.
-it("V20 a real collab-prompt entry echo keeps the matching attempt inspectable",async()=>{
+it("V20 a real collab-prompt echo settles its optimistic attempt and keeps recovery offered",async()=>{
  const f=await fixture(0,true);
+ await f.emit({t:"snapshot-chunk",entries:[],final:true});
  await f.send("UNCONFIRMED_PROMPT_A");
- f.type("UNSENT_DRAFT_B");
+ await waitFor(()=>expect(f.view.container.querySelectorAll(".message-card.user")).toHaveLength(1));
+ await f.emit({t:"entry",entry:collabRow("echo-collab-real","UNCONFIRMED_PROMPT_A")});
+ await waitFor(()=>expect(f.view.container.querySelectorAll(".message-card.user")).toHaveLength(1));
+ expect(f.recovery().match(/Echoed — UNCONFIRMED_PROMPT_A/g)).toHaveLength(1);
+ expect(screen.getByRole("button",{name:"Recover to draft"})).toBeTruthy();
  fireEvent.click(screen.getByTitle("Back"));
  fireEvent.click(await screen.findByText("Chat"));
  await waitFor(()=>expect(f.sockets).toHaveLength(2));
  await f.emit(welcome(0));
- expect(f.recovery()).toContain("Unconfirmed — host receipt unknown; may already have executed —");
- await f.emit({t:"entry",entry:collabRow("echo-collab-real","UNCONFIRMED_PROMPT_A")});
- expect(f.recovery()).toContain("UNCONFIRMED_PROMPT_A");
- expect(f.recovery()).toContain("Echoed");
- await f.emit(refusal);
- expect(f.recovery()).toContain("Echoed — UNCONFIRMED_PROMPT_A");
+ expect(f.recovery().match(/Echoed — UNCONFIRMED_PROMPT_A/g)).toHaveLength(1);
+ expect(f.recovery().match(/Unconfirmed — host receipt unknown; may already have executed — UNCONFIRMED_PROMPT_A/g)).toBeNull();
+});
+it("V32 one live echo settles one of two same-text pending attempts",async()=>{
+ const f=await fixture(0,true);
+ await f.emit({t:"snapshot-chunk",entries:[],final:true});
+ await f.send("SAME_PENDING_TEXT");await f.send("SAME_PENDING_TEXT");
+ await waitFor(()=>expect(f.view.container.querySelectorAll(".message-card.user")).toHaveLength(2));
+ await f.emit({t:"entry",entry:collabRow("echo-one","SAME_PENDING_TEXT")});
+ expect(f.view.container.querySelectorAll(".message-card.user")).toHaveLength(2);
+ fireEvent.click(screen.getByTitle("Back"));
+ fireEvent.click(await screen.findByText("Chat"));
+ await waitFor(()=>expect(f.sockets).toHaveLength(2));
+ await f.emit(welcome(0));
+ expect(f.recovery().match(/Echoed — SAME_PENDING_TEXT/g)).toHaveLength(1);
+ expect(f.recovery()).toContain("Unconfirmed — host receipt unknown; may already have executed — SAME_PENDING_TEXT");
 });
 it("V32 repeated recovery keeps occupied draft once; same text with different id recovers independently",async()=>{
  const f=await fixture(0,true);
@@ -174,17 +189,22 @@ it("V32 repeated recovery keeps occupied draft once; same text with different id
  f.type("NEW_DRAFT_B");
  await f.emit(refusal);
  await waitFor(()=>expect(f.recovery()).toContain("Refused — REFUSAL_A"));
- const recover=screen.getByRole("button",{name:"Recover to draft"});
- fireEvent.click(recover);
- expect(f.input().value).toBe("NEW_DRAFT_B\n\nREFUSAL_A");
  fireEvent.click(screen.getByRole("button",{name:"Recover to draft"}));
- expect(f.input().value).toBe("NEW_DRAFT_B\n\nREFUSAL_A");
+ fireEvent.click(screen.getByRole("button",{name:"Recover to draft"}));
+ expect(f.input().value.match(/REFUSAL_A/g)).toHaveLength(1);
+ expect(f.input().value).toContain("NEW_DRAFT_B");
+ expect(f.recovery()).toContain("Refused — REFUSAL_A");
+ f.type("EDITED_DRAFT_B");
+ fireEvent.click(screen.getByRole("button",{name:"Recover to draft"}));
+ expect(f.input().value.match(/REFUSAL_A/g)).toHaveLength(1);
+ expect(f.input().value).toContain("EDITED_DRAFT_B");
  await f.send("REFUSAL_A");
  f.type("NEW_DRAFT_C");
  await f.emit(refusal);
  await waitFor(()=>expect(screen.getAllByRole("button",{name:"Recover to draft"})).toHaveLength(2));
  fireEvent.click(screen.getAllByRole("button",{name:"Recover to draft"})[1]!);
- expect(f.input().value).toBe("NEW_DRAFT_C\n\nREFUSAL_A");
+ expect(f.input().value.match(/REFUSAL_A/g)).toHaveLength(1);
+ expect(f.input().value).toContain("NEW_DRAFT_C");
 });
 it("V32 dismissed records are removed by id and refused rows expose Dismiss",async()=>{
  const f=await fixture(0,true);
