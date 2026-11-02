@@ -4,6 +4,12 @@ import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import type { Conversation, Project } from "@caw/contracts";
 import { epochOf, observationSeqOf } from "@caw/contracts";
+export class DuplicateProjectPathError extends Error {
+  constructor() {
+    super("Project path already exists");
+    this.name = "DuplicateProjectPathError";
+  }
+}
 
 /*
  * Storage fallback: Node 20.19 smoke probe returned `Error: No such built-in
@@ -380,7 +386,7 @@ export function createMetadataStore(stateDir: string, now: () => Date = () => ne
     createProject(input) {
       return serialize(async () => {
         await load();
-        if ([...projects.values()].some((item) => item.path === input.path)) throw new Error("Project path already exists");
+        if ([...projects.values()].some((item) => item.path === input.path)) throw new DuplicateProjectPathError();
         const created = stamp();
         const value: Project = { id: randomUUID(), path: input.path, label: input.label ?? input.path.split(/[\\/]/).pop() ?? input.path, favorite: false, createdAt: created, updatedAt: created };
         await append([{ op: "project", value }]); projects.set(value.id, value); return value;

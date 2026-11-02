@@ -12,7 +12,7 @@ import { findRepoRoot, resolveDistDir, type ServerConfig } from "./config.js";
 import { registerStaticWeb } from "./static-web.js";
 import { createLogger, redactEventPayload, redactLogValue } from "./logger.js";
 import { PathPolicyError, WorkspacePathPolicy } from "./path-policy.js";
-import type { MetadataStore } from "./store.js";
+import { DuplicateProjectPathError, type MetadataStore } from "./store.js";
 
 export interface AppDependencies {
   config: ServerConfig;
@@ -628,6 +628,7 @@ export function buildApp(deps: AppDependencies): FastifyInstance<HttpServer> {
 }
 
 function pathError(reply: HttpReply, error: unknown) {
+  if (error instanceof DuplicateProjectPathError) return reply.code(409).send(fail("already_exists", error.message));
   if (error instanceof PathPolicyError) {
     const status = error.code === "path_forbidden" ? 403 : error.code === "path_not_found" ? 404 : error.code === "already_exists" ? 409 : 400;
     return reply.code(status).send(fail(error.code, error.message));
