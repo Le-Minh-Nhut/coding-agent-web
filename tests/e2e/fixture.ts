@@ -417,6 +417,8 @@ function randomBytes(length: number): Uint8Array<ArrayBuffer> {
 }
 
 export interface MockCollabHost {
+  /** Synthetic bare guest link matching this mock's room key. */
+  link: string;
   /** How many times the page opened the room socket; retries count. */
   connections: number;
   /** Prompt texts the page sent, in order — used to prove nothing was resubmitted. */
@@ -475,6 +477,7 @@ export async function installMockCollabHost(page: Page, options: { conversationI
   };
 
   const host: MockCollabHost = {
+    link: `${roomId}.${encodeBase64Url(secret)}`,
     connections: 0,
     prompts: [],
     guestFrames: [],
