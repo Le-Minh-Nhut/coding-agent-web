@@ -15,6 +15,7 @@ export interface ComposerProps {
   working: boolean;
   /** Prompts queued behind the running turn. */
   queuedMessageCount: number;
+  markPromptRecovered?(id: number): void;
 }
 
 /** Textarea metrics: line-height 20px + 8px vertical padding × 2 (kept in sync with shell.css). */
@@ -141,6 +142,8 @@ export const Composer = memo(function Composer({
   const [copiedId, setCopiedId] = useState<number | null>(null);
   const localUnconfirmedRef = useRef<UnconfirmedPrompt[]>([]);
   localUnconfirmedRef.current = localUnconfirmed;
+  const recoveredDraftsRef = useRef(new Map<number, string>());
+  const recoveringRef = useRef(new Set<number>());
   const taRef = useRef<HTMLTextAreaElement | null>(null);
   const pendingDraftRef = useRef<string | null>(null);
   /** True from the first press until that send settles: see the re-entry guard in `send`. */
@@ -164,28 +167,12 @@ export const Composer = memo(function Composer({
       if (newNotices.length > 0) {
         lastNoticeId = newNotices[newNotices.length - 1].id;
         const promptError = newNotices.find((n) => n.level === "error" && isPromptRejection(n.message));
-        if (promptError) {
-          const promptList = snap.unconfirmedPrompts ?? localUnconfirmedRef.current;
-          const reversed = [...promptList].reverse();
-          const refused =
-            reversed.find((p) => p.status === "refused") ??
-            reversed.find((p) => p.status === "unconfirmed");
-          const textToRestore = refused ? refused.text : pendingDraftRef.current;
-          if (textToRestore) {
-            const currentDraft = taRef.current ? taRef.current.value : text;
-            if (currentDraft.trim() === "") {
-              setText(textToRestore);
-              if (refused) {
-                if (client.dismissPrompt) client.dismissPrompt(refused.id);
-                else setLocalUnconfirmed((prev) => prev.filter((p) => p.id !== refused.id));
-              }
-              pendingDraftRef.current = null;
-            }
-            setSendError(promptError.message);
-          }
-        }
+        if (promptError) setSendError(promptError.message);
       }
     });
+  }, [client]);
+  useEffect(() => () => {
+    client.releaseRecoveredPrompts?.([...recoveredDraftsRef.current.keys()]);
   }, [client]);
 
   const live = phase === "live";
@@ -217,7 +204,7 @@ export const Composer = memo(function Composer({
     if (!client.getSnapshot) {
       setLocalUnconfirmed((prev) => [
         ...prev,
-        { id: Date.now(), text: submitted, at: Date.now(), status: "unconfirmed" },
+        { id: Date.now(), text: submitted, at: Date.now(), status: "unconfirmed", roomId: "", sessionId: null, clientGeneration: 0, connectionGeneration: 0 },
       ]);
     }
     void Promise.resolve(client.sendPrompt(submitted))
@@ -259,14 +246,13 @@ export const Composer = memo(function Composer({
   );
 
   const handleRecover = (prompt: UnconfirmedPrompt): void => {
+    if (prompt.status === "recovered" || recoveringRef.current.has(prompt.id)) return;
     const currentDraft = taRef.current ? taRef.current.value : text;
-    if (currentDraft.trim() === "") {
-      setText(prompt.text);
-      if (client.dismissPrompt) client.dismissPrompt(prompt.id);
-      else setLocalUnconfirmed((prev) => prev.filter((p) => p.id !== prompt.id));
-    } else {
-      setText(`${currentDraft}\n${prompt.text}`);
-    }
+    const recoveredDraft = currentDraft.trim() === "" ? prompt.text : `${currentDraft}\n${prompt.text}`;
+    recoveringRef.current.add(prompt.id);
+    recoveredDraftsRef.current.set(prompt.id, recoveredDraft);
+    setText(recoveredDraft);
+    client.markPromptRecovered?.(prompt.id);
   };
 
   const handleCopy = async (prompt: UnconfirmedPrompt): Promise<void> => {
@@ -275,11 +261,12 @@ export const Composer = memo(function Composer({
       setCopiedId(prompt.id);
       setTimeout(() => setCopiedId((id) => (id === prompt.id ? null : id)), 1500);
     } catch {
-      // ignore clipboard error
+      setSendError("Clipboard unavailable; select and copy prompt text manually.");
     }
   };
 
   const handleDismiss = (id: number): void => {
+    recoveringRef.current.delete(id);
     if (client.dismissPrompt) client.dismissPrompt(id);
     else setLocalUnconfirmed((prev) => prev.filter((p) => p.id !== id));
   };
@@ -375,7 +362,7 @@ export const Composer = memo(function Composer({
   const activeUnconfirmed = client?.getSnapshot
     ? (client.getSnapshot().unconfirmedPrompts ?? localUnconfirmed)
     : localUnconfirmed;
-  const visibleRecoveries = activeUnconfirmed.filter((p) => p.text !== text);
+  const visibleRecoveries = activeUnconfirmed.filter((p) => p.status !== "recovered" && !text.split("\n").includes(p.text));
 
   return (
     <div className="sh-composer">
@@ -388,31 +375,14 @@ export const Composer = memo(function Composer({
               role="status"
             >
               <span className="sh-recoverable-text" title={sub.text}>
-                {sub.status === "refused" ? "Refused — " : "Unconfirmed — "}
+                {sub.status === "refused" ? "Refused — " : sub.status === "recovered" ? "Recovered — " : "Unconfirmed — "}
                 {sub.text}
+                {sub.roomId && <small> · room {sub.roomId}{sub.sessionId ? ` / session ${sub.sessionId}` : ""}</small>}
               </span>
               <span className="sh-recoverable-actions">
-                <button
-                  type="button"
-                  className="sh-btn"
-                  onClick={() => handleRecover(sub)}
-                >
-                  Recover
-                </button>
-                <button
-                  type="button"
-                  className="sh-btn"
-                  onClick={() => void handleCopy(sub)}
-                >
-                  {copiedId === sub.id ? "Copied" : "Copy"}
-                </button>
-                <button
-                  type="button"
-                  className="sh-btn"
-                  onClick={() => handleDismiss(sub.id)}
-                >
-                  Dismiss
-                </button>
+                {sub.status !== "recovered" && <button type="button" className="sh-btn" onClick={() => handleRecover(sub)}>Recover</button>}
+                <button type="button" className="sh-btn" onClick={() => void handleCopy(sub)}>{copiedId === sub.id ? "Copied" : "Copy"}</button>
+                <button type="button" className="sh-btn" onClick={() => handleDismiss(sub.id)}>Dismiss</button>
               </span>
             </div>
           ))}
@@ -424,7 +394,15 @@ export const Composer = memo(function Composer({
           className="sh-composer-input"
           value={text}
           onChange={(e) => {
-            setText(e.target.value);
+            const nextText = e.target.value;
+            for (const prompt of activeUnconfirmed) {
+              if (prompt.status === "recovered" && recoveredDraftsRef.current.get(prompt.id) !== nextText) {
+                recoveringRef.current.delete(prompt.id);
+                recoveredDraftsRef.current.delete(prompt.id);
+                client.markPromptUnrecovered?.(prompt.id);
+              }
+            }
+            setText(nextText);
             if (sendError !== null) setSendError(null);
           }}
           onKeyDown={onKeyDown}

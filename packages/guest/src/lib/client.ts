@@ -47,11 +47,52 @@ export interface Notice {
 	at: number;
 }
 
+export class PromptRecoveryStore {
+	readonly #listeners = new Set<() => void>();
+	readonly records = new Map<number, UnconfirmedPrompt>();
+	#activeGeneration = 0;
+	#clientSeq = 0;
+	#promptSeq = 0;
+
+	activate(_roomId: string): number {
+		const generation = ++this.#clientSeq;
+		this.#activeGeneration = generation;
+		return generation;
+	}
+
+	isCurrent(_roomId: string, generation: number): boolean {
+		return this.#activeGeneration === generation;
+	}
+	restore(_roomId: string, generation: number): void {
+		this.#activeGeneration = generation;
+	}
+
+	createId(): number {
+		return ++this.#promptSeq;
+	}
+	subscribe(listener: () => void): () => void {
+		this.#listeners.add(listener);
+		return () => this.#listeners.delete(listener);
+	}
+
+	changed(): void {
+		for (const listener of this.#listeners) listener();
+	}
+}
+
+const defaultPromptRecoveryStore = new PromptRecoveryStore();
+
+export type PromptStatus = "queued_local" | "unconfirmed" | "refused" | "recovered";
+
 export interface UnconfirmedPrompt {
 	id: number;
 	text: string;
 	at: number;
-	status: "unconfirmed" | "refused";
+	status: PromptStatus;
+	roomId: string;
+	sessionId: string | null;
+	clientGeneration: number;
+	connectionGeneration: number;
 	error?: string;
 }
 
@@ -179,7 +220,11 @@ export class GuestClient {
 	#uiRequest: CollabUiRequest | null = null;
 	#uiRequestQueue: CollabUiRequest[] = [];
 	#notices: readonly Notice[] = [];
-	#promptSeq = 0;
+	readonly #recoveryStore: PromptRecoveryStore;
+	readonly #unsubscribeRecoveryStore: () => void;
+	readonly #roomId: string;
+	readonly #clientGeneration: number;
+	#connectionGeneration = 0;
 	#unconfirmedPrompts: readonly UnconfirmedPrompt[] = [];
 	#snapshot: GuestSnapshot;
 	/**
@@ -194,15 +239,27 @@ export class GuestClient {
 	#cancelFrameCommit: (() => void) | null = null;
 
 	/** @throws Error when the link does not parse. */
-	constructor(link: string, displayName: string) {
+	constructor(link: string, displayName: string, recoveryStore: PromptRecoveryStore = new PromptRecoveryStore()) {
 		const parsed = parseCollabLink(link);
 		if ("error" in parsed) throw new Error(parsed.error);
 		this.#name = displayName;
 		this.#writeToken = parsed.writeToken ? encodeBase64Url(parsed.writeToken) : undefined;
+		this.#recoveryStore = recoveryStore;
+		this.#roomId = parsed.roomId;
+		this.#clientGeneration = recoveryStore.activate(parsed.roomId);
+		this.#unconfirmedPrompts = [...recoveryStore.records.values()].filter(prompt => prompt.roomId === parsed.roomId);
+		this.#unsubscribeRecoveryStore = recoveryStore.subscribe(() => {
+			this.#unconfirmedPrompts = this.#promptList();
+			this.#commit();
+		});
 		this.#socket = new CollabSocket({ wsUrl: parsed.wsUrl, role: "guest", key: importRoomKey(parsed.key) });
 		this.#socket.onOpen = () => this.#handleOpen();
-		this.#socket.onFrame = frame => this.#applyFrameSafe(frame);
-		this.#socket.onClose = (reason, willReconnect) => this.#handleClose(reason, willReconnect);
+		this.#socket.onFrame = frame => {
+			if (this.#isCurrentClient()) this.#applyFrameSafe(frame);
+		};
+		this.#socket.onClose = (reason, willReconnect) => {
+			if (this.#isCurrentClient()) this.#handleClose(reason, willReconnect);
+		};
 		this.#snapshot = this.#buildSnapshot();
 	}
 
@@ -230,7 +287,6 @@ export class GuestClient {
 		};
 	}
 
-	/** Cached stable reference; replaced per commit (at most once per animation frame for streaming frames). */
 	getSnapshot(): GuestSnapshot {
 		return this.#snapshot;
 	}
@@ -242,62 +298,94 @@ export class GuestClient {
 	 */
 	async sendPrompt(text: string): Promise<boolean> {
 		const prompt = this.recordPrompt(text);
-		const sent = await this.#socket.send({ t: "prompt", text });
-		if (!sent) {
-			this.markPromptRefused(prompt.id, "prompt not sent — press send to retry");
+		if (prompt.id === 0) return false;
+		try {
+			const sent = await this.#socket.send({ t: "prompt", text });
+			if (!sent) this.markPromptRefused(prompt.id, "prompt not sent — press send to retry");
+			else this.#updatePrompt(prompt.id, { status: "unconfirmed" });
+			return sent;
+		} catch (error) {
+			this.markPromptRefused(prompt.id, error instanceof Error ? error.message : String(error));
+			return false;
 		}
-		return sent;
 	}
 
 	recordPrompt(text: string): UnconfirmedPrompt {
-		const prompt: UnconfirmedPrompt = {
-			id: ++this.#promptSeq,
-			text,
-			at: Date.now(),
-			status: "unconfirmed",
-		};
-		const next = [...this.#unconfirmedPrompts, prompt];
-		// ponytail: MAX_UNCONFIRMED_PROMPTS = 256 aligns with socket.MAX_PENDING_SENDS (256); when cap reached, refused entries are evicted first, but unconfirmed entries are never evicted, so the array can exceed the cap; the O(n) clone per insert is a deliberate ceiling at human submission volumes (~1.9 MB / 7.8 ms at 1k records; ~11.4 MB / 209 ms at 10k).
-		if (next.length > MAX_UNCONFIRMED_PROMPTS) {
-			const oldestRefusedIdx = next.findIndex(p => p.status === "refused");
-			if (oldestRefusedIdx !== -1) {
-				next.splice(oldestRefusedIdx, 1);
-			}
+		const existing = this.#promptList();
+		if (this.#recoveryStore.records.size >= MAX_UNCONFIRMED_PROMPTS) {
+			this.#pushNotice("error", `Recovery limit reached (${MAX_UNCONFIRMED_PROMPTS}); dismiss or recover an attempt before sending.`);
+			this.#commit();
+			return { id: 0, text, at: Date.now(), status: "recovered", roomId: this.#roomId, sessionId: this.#header?.id ?? null, clientGeneration: this.#clientGeneration, connectionGeneration: this.#connectionGeneration };
 		}
-		this.#unconfirmedPrompts = next;
+		const prompt: UnconfirmedPrompt = {
+			id: this.#recoveryStore.createId(), text, at: Date.now(), status: "queued_local",
+			roomId: this.#roomId, sessionId: this.#header?.id ?? null,
+			clientGeneration: this.#clientGeneration, connectionGeneration: this.#connectionGeneration,
+		};
+		this.#recoveryStore.records.set(prompt.id, prompt);
+		this.#unconfirmedPrompts = [...existing, prompt];
 		this.#commit();
 		return prompt;
 	}
 
 	markPromptRefused(id: number, error: string): void {
-		let changed = false;
-		this.#unconfirmedPrompts = this.#unconfirmedPrompts.map(p => {
-			if (p.id === id && p.status !== "refused") {
-				changed = true;
-				return { ...p, status: "refused", error };
+		this.#updatePrompt(id, { status: "refused", error });
+	}
+
+	markPromptRecovered(id: number): void {
+		this.#updatePrompt(id, { status: "recovered" });
+	}
+	markPromptUnrecovered(id: number): void {
+		this.#updatePrompt(id, { status: "unconfirmed" });
+	}
+	releaseRecoveredPrompts(ids: readonly number[]): void {
+		for (const id of ids) {
+			const prompt = this.#recoveryStore.records.get(id);
+			if (prompt?.roomId === this.#roomId && prompt.status === "recovered") {
+				this.#recoveryStore.records.set(id, { ...prompt, status: "unconfirmed" });
 			}
-			return p;
-		});
-		if (changed) this.#commit();
+		}
+		this.#recoveryStore.changed();
+		this.#unconfirmedPrompts = this.#promptList();
+		this.#commit();
+	}
+	refreshRecoverySnapshot(): void {
+		this.#unconfirmedPrompts = this.#promptList();
+		this.#commit();
 	}
 
 	dismissPrompt(id: number): void {
-		const next = this.#unconfirmedPrompts.filter(p => p.id !== id);
-		if (next.length !== this.#unconfirmedPrompts.length) {
-			this.#unconfirmedPrompts = next;
-			this.#commit();
-		}
+		if (!this.#isCurrentClient()) return;
+		const prompt = this.#recoveryStore.records.get(id);
+		if (!prompt || prompt.roomId !== this.#roomId) return;
+		this.#recoveryStore.records.delete(id);
+		this.#unconfirmedPrompts = this.#promptList();
+		this.#commit();
 	}
 
 	confirmPrompt(predicate?: (p: UnconfirmedPrompt) => boolean): void {
-		if (this.#unconfirmedPrompts.length === 0) return;
-		const target = predicate
-			? this.#unconfirmedPrompts.find(p => p.status === "unconfirmed" && predicate(p))
-			: this.#unconfirmedPrompts.find(p => p.status === "unconfirmed");
-		if (target) {
-			this.#unconfirmedPrompts = this.#unconfirmedPrompts.filter(p => p.id !== target.id);
-			this.#commit();
-		}
+		const target = this.#promptList().find(prompt => (prompt.status === "unconfirmed" || prompt.status === "queued_local") && (!predicate || predicate(prompt)));
+		if (target) this.dismissPrompt(target.id);
+	}
+
+	#promptList(): readonly UnconfirmedPrompt[] {
+		return [...this.#recoveryStore.records.values()].filter(prompt => prompt.roomId === this.#roomId);
+	}
+
+	#isCurrentClient(): boolean {
+		return this.#recoveryStore.isCurrent(this.#roomId, this.#clientGeneration);
+	}
+	restoreRecoveryOwnership(): void {
+		this.#recoveryStore.restore(this.#roomId, this.#clientGeneration);
+	}
+
+	#updatePrompt(id: number, patch: Partial<UnconfirmedPrompt>): void {
+		if (!this.#isCurrentClient()) return;
+		const prompt = this.#recoveryStore.records.get(id);
+		if (!prompt || prompt.roomId !== this.#roomId) return;
+		this.#recoveryStore.records.set(id, { ...prompt, ...patch });
+		this.#unconfirmedPrompts = this.#promptList();
+		this.#commit();
 	}
 
 	async sendUiResponse(reqId: number, value?: CollabUiResponseValue): Promise<boolean> {
@@ -370,6 +458,7 @@ export class GuestClient {
 	}
 
 	#handleOpen(): void {
+		this.#connectionGeneration++;
 		this.#welcomed = false;
 		this.#armWelcomeTimer();
 		this.#socket.send({ t: "hello", proto: COLLAB_PROTO, name: this.#name, writeToken: this.#writeToken });
@@ -488,15 +577,6 @@ export class GuestClient {
 				// the transcript per chunk, and a 50 MB session is ~100 chunks.
 				const pending = this.#pendingSnapshot;
 				if (pending === null) return;
-				for (const entry of frame.entries) {
-					if (entry.type === "message" && entry.message.role === "user" && typeof entry.message.content === "string") {
-						const text = entry.message.content.trim();
-						this.confirmPrompt(p => p.text.trim() === text);
-					} else if (entry.type === "custom_message" && entry.customType === "collab-prompt" && typeof entry.content === "string") {
-						const text = entry.content.trim();
-						this.confirmPrompt(p => p.text.trim() === text);
-					}
-				}
 				pending.entries.push(...frame.entries);
 				// Complete on `final` or once every promised entry arrived, so a
 				// lost final chunk doesn't strand a fully received transcript.
@@ -589,35 +669,16 @@ export class GuestClient {
 				break;
 			}
 			case "bye":
-				if (isPromptRejection(frame.reason)) {
-					for (const p of this.#unconfirmedPrompts) {
-						if (p.status === "unconfirmed") {
-							this.markPromptRefused(p.id, frame.reason);
-						}
-					}
-				}
+				this.#attributeRefusal(frame.reason);
 				this.#end(frame.reason);
 				return; // #end already committed
 			case "error":
 				if (!this.#welcomed) {
-					// Pre-welcome errors are the host's targeted reply to our
-					// hello (e.g. protocol mismatch): no welcome will follow.
-					// End with the host's reason instead of waiting out the
-					// welcome timeout.
-					if (isPromptRejection(frame.message)) {
-						for (const p of this.#unconfirmedPrompts) {
-							if (p.status === "unconfirmed") {
-								this.markPromptRefused(p.id, frame.message);
-							}
-						}
-					}
+					this.#attributeRefusal(frame.message);
 					this.#end(frame.message);
 					return; // #end already committed
 				}
-				if (isPromptRejection(frame.message)) {
-					const pending = [...this.#unconfirmedPrompts].reverse().find(p => p.status === "unconfirmed");
-					if (pending) this.markPromptRefused(pending.id, frame.message);
-				}
+				this.#attributeRefusal(frame.message);
 				this.#pushNotice("error", frame.message);
 				break;
 			default:
@@ -634,6 +695,12 @@ export class GuestClient {
 	 * missing from the previous one; the one-frame grace covers progress that
 	 * outran its agent's registration.
 	 */
+	#attributeRefusal(message: string): void {
+		if (!isPromptRejection(message) || !this.#isCurrentClient()) return;
+		const candidates = this.#promptList().filter(prompt => (prompt.status === "unconfirmed" || prompt.status === "queued_local") && prompt.clientGeneration === this.#clientGeneration && prompt.connectionGeneration === this.#connectionGeneration);
+		if (candidates.length === 1) this.markPromptRefused(candidates[0].id, message);
+	}
+
 	#pruneBusMaps(): void {
 		if (this.#progress.size === 0 && this.#lifecycle.size === 0) {
 			this.#unlistedBusIds.clear();
@@ -723,10 +790,6 @@ export class GuestClient {
 				this.#working = false;
 				break;
 			case "notice":
-				if (event.level === "error" && isPromptRejection(event.message)) {
-					const pending = [...this.#unconfirmedPrompts].reverse().find(p => p.status === "unconfirmed");
-					if (pending) this.markPromptRefused(pending.id, event.message);
-				}
 				this.#pushNotice(event.level, event.message);
 				break;
 			case "auto_retry_start":
@@ -795,7 +858,7 @@ export class GuestClient {
 			readOnly: this.#readOnly,
 			uiRequest: this.#uiRequest,
 			notices: this.#notices,
-			unconfirmedPrompts: this.#unconfirmedPrompts,
+			unconfirmedPrompts: [...this.#recoveryStore.records.values()],
 			loading: this.#pendingSnapshot && {
 				received: this.#pendingSnapshot.entries.length,
 				total: this.#pendingSnapshot.total,

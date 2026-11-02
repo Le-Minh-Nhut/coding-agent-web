@@ -119,6 +119,22 @@ it.each([
  expect(f.input().value).toBe("NEW_UNSENT_AFTER_BYE");
  expect(f.recovery()).toContain("BYE_PROMPT_NOT_SUBMITTED");
 });
+it("V20 uncorrelated errors leave multiple pending prompts recoverable",async()=>{
+ const f=await fixture(0,true);
+ await f.send("PROMPT_A");await f.send("PROMPT_B");
+ f.type("NEW_DRAFT");
+ await f.emit(refusal);
+ expect(f.view.container.textContent).toContain(refusal.message);
+ expect(f.recovery()).toBe("");
+ expect(f.input().value).toBe("NEW_DRAFT");
+ fireEvent.click(screen.getByTitle("Back"));
+ fireEvent.click(await screen.findByText("Chat"));
+ await waitFor(()=>expect(f.sockets).toHaveLength(2));
+ await f.emit(welcome(0));
+ expect(f.recovery()).toContain("PROMPT_A");
+ expect(f.recovery()).toContain("PROMPT_B");
+});
+
 it("V20 host bye frame with multiple pending prompts avoids fabricated attribution",async()=>{
  const f=await fixture();
  await f.send("PROMPT_ONE");
@@ -136,10 +152,7 @@ it("V20 an unrelated host error does not falsely refuse the pending prompt",asyn
  expect(f.recovery()).toBe("");expect(f.input().value).toBe("NEW_UNSENT_B");
 });
 
-// The real wire echo for a web prompt is custom_message/collab-prompt, not
-// message/role=user. These two cases pin the echo-shape classification: without it
-// every genuine collab echo stays invisible to the ack paths, so the strip item never
-// clears and the dump discriminator goes inert.
+// A genuine live collab-prompt echo clears recovery. Snapshot dump rows remain history.
 it("V20 a real collab-prompt entry echo clears an unconfirmed strip item",async()=>{
  const f=await fixture(0,true);
  await f.send("UNCONFIRMED_PROMPT_A");
@@ -155,21 +168,29 @@ it("V20 a real collab-prompt entry echo clears an unconfirmed strip item",async(
  expect(promoted).toContain("UNCONFIRMED_PROMPT_A");
  expect(afterEcho).toBe("");
 });
+it.each(["message","collab-prompt"] as const)("V20 a same-text dump row never acknowledges a pre-snapshot send (%s)",async(kind)=>{
+ const f=await fixture(2,true);
+ await f.send("DUMP_UNCERTAIN");
+ const entry=kind==="message"?row("dumped","DUMP_UNCERTAIN",32503680000000):{...collabRow("dumped","DUMP_UNCERTAIN"),timestamp:"2999-12-31T23:59:59.999Z"};
+ await f.emit({t:"snapshot-chunk",entries:[entry],final:true});
+ expect(f.recovery()).toBe("");
+ fireEvent.click(screen.getByTitle("Back"));
+ fireEvent.click(await screen.findByText("Chat"));
+ await waitFor(()=>expect(f.sockets).toHaveLength(2));
+ await f.emit(welcome(0));
+ expect(f.recovery()).toContain("DUMP_UNCERTAIN");
+});
 
-it("V20 a collab-prompt row inside the bootstrap dump is its own echo, not baseline",async()=>{
- const f=await fixture(2);
+it("V20 a collab-prompt row inside the bootstrap dump stays uncertain",async()=>{
+ const f=await fixture(2,true);
  await f.send("A_COLLAB_DUMPED");
- // Journaled by the host before it cut the dump, so no live frame exists: the row is
- // the prompt's own receipt and must acknowledge it exactly once.
  await f.emit({t:"snapshot-chunk",entries:[row("old","OLD_HISTORY"),collabRow("echo-dumped","A_COLLAB_DUMPED")],final:true});
- const aRows=f.view.getAllByText("A_COLLAB_DUMPED").length;
- await f.send("B_COLLAB_REFUSED");f.type("my newer draft");
- await f.emit(refusal);
- const recovered=f.recovery();
- console.log("AUDIT20 collab dump discriminator",JSON.stringify({aRows,recovered,draft:f.input().value}));
- expect(aRows).toBe(1);
- expect(recovered).toContain("B_COLLAB_REFUSED");
- expect(recovered).not.toContain("A_COLLAB_DUMPED");
+ expect(f.recovery()).toBe("");
+ fireEvent.click(screen.getByTitle("Back"));
+ fireEvent.click(await screen.findByText("Chat"));
+ await waitFor(()=>expect(f.sockets).toHaveLength(2));
+ await f.emit(welcome(0));
+ expect(f.recovery()).toContain("A_COLLAB_DUMPED");
 });
 
 it("V20 saved mode keeps Copy but hides Recover, so draft staging cannot stomp the App-owned draft",async()=>{

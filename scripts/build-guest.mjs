@@ -3,7 +3,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import * as esbuild from "esbuild";
-import { cleanupFailedBuild, swapStageToDist, sweepStaleBackups } from "./build-guest-utils.mjs";
+import { cleanupFailedBuild, finishPublishedBuild, swapStageToDist } from "./build-guest-utils.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, "..");
@@ -115,7 +115,7 @@ async function build() {
   await fs.writeFile(path.join(stageDir, "index.html"), html, "utf-8");
 
   await swapStageToDist(stageDir, distDir, oldDir);
-  await sweepStaleBackups(distDir);
+  await finishPublishedBuild(oldDir, distDir);
 
   const duration = Date.now() - startTime;
   console.log(

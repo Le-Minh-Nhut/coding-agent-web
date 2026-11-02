@@ -46,25 +46,37 @@ export async function cleanupFailedBuild(stageDir, distDir, oldDir) {
   }
 }
 
-export async function swapStageToDist(stageDir, distDir, oldDir) {
+export async function swapStageToDist(stageDir, distDir, oldDir, rename = fs.rename) {
   let oldDirExists = false;
   try {
-    await fs.rename(distDir, oldDir);
+    await rename(distDir, oldDir);
     oldDirExists = true;
   } catch (err) {
     if (err?.code !== "ENOENT") throw err;
   }
   try {
-    await fs.rename(stageDir, distDir);
+    await rename(stageDir, distDir);
   } catch (err) {
     if (oldDirExists) {
       try {
-        await fs.rename(oldDir, distDir);
+        await rename(oldDir, distDir);
       } catch (rollbackErr) {
         console.error(`[build-guest] rollback failed to restore ${distDir}:`, rollbackErr);
       }
     }
     throw err;
   }
-  if (oldDirExists) await fs.rm(oldDir, { recursive: true, force: true });
+}
+
+export async function finishPublishedBuild(oldDir, distDir) {
+  try {
+    await fs.rm(oldDir, { recursive: true, force: true });
+  } catch (err) {
+    console.error(`[build-guest] warning: could not remove backup ${oldDir}:`, err);
+  }
+  try {
+    await sweepStaleBackups(distDir);
+  } catch (err) {
+    console.error(`[build-guest] warning: could not sweep stale backups for ${distDir}:`, err);
+  }
 }

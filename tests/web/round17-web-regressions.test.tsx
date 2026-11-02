@@ -89,18 +89,16 @@ describe("V17-02 refused prompt recovery", () => {
     await act(async () => { socket!.onFrame?.({ t: "error", message: REFUSAL }, 0); });
   };
 
-  it("keeps the newer draft and recovers the refused text only on an explicit click", async () => {
+  it("keeps the newer draft and merges refused text only on an explicit click", async () => {
     const { view, onDraftChange, composer } = await mountConversation();
     await refuseTypingDraft(composer);
-    // The user's newer draft is untouched, the refused prompt is reachable behind
-    // its own affordance, and it never masquerades as a host-confirmed message row.
     expect(composer().value).toBe("DRAFT_C");
     expect(view.container.querySelectorAll(".message-card.user")).toHaveLength(0);
     expect(view.container.querySelector(".refused-prompt")?.textContent).toContain("PROMPT_B");
     fireEvent.click(screen.getByRole("button", { name: "Recover" }));
-    expect(composer().value).toBe("PROMPT_B");
-    expect(onDraftChange).toHaveBeenLastCalledWith("PROMPT_B");
-    expect(view.container.querySelector(".refused-prompt")).toBeNull();
+    expect(composer().value).toBe("DRAFT_C\n\nPROMPT_B");
+    expect(onDraftChange).toHaveBeenLastCalledWith("DRAFT_C\n\nPROMPT_B");
+    expect(view.container.querySelector(".refused-prompt")?.textContent).toContain("PROMPT_B");
   });
 
   it("recovers the refused prompt after the user clears the newer draft", async () => {

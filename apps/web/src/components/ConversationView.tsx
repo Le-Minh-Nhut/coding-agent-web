@@ -63,8 +63,6 @@ interface PendingPrompt {
    * completing snapshot must not acknowledge it.
    */
   preSnapshot: boolean;
-  /** Wall clock at send; a dump row for this text newer than this is its own echo. */
-  sentAtMs: number;
   token: object;
 }
 
@@ -431,29 +429,11 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     pendingPromptRef.current = pendingPromptRef.current.filter((prompt) => (hostCounts.get(prompt.submitted) ?? 0) <= prompt.hostEchoCount);
   };
   /**
-   * A snapshot that completes the bootstrap is historical baseline, not a receipt
-   * for a prompt sent while it was in flight. Raise those prompts' echo allowance
-   * to the count the snapshot published so its rows cannot acknowledge them; their
-   * real echo can only arrive in later frames, which then exceed the allowance.
-   *
-   * Two exceptions, both cases where the dump DOES carry this prompt's own echo:
-   * - the echo arrived as a *live* frame during the snapshot, so the replay already
-   *   published it. Skipped; the ack pass right after reads the post-reduce rows
-   *   and settles it by count.
-   * - the host journaled the prompt before cutting the dump and delivered it only
-   *   inside the dump, so no live frame exists. A same-text user row whose timestamp
-   *   is at or after this prompt's send time is that echo, not baseline. `message`
-   *   rows carry ms directly; `custom_message`/`collab-prompt` rows (the real wire
-   *   shape for a web prompt) carry an ISO outer timestamp parsed to ms, and an
-   *   unparseable one is never treated as an echo. Skipped too, so the same ack pass
-   *   acknowledges it and the later refusal lands on the next prompt instead of being
-   *   misattributed to a prompt that was accepted.
-   *   Older same-text rows still bump the allowance: V19-01 protection.
-   *
-   * ponytail: the discriminator is wall-clock, so a host clock AHEAD of the browser
-   * can classify a historical same-text row as an echo (false ack) and a host clock
-   * BEHIND leaves today's stuck-prompt behaviour. Chosen because a stuck prompt plus
-   * a stranded refusal is the worse failure, and hosts are NTP-synced.
+   * Bootstrap rows are historical baseline, never receipts for prompts sent while
+   * the dump was in flight. Raise their echo allowance above the dump count; only
+   * a genuine live echo can settle them. A prompt journaled before the dump cut and
+   * present only in the dump stays uncertain until the user dismisses it. That is
+   * the safe failure: false acknowledgment could silently lose an unsent prompt.
    */
   const rebasePendingAfterBootstrap = (liveFrames: readonly HostFrame[]): void => {
     const genuinelyEchoed = new Set<string>();
@@ -465,30 +445,11 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     for (const message of transcriptRef.current.messages) {
       if (message.role === "user") hostCounts.set(message.text, (hostCounts.get(message.text) ?? 0) + 1);
     }
-    const dumpedEchoes = new Map<string, number>();
-    for (const entry of transcriptRef.current.entries) {
-      if (entry.type === "message" && entry.message.role === "user") {
-        const text = textFromContent(entry.message.content);
-        dumpedEchoes.set(text, Math.max(dumpedEchoes.get(text) ?? 0, entry.message.timestamp));
-        continue;
-      }
-      // A web prompt the host journaled before cutting the dump appears as
-      // custom_message/collab-prompt. CustomMessageEntry only carries an ISO outer
-      // timestamp, so convert it; an unparseable one is treated as unknown (never an
-      // echo) rather than guessed — that keeps the V19-01 baseline protection.
-      if (entry.type === "custom_message" && entry.customType === "collab-prompt") {
-        const ms = Date.parse(entry.timestamp);
-        if (Number.isNaN(ms)) continue;
-        const text = textFromContent(entry.content);
-        dumpedEchoes.set(text, Math.max(dumpedEchoes.get(text) ?? 0, ms));
-      }
-    }
     const bumped = new Map<string, number>();
     const ordinalByText = new Map<string, number>();
     for (const prompt of pendingPromptRef.current) {
       if (!prompt.preSnapshot) continue;
       if (genuinelyEchoed.has(prompt.submitted)) continue;
-      if ((dumpedEchoes.get(prompt.submitted) ?? 0) >= prompt.sentAtMs) continue;
       // V20-01: two same-text sends must not share one baseline. The dump raises the
       // baseline for every pending of that text, so a single echo would settle both.
       // Each pending keeps its own ordinal ABOVE the baseline — the same count of
@@ -547,8 +508,9 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     if (frame.t === "entry" || frame.t === "snapshot-chunk" || (frame.t === "event" && frame.event.type === "message_end" && frame.event.message.role === "user")) removeAcknowledgedPrompts();
     if (frame.t === "error") {
       if (NON_SUBMISSION_REFUSALS.has(frame.message)) {
-        const prompt = pendingPromptRef.current.find((pending) => pending.physicalConnection === physicalConnectionRef.current && !pending.refusalMessage);
-        if (prompt) {
+        const pendingOnConn = pendingPromptRef.current.filter((pending) => pending.physicalConnection === physicalConnectionRef.current && !pending.refusalMessage);
+        if (pendingOnConn.length === 1) {
+          const prompt = pendingOnConn[0]!;
           prompt.refusalMessage = frame.message;
           if (prompt.sent) recoverRefusedPrompt(prompt);
         }
@@ -983,7 +945,6 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     const connectionGeneration = connectionGenerationRef.current;
     const physicalConnection = physicalConnectionRef.current;
     const sendToken = { id: sendId, text: trimmed };
-    const sentAtMs = Date.now();
     const hostEchoCount = transcript.messages.filter((message) => message.role === "user" && message.text === trimmed).length;
     const echoAllowance = hostEchoCount + optimisticMessages.filter((message) => message.text === trimmed && hostEchoCount <= (message.hostEchoCount ?? 0)).length;
     const submitted = allowSlashCommand ? text : trimmed;
@@ -997,7 +958,6 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
       draftVersion,
       physicalConnection,
       preSnapshot: transcriptRef.current.pendingSnapshot !== null,
-      sentAtMs,
       token: sendToken,
     };
     pendingPromptRef.current.push(pendingPrompt);
@@ -1053,12 +1013,16 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
   const sendSlashAsText = (): void => sendPrompt(inputValueRef.current, true);
 
   /**
-   * An explicit Recover click puts the refused prompt back in the composer, even if
-   * the user has typed newer content: they asked for it, and the refused text was
-   * otherwise unreachable. The draft they had is left in place until this replaces
-   * it — the strip is the only path back to the refused prompt, so it stays until use.
+   * Explicit recovery never overwrites a newer draft. Merge refused text into that
+   * draft and keep its strip entry until a later send/explicit dismissal.
    */
   const recoverRefusedPromptText = (item: RefusedRecovery): void => {
+    const currentDraft = inputValueRef.current;
+    if (currentDraft.trim() && currentDraft !== item.text) {
+      updateDraft(`${currentDraft}\n\n${item.text}`);
+      composerRef.current?.focus();
+      return;
+    }
     updateDraft(item.text);
     removeRefusedRecovery(item.id);
     composerRef.current?.focus();
@@ -1067,12 +1031,13 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
   // Same clipboard contract as the code-block copy control: report failure rather
   // than silently doing nothing when the browser exposes no clipboard.
   const copyRefusedPromptText = async (item: RefusedRecovery): Promise<void> => {
+    const copyConversationId = conversationIdRef.current;
     try {
       if (!navigator.clipboard?.writeText) throw new Error("Clipboard unavailable");
       await navigator.clipboard.writeText(item.text);
-      setRefusedCopyState({ id: item.id, state: "copied" });
+      if (conversationIdRef.current === copyConversationId) setRefusedCopyState({ id: item.id, state: "copied" });
     } catch {
-      setRefusedCopyState({ id: item.id, state: "failed" });
+      if (conversationIdRef.current === copyConversationId) setRefusedCopyState({ id: item.id, state: "failed" });
     }
   };
 

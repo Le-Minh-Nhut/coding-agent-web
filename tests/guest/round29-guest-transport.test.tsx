@@ -19,6 +19,7 @@ afterEach(async () => {
   cleanup();
   for (const socket of sockets) socket.close();
   sockets.length = 0;
+  vi.restoreAllMocks();
   await Promise.all(
     servers.splice(0).map(async (server) => {
       for (const client of server.clients) client.terminate();
@@ -495,9 +496,8 @@ describe("H03 — Early prompt rejected by host after transport success", () => 
       entryCount: 0,
     });
 
-    // Stub sendPrompt to simulate transport success (frame reached wire)
-    vi.spyOn(client, "sendPrompt").mockResolvedValue(true);
-
+    // Use real sendPrompt so the host error remains attached to a retained attempt.
+    vi.spyOn(CollabSocket.prototype, "send").mockResolvedValue(true);
     const view = render(
       <Composer
         client={client}
@@ -520,11 +520,13 @@ describe("H03 — Early prompt rejected by host after transport success", () => 
     const errorMsg = "prompting is unavailable until the host finishes starting up";
     client.applyFrameForTest({ t: "error", message: errorMsg });
 
-    // The draft must be restored and the accurate error must be shown in Composer!
+    // Host refusal is not permission to inject text into the editable draft.
     await waitFor(() => {
-      expect(textarea.value).toBe("important command to run");
+      expect(textarea.value).toBe("");
       expect(view.getByText(errorMsg)).toBeTruthy();
+      expect(view.getByRole("button", { name: "Recover" })).toBeTruthy();
     });
+    client.close();
   });
   it("does not restore draft on an unrelated error notice", async () => {
     const link = "wss://example.com/r/AAAAAAAAAAAAAAAA." + "B".repeat(43);

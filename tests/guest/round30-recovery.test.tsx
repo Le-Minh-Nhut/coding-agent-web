@@ -1,15 +1,23 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, fireEvent, render, waitFor } from "@testing-library/react";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { act, cleanup, fireEvent, render, waitFor, screen, within } from "@testing-library/react";
+import type { ReactNode } from "react";
 import type { SessionHeader } from "@oh-my-pi/pi-wire";
+import { Banners } from "../../packages/guest/src/components/shell/Banners";
 import { Composer } from "../../packages/guest/src/components/shell/Composer";
-import { GuestClient } from "../../packages/guest/src/lib/client";
 import { CollabSocket } from "../../packages/guest/src/lib/socket";
-
+import { GuestClient, PromptRecoveryStore } from "../../packages/guest/src/lib/client";
+let App: () => ReactNode;
 afterEach(() => {
   cleanup();
   vi.useRealTimers();
   vi.restoreAllMocks();
+});
+
+beforeAll(async () => {
+  // App imports ThemeToggle, which reads matchMedia during module evaluation.
+  vi.stubGlobal("matchMedia", vi.fn(() => ({ matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn() })));
+  ({ App } = await import("../../packages/guest/src/app"));
 });
 
 const link = "wss://example.com/r/AAAAAAAAAAAAAAAA." + "B".repeat(43);
@@ -55,8 +63,8 @@ describe("R30-03: prompt recovery notice accumulation and cursor monotonicity", 
     client.applyFrameForTest({ t: "error", message: errorMsg });
 
     await waitFor(() => {
-      expect(textarea.value).toBe("prompt zero");
-      expect(view.getByText(errorMsg)).toBeTruthy();
+      expect(textarea.value).toBe("");
+      expect(view.container.textContent).toContain("prompt zero");
     });
   });
 
@@ -81,8 +89,8 @@ describe("R30-03: prompt recovery notice accumulation and cursor monotonicity", 
     client.applyFrameForTest({ t: "error", message: errorMsg });
 
     await waitFor(() => {
-      expect(textarea.value).toBe("prompt 49");
-      expect(view.getByText(errorMsg)).toBeTruthy();
+      expect(textarea.value).toBe("");
+      expect(view.container.textContent).toContain("prompt 49");
     });
   });
 
@@ -107,8 +115,8 @@ describe("R30-03: prompt recovery notice accumulation and cursor monotonicity", 
     client.applyFrameForTest({ t: "error", message: errorMsg });
 
     await waitFor(() => {
-      expect(textarea.value).toBe("prompt 50");
-      expect(view.getByText(errorMsg)).toBeTruthy();
+      expect(textarea.value).toBe("");
+      expect(view.container.textContent).toContain("prompt 50");
     });
   });
 
@@ -132,8 +140,8 @@ describe("R30-03: prompt recovery notice accumulation and cursor monotonicity", 
     client.applyFrameForTest({ t: "error", message: errorMsg });
 
     await waitFor(() => {
-      expect(textarea.value).toBe("prompt 100");
-      expect(view.getByText(errorMsg)).toBeTruthy();
+      expect(textarea.value).toBe("");
+      expect(view.container.textContent).toContain("prompt 100");
     });
   });
 
@@ -152,8 +160,8 @@ describe("R30-03: prompt recovery notice accumulation and cursor monotonicity", 
     client.applyFrameForTest({ t: "error", message: errorMsg });
 
     await waitFor(() => {
-      expect(textarea.value).toBe("multi notice prompt");
-      expect(view.getByText(errorMsg)).toBeTruthy();
+      expect(textarea.value).toBe("");
+      expect(view.container.textContent).toContain("multi notice prompt");
     });
   });
 
@@ -171,8 +179,8 @@ describe("R30-03: prompt recovery notice accumulation and cursor monotonicity", 
     client.applyFrameForTest({ t: "event", event: { type: "notice", level: "info", message: "subsequent info" } });
 
     await waitFor(() => {
-      expect(textarea.value).toBe("prompt error then info");
-      expect(view.getByText(errorMsg)).toBeTruthy();
+      expect(textarea.value).toBe("");
+      expect(view.container.textContent).toContain("prompt error then info");
     });
   });
 
@@ -190,8 +198,8 @@ describe("R30-03: prompt recovery notice accumulation and cursor monotonicity", 
     client.applyFrameForTest({ t: "error", message: errorMsg });
 
     await waitFor(() => {
-      expect(textarea.value).toBe("prompt info then error");
-      expect(view.getByText(errorMsg)).toBeTruthy();
+      expect(textarea.value).toBe("");
+      expect(view.container.textContent).toContain("prompt info then error");
     });
   });
 
@@ -225,8 +233,8 @@ describe("R30-03: prompt recovery notice accumulation and cursor monotonicity", 
     client.applyFrameForTest({ t: "error", message: errorMsg });
 
     await waitFor(() => {
-      expect(textarea.value).toBe("prompt after reconnect");
-      expect(view.getByText(errorMsg)).toBeTruthy();
+      expect(textarea.value).toBe("");
+      expect(view.container.textContent).toContain("prompt after reconnect");
     });
   });
 
@@ -377,8 +385,8 @@ describe("R30-04: prompt recovery when user types meanwhile and adversarial scen
     await waitFor(() => expect(textarea.value).toBe(""));
     client.applyFrameForTest({ t: "error", message: refusal });
 
-    // The newest refusal (B) must be restored, not the older A.
-    await waitFor(() => expect(textarea.value).toBe("prompt B"));
+    expect(textarea.value).toBe("");
+    expect(view.container.textContent).toContain("prompt B");
 
     // Nothing is lost: A is still retrievable in the store and the strip.
     const store = client.getSnapshot().unconfirmedPrompts;
@@ -605,18 +613,18 @@ describe("R30-04: prompt recovery when user types meanwhile and adversarial scen
     ).toBe(true);
   });
 
-  it("caps unconfirmed prompts at MAX_UNCONFIRMED_PROMPTS (256) via FIFO eviction of refused entries", async () => {
+  it("refuses the send before dispatch at capacity without evicting any recovery record", async () => {
     const client = setupClient();
-    // Record 260 prompts, where first 10 were refused
-    for (let i = 1; i <= 260; i++) {
-      const p = client.recordPrompt(`prompt submission ${i}`);
-      if (i <= 10) client.markPromptRefused(p.id, "refused");
+    const send = vi.spyOn(CollabSocket.prototype, "send");
+    for (let i = 1; i <= 256; i++) {
+      const prompt = client.recordPrompt(`prompt submission ${i}`);
+      client.markPromptRefused(prompt.id, "refused");
     }
-    const unconfirmed = client.getSnapshot().unconfirmedPrompts;
-    expect(unconfirmed.length).toBe(256);
-    // Oldest 4 refused evicted
-    expect(unconfirmed.some((p) => p.text === "prompt submission 1")).toBe(false);
-    expect(unconfirmed.some((p) => p.text === "prompt submission 260")).toBe(true);
+    const before = client.getSnapshot().unconfirmedPrompts.map((p) => p.id);
+    expect(client.recordPrompt("prompt submission 257").id).toBe(0);
+    expect(client.getSnapshot().unconfirmedPrompts.map((p) => p.id)).toEqual(before);
+    expect(send).not.toHaveBeenCalled();
+    expect(client.getSnapshot().notices.at(-1)?.message).toContain("Recovery limit reached (256)");
   });
 
   it("Defect 1 fail-before: consecutive identical prompts create independent records and are confirmed individually", async () => {
@@ -692,20 +700,266 @@ describe("R30-04: prompt recovery when user types meanwhile and adversarial scen
     expect(client.getSnapshot().unconfirmedPrompts.some((p) => p.text === "recoverable prompt")).toBe(true);
   });
 
-  it("marks prompt refused when host stops with session switched bye frame", async () => {
+  it("historical snapshot with same text cannot confirm an unresolved send", () => {
+    const client = setupClient();
+    client.recordPrompt("continue");
+    client.applyFrameForTest({
+      t: "welcome",
+      proto: 3,
+      header: { id: "sess-2" } as unknown as SessionHeader,
+      state: { isStreaming: false, queuedMessageCount: 0, cwd: "", participants: [] },
+      agents: [],
+      entryCount: 1,
+    });
+    client.applyFrameForTest({
+      t: "snapshot-chunk",
+      entries: [{
+        type: "message", id: "old", parentId: null, timestamp: new Date().toISOString(),
+        message: { role: "user", content: "continue", timestamp: Date.now() },
+      }],
+      final: true,
+    });
+    expect(client.getSnapshot().unconfirmedPrompts.map((p) => p.text)).toEqual(["continue"]);
+  });
+
+  it("does not guess which prompt an uncorrelated refusal belongs to", () => {
+    const client = setupClient();
+    client.recordPrompt("A");
+    client.recordPrompt("B");
+    client.applyFrameForTest({ t: "error", message: "Prompt was not submitted. Please resend it when the host is ready." });
+    expect(client.getSnapshot().unconfirmedPrompts.map((p) => p.status)).toEqual(["queued_local", "queued_local"]);
+  });
+
+  it("keeps recovery activation idempotent when draft already contains restored text", async () => {
     const client = setupClient();
     const view = renderComposer(client);
-
     const textarea = view.getByPlaceholderText(/prompt the host agent/i) as HTMLTextAreaElement;
-    fireEvent.change(textarea, { target: { value: "prompt before session switch" } });
+    fireEvent.change(textarea, { target: { value: "recover me" } });
     fireEvent.keyDown(textarea, { key: "Enter" });
     await waitFor(() => expect(textarea.value).toBe(""));
+    client.applyFrameForTest({ t: "error", message: "Prompt was not submitted. Please resend it when the host is ready." });
+    fireEvent.change(textarea, { target: { value: "draft" } });
+    const recover = view.getAllByRole("button", { name: "Recover" })[0];
+    fireEvent.click(recover);
+    fireEvent.click(recover);
+    expect(textarea.value).toBe("draft\nrecover me");
+  });
 
+  it("leaves multiple same-connection prompts unconfirmed on session-switch bye", () => {
+    const client = setupClient();
+    client.recordPrompt("prompt A");
+    client.recordPrompt("prompt B");
     const byeReason = "session switched; prompts not shown in the conversation were not submitted. Rejoin and resend them";
     client.applyFrameForTest({ t: "bye", reason: byeReason });
+    expect(client.getSnapshot().unconfirmedPrompts.map((p) => p.status)).toEqual(["queued_local", "queued_local"]);
+    expect(client.getSnapshot().endedReason).toBe(byeReason);
+  });
+});
 
-    const p = client.getSnapshot().unconfirmedPrompts.find((item) => item.text === "prompt before session switch");
-    expect(p?.status).toBe("refused");
-    expect(p?.error).toBe(byeReason);
+describe("prompt recovery ended interactions and client replacement", () => {
+  it("keeps Recover, Copy, Dismiss reachable inside ended dialog by pointer and keyboard", async () => {
+    const client = setupClient();
+    const recovered = client.recordPrompt("recover ended prompt");
+    const dismissed = client.recordPrompt("dismiss ended prompt");
+    client.applyFrameForTest({ t: "bye", reason: "ended" });
+    render(<Banners phase="ended" endedReason="ended" loading={null} client={client} readOnly={false} onRejoin={vi.fn()} onNewLink={vi.fn()} />);
+    const dialog = screen.getByRole("alertdialog", { name: "session ended" });
+    expect(dialog).toBeTruthy();
+    const recover = screen.getAllByRole("button", { name: "Recover" })[0];
+    recover.focus();
+    expect(document.activeElement).toBe(recover);
+    fireEvent.keyDown(recover, { key: "Enter" });
+    fireEvent.click(recover);
+    expect(client.getSnapshot().unconfirmedPrompts.find(p => p.id === recovered.id)?.status).toBe("recovered");
+    const copy = screen.getAllByRole("button", { name: "Copy" })[0];
+    fireEvent.click(copy);
+    expect(screen.getAllByRole("button", { name: "Dismiss" })).toHaveLength(1);
+    fireEvent.click(screen.getAllByRole("button", { name: "Dismiss" })[0]);
+    expect(client.getSnapshot().unconfirmedPrompts.some(p => p.id === dismissed.id)).toBe(false);
+  });
+
+  it("keeps original room/session records and fences old-client late echo", () => {
+    const store = new PromptRecoveryStore();
+    const callbacks: Array<(frame: never) => void> = [];
+    vi.spyOn(CollabSocket.prototype, "connect").mockImplementation(function (this: CollabSocket) {
+      callbacks.push(this.onFrame as (frame: never) => void);
+    });
+    const first = new GuestClient(link, "tester", store);
+    first.connect();
+    callbacks[0]({ t: "welcome", proto: 3, header: { id: "old-session" }, state: { isStreaming: false, queuedMessageCount: 0, cwd: "", participants: [] }, agents: [], entryCount: 0 } as never);
+    const attempt = first.recordPrompt("old-room prompt");
+    const otherLink = "wss://example.com/r/CCCCCCCCCCCCCCCC." + "D".repeat(43);
+    const replacement = new GuestClient(otherLink, "tester", store);
+    replacement.connect();
+    callbacks[1]({ t: "welcome", proto: 3, header: { id: "new-session" }, state: { isStreaming: false, queuedMessageCount: 0, cwd: "", participants: [] }, agents: [], entryCount: 0 } as never);
+    const newer = replacement.recordPrompt("new-room prompt");
+    callbacks[0]({ t: "entry", entry: { type: "message", id: "late", parentId: null, timestamp: new Date().toISOString(), message: { role: "user", content: "new-room prompt", timestamp: Date.now() } } } as never);
+    expect(replacement.getSnapshot().unconfirmedPrompts.find(p => p.id === attempt.id)).toMatchObject({ roomId: "AAAAAAAAAAAAAAAA", sessionId: "old-session", status: "queued_local" });
+    expect(replacement.getSnapshot().unconfirmedPrompts.find(p => p.id === newer.id)).toMatchObject({ roomId: "CCCCCCCCCCCCCCCC", sessionId: "new-session", status: "queued_local" });
+    expect(store.records.get(newer.id)).toMatchObject({ status: "queued_local", roomId: "CCCCCCCCCCCCCCCC" });
+  });
+
+  it("live echo in one room cannot delete another room's same-text recovery record", () => {
+    const store = new PromptRecoveryStore();
+    const roomA = new GuestClient(link, "tester", store);
+    const roomBLink = "wss://example.com/r/CCCCCCCCCCCCCCCC." + "D".repeat(43);
+    const roomB = new GuestClient(roomBLink, "tester", store);
+    const attemptA = roomA.recordPrompt("continue");
+    const attemptB = roomB.recordPrompt("continue");
+    roomB.applyFrameForTest({ t: "entry", entry: { type: "message", id: "echo", parentId: null, timestamp: new Date().toISOString(), message: { role: "user", content: "continue", timestamp: Date.now() } } });
+    expect(store.records.get(attemptA.id)).toMatchObject({ roomId: "AAAAAAAAAAAAAAAA", status: "queued_local" });
+    expect(store.records.has(attemptB.id)).toBe(false);
+  });
+
+  it("preserves unresolved record across Rejoin success, failed Rejoin and repeated replacement", () => {
+    const store = new PromptRecoveryStore();
+    const first = new GuestClient(link, "tester", store);
+    first.applyFrameForTest({ t: "welcome", proto: 3, header: { id: "session-A" } as unknown as SessionHeader, state: { isStreaming: false, queuedMessageCount: 0, cwd: "", participants: [] }, agents: [], entryCount: 0 });
+    const attempt = first.recordPrompt("survives rejoin");
+    const rejoin = () => {
+      const client = new GuestClient(link, "tester", store);
+      client.applyFrameForTest({ t: "welcome", proto: 3, header: { id: "session-A" } as unknown as SessionHeader, state: { isStreaming: false, queuedMessageCount: 0, cwd: "", participants: [] }, agents: [], entryCount: 0 });
+      return client;
+    };
+    const success = rejoin();
+    const failed = rejoin();
+    failed.applyFrameForTest({ t: "error", message: "rejoin failed" });
+    const repeated = rejoin();
+    expect(repeated.getSnapshot().unconfirmedPrompts.filter(p => p.id === attempt.id)).toHaveLength(1);
+    expect(repeated.getSnapshot().unconfirmedPrompts[0]).toMatchObject({ roomId: attempt.roomId, sessionId: "session-A" });
+    expect(success.getSnapshot().unconfirmedPrompts.some(p => p.id === attempt.id)).toBe(true);
+  });
+
+  it("orders ended controls inside scrollable named dialog", () => {
+    const client = setupClient();
+    client.recordPrompt("tab order prompt");
+    client.applyFrameForTest({ t: "bye", reason: "ended" });
+    const { container } = render(<Banners phase="ended" endedReason="ended" loading={null} client={client} readOnly={false} onRejoin={vi.fn()} onNewLink={vi.fn()} />);
+    const dialog = screen.getByRole("alertdialog", { name: "session ended" });
+    const controls = ["Recover", "Copy", "Dismiss", "Rejoin", "New link"].map(name => screen.getByRole("button", { name }));
+    const positions = controls.map(el => [...dialog.querySelectorAll("button")].indexOf(el));
+    expect(positions.every((index, position) => position === 0 || positions[position - 1] < index)).toBe(true);
+    const overlay = container.querySelector(".sh-ended")!;
+    expect(overlay.className).toContain("sh-ended");
+    expect(overlay.firstElementChild?.className).toContain("sh-ended-card");
+  });
+
+  it("hides a recovered record's Recover control even when draft no longer contains its text", () => {
+    const client = setupClient();
+    const prompt = client.recordPrompt("restored once");
+    client.markPromptRecovered(prompt.id);
+    renderComposer(client);
+    expect(screen.queryByRole("button", { name: "Recover" })).toBeNull();
+    expect(screen.queryByText("restored once")).toBeNull();
+    expect(document.querySelector(".sh-recoverable-prompts")).toBeNull();
+  });
+
+  it("recovery stays single-insert after repeated activation and reopens after edit removes text", async () => {
+    const client = setupClient();
+    const prompt = client.recordPrompt("restored once");
+    renderComposer(client);
+    const textarea = screen.getByRole("textbox") as HTMLTextAreaElement;
+    fireEvent.change(textarea, { target: { value: "existing draft" } });
+    const recover = screen.getByRole("button", { name: "Recover" });
+    act(() => {
+      fireEvent.click(recover);
+      fireEvent.click(recover);
+    });
+    expect(textarea.value).toBe("existing draft\nrestored once");
+    expect(textarea.value.split("restored once")).toHaveLength(2);
+    expect(client.getSnapshot().unconfirmedPrompts.find(p => p.id === prompt.id)?.status).toBe("recovered");
+    expect(client.getSnapshot().unconfirmedPrompts.some(p => p.id === prompt.id)).toBe(true);
+    fireEvent.change(textarea, { target: { value: "existing draft" } });
+    expect(client.getSnapshot().unconfirmedPrompts.find(p => p.id === prompt.id)?.status).toBe("unconfirmed");
+    expect(screen.getByRole("button", { name: "Recover" })).toBeTruthy();
+  });
+
+  it("makes Recover available again when restored bug changes to debug", () => {
+    const client = setupClient();
+    const prompt = client.recordPrompt("bug");
+    renderComposer(client);
+    const textarea = screen.getByRole("textbox");
+    fireEvent.click(screen.getByRole("button", { name: "Recover" }));
+    expect(client.getSnapshot().unconfirmedPrompts.find(p => p.id === prompt.id)?.status).toBe("recovered");
+    fireEvent.change(textarea, { target: { value: "debug" } });
+    expect(client.getSnapshot().unconfirmedPrompts.find(p => p.id === prompt.id)?.status).toBe("unconfirmed");
+    expect(screen.getByRole("button", { name: "Recover" })).toBeTruthy();
+  });
+
+  it("retains prompt and shows manual-copy message when clipboard is unavailable", async () => {
+    const client = setupClient();
+    const prompt = client.recordPrompt("copy this manually");
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: vi.fn().mockRejectedValue(new Error("clipboard denied")) } });
+    render(<Banners phase="ended" endedReason="ended" loading={null} client={client} readOnly={false} onRejoin={vi.fn()} onNewLink={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "Copy" }));
+    expect((await screen.findByText(/Clipboard unavailable; select and copy prompt text manually/)).textContent).toContain("Clipboard unavailable; select and copy prompt text manually.");
+    expect(client.getSnapshot().unconfirmedPrompts.some(p => p.id === prompt.id)).toBe(true);
+  });
+});
+
+describe("App prompt recovery lifecycle integration", () => {
+  it("retains one originating record through successful, failed, repeated and cross-room replacement", async () => {
+    const clients: GuestClient[] = [];
+    vi.spyOn(CollabSocket.prototype, "send").mockResolvedValue(true);
+    const connect = vi.spyOn(GuestClient.prototype, "connect").mockImplementation(function (this: GuestClient) {
+      clients.push(this);
+    });
+    window.history.replaceState(null, "", `${window.location.pathname}#${link}`);
+    render(<App />);
+    await waitFor(() => expect(clients).toHaveLength(1));
+    const original = clients[0];
+    act(() => original.applyFrameForTest({ t: "welcome", proto: 3, header: { id: "session-A" } as unknown as SessionHeader, state: { isStreaming: false, queuedMessageCount: 0, cwd: "", participants: [] }, agents: [], entryCount: 0 }));
+    const prompt = original.recordPrompt("origin record");
+    act(() => original.applyFrameForTest({ t: "bye", reason: "ended" }));
+    fireEvent.click(screen.getByRole("button", { name: "Rejoin" }));
+    await waitFor(() => expect(clients).toHaveLength(2));
+    expect(clients[1].getSnapshot().unconfirmedPrompts.filter(p => p.id === prompt.id)).toHaveLength(1);
+    expect(clients[1].getSnapshot().unconfirmedPrompts[0]).toMatchObject({ roomId: "AAAAAAAAAAAAAAAA", sessionId: "session-A" });
+    act(() => clients[1].applyFrameForTest({ t: "bye", reason: "ended" }));
+    connect.mockImplementationOnce(function (this: GuestClient) {
+      clients.push(this);
+      throw new Error("socket unavailable");
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Rejoin" }));
+    expect(screen.getByRole("alert").textContent).toContain("socket unavailable");
+    expect(clients[1].getSnapshot().unconfirmedPrompts.find(p => p.id === prompt.id)).toMatchObject({ roomId: "AAAAAAAAAAAAAAAA", sessionId: "session-A" });
+    const failedAttempt = clients[1].recordPrompt("old client still active");
+    clients[1].dismissPrompt(failedAttempt.id);
+    expect(clients[1].getSnapshot().unconfirmedPrompts.some(p => p.id === failedAttempt.id)).toBe(false);
+    connect.mockImplementation(function (this: GuestClient) { clients.push(this); });
+    fireEvent.click(screen.getByRole("button", { name: "Rejoin" }));
+    await waitFor(() => expect(clients).toHaveLength(4));
+    expect(clients[3].getSnapshot().unconfirmedPrompts.filter(p => p.id === prompt.id)).toHaveLength(1);
+    expect(screen.queryByRole("alert")).toBeNull();
+    act(() => clients[3].applyFrameForTest({ t: "bye", reason: "ended" }));
+    fireEvent.click(screen.getByRole("button", { name: "New link" }));
+    const linkInput = screen.getByPlaceholderText("ws://host:port/r/room.key");
+    const otherLink = "wss://example.com/r/CCCCCCCCCCCCCCCC." + "D".repeat(43);
+    fireEvent.change(linkInput, { target: { value: otherLink } });
+    fireEvent.click(screen.getByRole("button", { name: /Connect/ }));
+    await waitFor(() => expect(clients).toHaveLength(5));
+    expect(clients[4].getSnapshot().unconfirmedPrompts.find(p => p.id === prompt.id)).toMatchObject({ roomId: "AAAAAAAAAAAAAAAA", sessionId: "session-A" });
+    expect(clients[4].getSnapshot().phase).toBe("connecting");
+    expect(screen.queryByText("origin record")).toBeNull();
+    expect(connect).toHaveBeenCalledTimes(5);
+  });
+
+  it("keeps overlay-recovered prompt reachable after Rejoin unmounts its draft", async () => {
+    const clients: GuestClient[] = [];
+    vi.spyOn(CollabSocket.prototype, "send").mockResolvedValue(true);
+    vi.spyOn(GuestClient.prototype, "connect").mockImplementation(function (this: GuestClient) { clients.push(this); });
+    window.history.replaceState(null, "", `${window.location.pathname}#${link}`);
+    render(<App />);
+    await waitFor(() => expect(clients).toHaveLength(1));
+    const original = clients[0];
+    act(() => original.applyFrameForTest({ t: "welcome", proto: 3, header: { id: "overlay-session" } as unknown as SessionHeader, state: { isStreaming: false, queuedMessageCount: 0, cwd: "", participants: [] }, agents: [], entryCount: 0 }));
+    const prompt = original.recordPrompt("recover through overlay");
+    act(() => original.applyFrameForTest({ t: "bye", reason: "ended" }));
+    fireEvent.click(within(screen.getByRole("alertdialog", { name: "session ended" })).getByRole("button", { name: "Recover" }));
+    expect(original.getSnapshot().unconfirmedPrompts.find(p => p.id === prompt.id)?.status).toBe("recovered");
+    fireEvent.click(screen.getByRole("button", { name: "Rejoin" }));
+    await waitFor(() => expect(clients).toHaveLength(2));
+    expect(clients[1].getSnapshot().unconfirmedPrompts.find(p => p.id === prompt.id)?.status).toBe("unconfirmed");
+    expect((screen.getByRole("textbox") as HTMLTextAreaElement).value).toBe("");
   });
 });

@@ -1,10 +1,10 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { expect, it } from "vitest";
-
+import { expect, it, vi } from "vitest";
+import { finishPublishedBuild, swapStageToDist } from "../../scripts/build-guest-utils.mjs";
 const repoRoot = fileURLToPath(new URL("../..", import.meta.url));
 const script = join(repoRoot, "scripts/build-guest.mjs");
 
@@ -16,6 +16,95 @@ function runBuild(dist: string, publicDir: string) {
     shell: false,
   });
 }
+// POSIX permission bits do not reliably constrain root; these cases must run as a non-root user.
+// Root bypasses POSIX permission bits, so permission cases explicitly skip there.
+it.skipIf(process.getuid?.() === 0)("publishes despite a permission-denied backup sweep", async () => {
+  const temp = mkdtempSync(join(tmpdir(), "caw-build-sweep-eacces-"));
+  const parent = join(temp, "parent");
+  const dist = join(parent, "dist");
+  const stage = join(parent, "stage");
+  const old = `${dist}.old-${Date.now()}`;
+  try {
+    mkdirSync(dist, { recursive: true });
+    mkdirSync(stage);
+    writeFileSync(join(dist, "index.html"), "OLD");
+    writeFileSync(join(stage, "index.html"), "NEW");
+    await swapStageToDist(stage, dist, old);
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    chmodSync(parent, 0o300);
+    try {
+      await expect(finishPublishedBuild(old, dist)).resolves.toBeUndefined();
+    } finally {
+      chmodSync(parent, 0o700);
+    }
+    expect(errorLog).toHaveBeenCalledWith(expect.stringContaining("warning: could not sweep stale backups"), expect.anything());
+    expect(readFileSync(join(dist, "index.html"), "utf8")).toBe("NEW");
+    errorLog.mockRestore();
+  } finally {
+    chmodSync(parent, 0o700);
+    rmSync(temp, { recursive: true, force: true });
+  }
+});
+
+it.skipIf(process.getuid?.() === 0)("publishes despite a permission-denied backup removal", async () => {
+  const temp = mkdtempSync(join(tmpdir(), "caw-build-rm-eacces-"));
+  const dist = join(temp, "dist");
+  const stage = join(temp, "stage");
+  const old = `${dist}.old-${Date.now()}`;
+  const locked = join(dist, "locked");
+  try {
+    mkdirSync(locked, { recursive: true });
+    mkdirSync(stage);
+    writeFileSync(join(dist, "index.html"), "OLD");
+    writeFileSync(join(locked, "file"), "locked");
+    writeFileSync(join(stage, "index.html"), "NEW");
+    chmodSync(locked, 0o500);
+    await swapStageToDist(stage, dist, old);
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    await expect(finishPublishedBuild(old, dist)).resolves.toBeUndefined();
+    expect(errorLog).toHaveBeenCalledWith(expect.stringContaining(`warning: could not remove backup ${old}`), expect.anything());
+    expect(readFileSync(join(dist, "index.html"), "utf8")).toBe("NEW");
+    errorLog.mockRestore();
+  } finally {
+    chmodSync(join(old, "locked"), 0o700);
+    rmSync(temp, { recursive: true, force: true });
+  }
+});
+
+it("keeps the previous artifact when failure occurs before publish", () => {
+  const temp = mkdtempSync(join(tmpdir(), "caw-build-prepublish-"));
+  try {
+    const dist = join(temp, "dist");
+    mkdirSync(dist);
+    writeFileSync(join(dist, "index.html"), "OLD");
+    const result = runBuild(dist, "/proc/1/mem");
+    expect(result.status).not.toBe(0);
+    expect(readFileSync(join(dist, "index.html"), "utf8")).toBe("OLD");
+  } finally {
+    rmSync(temp, { recursive: true, force: true });
+  }
+});
+
+it("preserves timestamp backup during successful published-build housekeeping", async () => {
+  const temp = mkdtempSync(join(tmpdir(), "caw-build-backup-successor-"));
+  try {
+    const dist = join(temp, "dist");
+    const backup = `${dist}.old-2147483647`;
+    mkdirSync(dist);
+    mkdirSync(join(temp, "stage"));
+    mkdirSync(backup);
+    writeFileSync(join(backup, "index.html"), "RECOVERY");
+    writeFileSync(join(dist, "index.html"), "OLD");
+    writeFileSync(join(temp, "stage", "index.html"), "NEW");
+    const old = `${dist}.old-${Date.now()}`;
+    await swapStageToDist(join(temp, "stage"), dist, old);
+    await finishPublishedBuild(old, dist);
+    expect(readFileSync(join(dist, "index.html"), "utf8")).toBe("NEW");
+    expect(readFileSync(join(backup, "index.html"), "utf8")).toBe("RECOVERY");
+  } finally {
+    rmSync(temp, { recursive: true, force: true });
+  }
+});
 
 it("allows a missing public directory and builds into isolated destination", () => {
   const temp = mkdtempSync(join(tmpdir(), "caw-build-guest-"));

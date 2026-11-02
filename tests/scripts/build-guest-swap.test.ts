@@ -1,10 +1,13 @@
+import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { expect, it } from "vitest";
+import { fileURLToPath } from "node:url";
+import { expect, it, vi } from "vitest";
 import { cleanupFailedBuild, swapStageToDist, sweepStaleBackups } from "../../scripts/build-guest-utils.mjs";
 
+const buildScript = fileURLToPath(new URL("../../scripts/build-guest.mjs", import.meta.url));
 it("restores previous dist when stage rename fails (Matrix 2)", async () => {
   const temp = mkdtempSync(join(tmpdir(), "caw-build-swap-"));
   const dist = join(temp, "dist");
@@ -52,6 +55,66 @@ it("preserves oldDir backup when rollback rename fails (Matrix 3)", async () => 
     rmSync(temp, { recursive: true, force: true });
   }
 });
+it("propagates publish error and preserves backup when rollback fails", async () => {
+  const temp = mkdtempSync(join(tmpdir(), "caw-build-rollback-fail-"));
+  const dist = join(temp, "dist");
+  const stage = join(temp, "stage");
+  const old = join(temp, "dist.old-123");
+  mkdirSync(dist);
+  mkdirSync(stage);
+  writeFileSync(join(dist, "index.html"), "OLD");
+  writeFileSync(join(stage, "index.html"), "NEW");
+  const publishError = Object.assign(new Error("publish failed"), { code: "EIO" });
+  const rollbackError = Object.assign(new Error("rollback failed"), { code: "EACCES" });
+  let calls = 0;
+  const rename = vi.fn(async (from: string, to: string) => {
+    calls++;
+    if (calls === 1) return fs.rename(from, to);
+    if (calls === 2) throw publishError;
+    throw rollbackError;
+  });
+  const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+  try {
+    await expect(swapStageToDist(stage, dist, old, rename)).rejects.toBe(publishError);
+    expect(readFileSync(join(old, "index.html"), "utf8")).toBe("OLD");
+    expect(errorLog).toHaveBeenCalledWith(expect.stringContaining("rollback failed to restore"), rollbackError);
+  } finally {
+    errorLog.mockRestore();
+    rmSync(temp, { recursive: true, force: true });
+  }
+});
+
+it("keeps the first failed attempt's timestamp backup through a second failed build", async () => {
+  const temp = mkdtempSync(join(tmpdir(), "caw-build-two-failures-"));
+  const dist = join(temp, "dist");
+  const stage = join(temp, "stage");
+  const backup = `${dist}.old-${Date.now()}`;
+  mkdirSync(dist);
+  mkdirSync(stage);
+  writeFileSync(join(dist, "index.html"), "LAST_GOOD");
+  writeFileSync(join(stage, "index.html"), "NEW");
+  const publishError = Object.assign(new Error("publish failed"), { code: "EIO" });
+  let calls = 0;
+  const rename = async (from: string, to: string) => {
+    calls++;
+    if (calls === 1) return fs.rename(from, to);
+    if (calls === 2) throw publishError;
+    throw new Error("rollback failed");
+  };
+  try {
+    await expect(swapStageToDist(stage, dist, backup, rename)).rejects.toBe(publishError);
+    const second = spawnSync(process.execPath, [buildScript], {
+      encoding: "utf8",
+      env: { ...process.env, CAW_GUEST_DIST_DIR: dist, CAW_GUEST_PUBLIC_DIR: "/proc/1/mem" },
+      shell: false,
+    });
+    expect(second.status).not.toBe(0);
+    expect(readFileSync(join(backup, "index.html"), "utf8")).toBe("LAST_GOOD");
+  } finally {
+    rmSync(temp, { recursive: true, force: true });
+  }
+});
+
 it("sweeps dead-PID backup directories when dist is valid", async () => {
   const temp = mkdtempSync(join(tmpdir(), "caw-build-sweep-"));
   const dist = join(temp, "dist");

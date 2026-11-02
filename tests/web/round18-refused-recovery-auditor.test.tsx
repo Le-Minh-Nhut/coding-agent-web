@@ -41,6 +41,12 @@ it("V18 refused text survives actual App Back/reopen navigation along with its n
  console.log("AUDIT18 refusal reopen",JSON.stringify({draft:f.input().value,refusedRecoverable:recoverable}));
  expect(f.input().value).toBe("DRAFT_C");expect(recoverable).toBe(true);
 });
+it("V18 manual Recover preserves an occupied draft and keeps refused text recoverable",async()=>{
+ const f=await fixture();f.type("REFUSED_A");await f.send();f.type("DRAFT_B");await f.refuse();
+ fireEvent.click(f.view.getByRole("button",{name:"Recover"}));
+ expect(f.input().value).toBe("DRAFT_B\n\nREFUSED_A");
+ expect(f.view.container.textContent).toContain("REFUSED_A");
+});
 it("V18 a second refused prompt cannot silently replace the only recovery copy of the first",async()=>{
  const f=await fixture();f.type("REFUSED_B");await f.send();f.type("REFUSED_C");await f.refuse();expect(f.view.container.textContent).toContain("REFUSED_B");
  await f.send();f.type("DRAFT_D");await f.refuse();

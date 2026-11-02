@@ -79,7 +79,7 @@ for (const viewport of VIEWPORTS) {
     await assertNoUnexpectedAppErrors(page);
   });
 
-  test(`a refused prompt keeps the newer draft and Recover restores it (${viewport.name})`, async ({ page }) => {
+  test(`a refused prompt keeps the newer draft and Recover merges it (${viewport.name})`, async ({ page }) => {
     const fixture = harnessFixture();
     await page.setViewportSize(viewport.size);
     const host = await installMockCollabHost(page, { conversationId: fixture.seededConversationId });
@@ -104,10 +104,10 @@ for (const viewport of VIEWPORTS) {
     await expect(strip).toContainText("PROMPT_B_MUST_BE_RECOVERABLE");
     await expect(composer).toHaveValue("DRAFT_C_STILL_TYPING");
 
-    // Recover is the only path back, and it is explicit.
+    // Recover merges the refused text after the newer draft and keeps the record available.
     await strip.getByRole("button", { name: "Recover" }).click();
-    await expect(composer).toHaveValue("PROMPT_B_MUST_BE_RECOVERABLE");
-    await expect(strip).toBeHidden();
+    await expect(composer).toHaveValue("DRAFT_C_STILL_TYPING\n\nPROMPT_B_MUST_BE_RECOVERABLE");
+    await expect(strip).toBeVisible();
 
     await assertNoUnexpectedAppErrors(page);
   });

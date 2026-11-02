@@ -8,7 +8,7 @@ import { ConnectScreen } from "./components/shell/ConnectScreen";
 import { HeaderBar } from "./components/shell/HeaderBar";
 import { Toasts } from "./components/shell/Toasts";
 import { Transcript } from "./components/transcript/Transcript";
-import { GuestClient } from "./lib/client";
+import { GuestClient, PromptRecoveryStore } from "./lib/client";
 import { useGuestSnapshot } from "./lib/use-guest";
 import type { ToolRenderHost } from "./tool-render";
 import "./components/shell/shell.css";
@@ -40,11 +40,12 @@ export function App(): ReactNode {
   const [client, setClient] = useState<GuestClient | null>(null);
   const [connectError, setConnectError] = useState<string | null>(null);
   const credsRef = useRef<Creds | null>(null);
+  const promptRecoveryStore = useRef(new PromptRecoveryStore()).current;
 
   const connect = useCallback((link: string, name: string): void => {
     let next: GuestClient;
     try {
-      next = new GuestClient(link, name);
+      next = new GuestClient(link, name, promptRecoveryStore);
     } catch (err) {
       setConnectError(err instanceof Error ? err.message : String(err));
       return;
@@ -52,7 +53,7 @@ export function App(): ReactNode {
     try {
       next.connect();
     } catch (err) {
-      next.close();
+      client?.restoreRecoveryOwnership();
       setConnectError(err instanceof Error ? err.message : String(err));
       return;
     }
@@ -72,9 +73,10 @@ export function App(): ReactNode {
       prev?.close();
       return next;
     });
-  }, []);
+  }, [promptRecoveryStore, client]);
 
   const leave = useCallback((): void => {
+    setConnectError(null);
     setClient((prev) => {
       prev?.close();
       return null;
@@ -133,16 +135,17 @@ export function App(): ReactNode {
       />
     );
   }
-  return <Session client={client} onLeave={leave} onRejoin={rejoin} />;
+  return <Session client={client} connectError={connectError} onLeave={leave} onRejoin={rejoin} />;
 }
 
 interface SessionProps {
   client: GuestClient;
+  connectError: string | null;
   onLeave(): void;
   onRejoin(): void;
 }
 
-function Session({ client, onLeave, onRejoin }: SessionProps): ReactNode {
+function Session({ client, connectError, onLeave, onRejoin }: SessionProps): ReactNode {
   const snap = useGuestSnapshot(client);
   const [railOpen, setRailOpen] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -191,6 +194,7 @@ function Session({ client, onLeave, onRejoin }: SessionProps): ReactNode {
   return (
     <div className="sh-app">
       <div className="sh-ambient" />
+      {connectError && snap.phase !== "ended" && <div className="sh-banner" role="alert">{connectError}</div>}
       <HeaderBar
         header={snap.header}
         state={snap.state}
@@ -262,6 +266,9 @@ function Session({ client, onLeave, onRejoin }: SessionProps): ReactNode {
         loading={snap.loading}
         onRejoin={onRejoin}
         onNewLink={onLeave}
+        client={client}
+        readOnly={snap.readOnly}
+        connectError={connectError}
       />
       <Toasts notices={snap.notices} />
     </div>

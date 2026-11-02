@@ -145,7 +145,7 @@ describe("guest composer draft retention (F13)", () => {
     const input = typeDraft(container, "one shot");
 
     fireEvent.keyDown(input, { key: "Enter" });
-    fireEvent.click(container.querySelector("button")!);
+    fireEvent.click(container.querySelector(".sh-composer-actions button")!);
 
     expect(sendPrompt).toHaveBeenCalledTimes(1);
 

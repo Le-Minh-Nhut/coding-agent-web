@@ -7,7 +7,12 @@ export interface BannersProps {
   loading: GuestSnapshot["loading"];
   onRejoin(): void;
   onNewLink(): void;
+  client: GuestClient;
+  readOnly: boolean;
+  connectError?: string | null;
 }
+import type { GuestClient } from "../../lib/client";
+import { Composer } from "./Composer";
 
 export function Banners({
   phase,
@@ -15,6 +20,9 @@ export function Banners({
   loading,
   onRejoin,
   onNewLink,
+  client,
+  readOnly,
+  connectError,
 }: BannersProps): ReactNode {
   const progress =
     loading && loading.total > 0
@@ -43,7 +51,9 @@ export function Banners({
       <div className="sh-ended" role="alertdialog" aria-label="session ended">
         <div className="sh-ended-card">
           <div className="sh-ended-title">Session ended</div>
+          {connectError && <div className="sh-banner" role="alert">{connectError}</div>}
           {endedReason && <div className="sh-ended-reason">{endedReason}</div>}
+          <Composer client={client} phase="ended" readOnly={readOnly} uiRequest={null} working={false} queuedMessageCount={0} />
           <div className="sh-ended-actions">
             <button
               type="button"
