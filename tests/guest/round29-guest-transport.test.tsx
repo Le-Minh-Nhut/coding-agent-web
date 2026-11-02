@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { once } from "node:events";
+import React from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WebSocket as WsWebSocket, WebSocketServer } from "ws";
 import type { AddressInfo } from "node:net";
@@ -304,7 +305,7 @@ describe("H02 — send() promise settlement across lifecycle boundaries", () => 
     });
     sockets.push(client);
 
-    const outcome = client.send({ t: "prompt", text: "in-flight" });
+    const outcome = client.send({ t: "hello", proto: 3, name: "test" });
     await encryptionStarted.promise;
 
     client.close();
@@ -456,28 +457,13 @@ describe("H06 — Stop / Kill / Revive failures visible to the user", () => {
 
   it("surfaces stop failure in Composer when sendAbort fails", async () => {
     const mockClient = {
-      sendAbort: vi.fn().mockResolvedValue(false),
-      sendPrompt: vi.fn().mockResolvedValue(true),
+      sendAbort: vi.fn().mockResolvedValue(false), sendPrompt: vi.fn().mockResolvedValue(true),
+      getSnapshot: () => ({ notices: [], unconfirmedPrompts: [] }), subscribe: () => () => {},
     } as unknown as GuestClient;
-
-    render(
-      <Composer
-        client={mockClient}
-        phase="live"
-        readOnly={false}
-        uiRequest={null}
-        working={true}
-        queuedMessageCount={0}
-      />,
-    );
-
-    const stopBtn = screen.getByRole("button", { name: /stop/i });
-    fireEvent.click(stopBtn);
-
-    await waitFor(() => {
-      const errorMsg = screen.getByText(/stop request not sent/i);
-      expect(errorMsg).toBeTruthy();
-    });
+    function Harness() { const [draft, setDraft] = React.useState(""); return <Composer client={mockClient} phase="live" readOnly={false} uiRequest={null} working={true} queuedMessageCount={0} draft={draft} onDraftChange={setDraft} />; }
+    render(<Harness />);
+    fireEvent.click(screen.getByRole("button", { name: /stop/i }));
+    await waitFor(() => expect(screen.getByText(/stop request not sent/i)).toBeTruthy());
   });
 });
 
@@ -498,16 +484,8 @@ describe("H03 — Early prompt rejected by host after transport success", () => 
 
     // Use real sendPrompt so the host error remains attached to a retained attempt.
     vi.spyOn(CollabSocket.prototype, "send").mockResolvedValue(true);
-    const view = render(
-      <Composer
-        client={client}
-        phase="live"
-        readOnly={false}
-        uiRequest={null}
-        working={false}
-        queuedMessageCount={0}
-      />,
-    );
+    function Harness() { const [draft, setDraft] = React.useState(""); return <Composer client={client} phase="live" readOnly={false} uiRequest={null} working={false} queuedMessageCount={0} draft={draft} onDraftChange={setDraft} />; }
+    const view = render(<Harness />);
 
     const textarea = view.getByPlaceholderText(/prompt the host agent/i) as HTMLTextAreaElement;
     fireEvent.change(textarea, { target: { value: "important command to run" } });
@@ -543,16 +521,8 @@ describe("H03 — Early prompt rejected by host after transport success", () => 
 
     vi.spyOn(client, "sendPrompt").mockResolvedValue(true);
 
-    const view = render(
-      <Composer
-        client={client}
-        phase="live"
-        readOnly={false}
-        uiRequest={null}
-        working={false}
-        queuedMessageCount={0}
-      />,
-    );
+    function Harness() { const [draft, setDraft] = React.useState(""); return <Composer client={client} phase="live" readOnly={false} uiRequest={null} working={false} queuedMessageCount={0} draft={draft} onDraftChange={setDraft} />; }
+    const view = render(<Harness />);
 
     const textarea = view.getByPlaceholderText(/prompt the host agent/i) as HTMLTextAreaElement;
     fireEvent.change(textarea, { target: { value: "unrelated prompt" } });
@@ -707,85 +677,37 @@ describe("DEFECT-04 — isGreeted truthfulness across transient disconnect", () 
   });
 });
 
-describe("Queueable policy confirmation: prompts queue across disconnects", () => {
-  it("queues a prompt issued while momentarily disconnected and flushes it on next welcome", async () => {
+describe("Pre-welcome prompt refusal", () => {
+  it("refuses prompt while momentarily disconnected", async () => {
     const realKey = await importRoomKey(generateRoomKey());
     const { server, port } = await startServer();
-    const receivedFrames: string[] = [];
     const serverSocket = deferred<WsWebSocket>();
-
-    server.on("connection", (ws) => {
-      serverSocket.settle(ws);
-      ws.on("message", async (raw: Buffer) => {
-        const bytes = new Uint8Array(raw);
-        if (bytes.byteLength <= 4) return;
-        const envelope = unpackEnvelope(bytes);
-        if (!envelope) return;
-        const f = (await open(realKey, envelope.payload)) as GuestFrame;
-        receivedFrames.push(f.t);
-        if (f.t === "hello") {
-          sendFrame(ws, realKey, { t: "welcome" } as HostFrame);
-        }
-      });
-    });
-
-    const socket = new CollabSocket({
-      wsUrl: `ws://127.0.0.1:${port}/r/room`,
-      role: "guest",
-      key: realKey,
-    });
-    sockets.push(socket);
-
-    socket.onOpen = () => void socket.send({ t: "hello", proto: 3, name: "test" } as GuestFrame);
-    socket.connect();
+    server.on("connection", ws => { serverSocket.settle(ws); ws.on("message", async (raw: Buffer) => {
+      const envelope = unpackEnvelope(new Uint8Array(raw)); if (!envelope) return;
+      const frame = await open(realKey, envelope.payload) as GuestFrame;
+      if (frame.t === "hello") sendFrame(ws, realKey, { t: "welcome" } as HostFrame);
+    }); });
+    const socket = new CollabSocket({ wsUrl: `ws://127.0.0.1:${port}/r/room`, role: "guest", key: realKey }); sockets.push(socket);
+    socket.onOpen = () => void socket.send({ t: "hello", proto: 3, name: "test" } as GuestFrame); socket.connect();
     await vi.waitFor(() => expect(socket.isGreeted).toBe(true), { timeout: 5000 });
-
-    // Drop connection
-    (await serverSocket.promise).terminate();
-    await vi.waitFor(() => expect(socket.isOpen).toBe(false), { timeout: 5000 });
-
-    // Issue prompt while momentarily disconnected
-    const promptSend = socket.send({ t: "prompt", text: "prompt during disconnect" });
-
-    // Prompt must flush and settle true once reconnected and welcomed
-    await expect(promptSend).resolves.toBe(true);
-    await vi.waitFor(() => expect(receivedFrames).toContain("prompt"), { timeout: 5000 });
+    (await serverSocket.promise).terminate(); await vi.waitFor(() => expect(socket.isOpen).toBe(false), { timeout: 5000 });
+    await expect(socket.send({ t: "prompt", text: "prompt during disconnect" })).resolves.toBe(false);
   });
 
-  it("queues a prompt issued before any greeting ever happened and flushes it on first welcome", async () => {
+  it("refuses a prompt issued before any greeting", async () => {
     const realKey = await importRoomKey(generateRoomKey());
     const { server, port } = await startServer();
     const receivedFrames: string[] = [];
-
-    server.on("connection", (ws) => {
-      ws.on("message", async (raw: Buffer) => {
-        const bytes = new Uint8Array(raw);
-        if (bytes.byteLength <= 4) return;
-        const envelope = unpackEnvelope(bytes);
-        if (!envelope) return;
-        const f = (await open(realKey, envelope.payload)) as GuestFrame;
-        receivedFrames.push(f.t);
-        if (f.t === "hello") {
-          sendFrame(ws, realKey, { t: "welcome" } as HostFrame);
-        }
-      });
-    });
-
-    const socket = new CollabSocket({
-      wsUrl: `ws://127.0.0.1:${port}/r/room`,
-      role: "guest",
-      key: realKey,
-    });
-    sockets.push(socket);
-
-    // Issue prompt before socket is ever opened or greeted
+    server.on("connection", ws => ws.on("message", async (raw: Buffer) => {
+      const envelope = unpackEnvelope(new Uint8Array(raw)); if (!envelope) return;
+      const frame = await open(realKey, envelope.payload) as GuestFrame;
+      receivedFrames.push(frame.t); if (frame.t === "hello") sendFrame(ws, realKey, { t: "welcome" } as HostFrame);
+    }));
+    const socket = new CollabSocket({ wsUrl: `ws://127.0.0.1:${port}/r/room`, role: "guest", key: realKey }); sockets.push(socket);
     const promptSend = socket.send({ t: "prompt", text: "pre-greeting prompt" });
-
-    socket.onOpen = () => void socket.send({ t: "hello", proto: 3, name: "test" } as GuestFrame);
+    socket.onOpen = () => { void socket.send({ t: "hello", proto: 3, name: "test" } as GuestFrame); };
     socket.connect();
-
-    // Must flush after welcome and resolve true
-    await expect(promptSend).resolves.toBe(true);
-    await vi.waitFor(() => expect(receivedFrames).toEqual(["hello", "prompt"]), { timeout: 5000 });
+    await expect(promptSend).resolves.toBe(false);
+    await vi.waitFor(() => expect(receivedFrames).toEqual(["hello"]), { timeout: 5000 });
   });
 });

@@ -39,8 +39,18 @@ function hashLink(): string | null {
 export function App(): ReactNode {
   const [client, setClient] = useState<GuestClient | null>(null);
   const [connectError, setConnectError] = useState<string | null>(null);
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const [recoveryVersion, setRecoveryVersion] = useState(0);
   const credsRef = useRef<Creds | null>(null);
   const promptRecoveryStore = useRef(new PromptRecoveryStore()).current;
+  const [recoveryRecords, setRecoveryRecords] = useState(() => [...promptRecoveryStore.records.values()]);
+  useEffect(() => promptRecoveryStore.subscribe(() => {
+    setRecoveryRecords([...promptRecoveryStore.records.values()]);
+    setRecoveryVersion(value => value + 1);
+  }), [promptRecoveryStore]);
+  const changeDraft = useCallback((roomId: string, value: string) => {
+    setDrafts(current => ({ ...current, [roomId]: value }));
+  }, []);
 
   const connect = useCallback((link: string, name: string): void => {
     let next: GuestClient;
@@ -132,10 +142,12 @@ export function App(): ReactNode {
         defaultName={storedName()}
         error={connectError}
         onConnect={connect}
+        recoveries={recoveryRecords}
+        onDismissRecovery={id => { promptRecoveryStore.records.delete(id); promptRecoveryStore.changed(); }}
       />
     );
   }
-  return <Session client={client} connectError={connectError} onLeave={leave} onRejoin={rejoin} />;
+  return <Session client={client} connectError={connectError} onLeave={leave} onRejoin={rejoin} draft={drafts[client.roomId] ?? ""} onDraftChange={value => changeDraft(client.roomId, value)} />;
 }
 
 interface SessionProps {
@@ -143,9 +155,11 @@ interface SessionProps {
   connectError: string | null;
   onLeave(): void;
   onRejoin(): void;
+  draft: string;
+  onDraftChange(value: string): void;
 }
 
-function Session({ client, connectError, onLeave, onRejoin }: SessionProps): ReactNode {
+function Session({ client, connectError, onLeave, onRejoin, draft, onDraftChange }: SessionProps): ReactNode {
   const snap = useGuestSnapshot(client);
   const [railOpen, setRailOpen] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -225,7 +239,10 @@ function Session({ client, connectError, onLeave, onRejoin }: SessionProps): Rea
             uiRequest={snap.uiRequest}
             working={snap.working}
             queuedMessageCount={snap.state?.queuedMessageCount ?? 0}
+            draft={draft}
+            onDraftChange={onDraftChange}
           />
+ [packages/guest/src/app.tsx#6BE5]
         </section>
         {railOpen && (
           <>
@@ -268,6 +285,8 @@ function Session({ client, connectError, onLeave, onRejoin }: SessionProps): Rea
         onNewLink={onLeave}
         client={client}
         readOnly={snap.readOnly}
+        draft={draft}
+        onDraftChange={onDraftChange}
         connectError={connectError}
       />
       <Toasts notices={snap.notices} />

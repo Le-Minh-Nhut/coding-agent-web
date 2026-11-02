@@ -82,7 +82,7 @@ export class PromptRecoveryStore {
 
 const defaultPromptRecoveryStore = new PromptRecoveryStore();
 
-export type PromptStatus = "queued_local" | "unconfirmed" | "refused" | "recovered";
+export type PromptStatus = "queued_local" | "unconfirmed" | "refused" | "recovered" | "echoed";
 
 export interface UnconfirmedPrompt {
 	id: number;
@@ -138,8 +138,9 @@ export interface GuestSnapshot {
 }
 
 const MAX_NOTICES = 50;
-// ponytail: MAX_UNCONFIRMED_PROMPTS = 256 aligns with socket.MAX_PENDING_SENDS (256); when cap reached, refused entries are evicted first, but unconfirmed entries are never evicted, so the array can exceed the cap; the O(n) clone per insert is a deliberate ceiling at human submission volumes (~1.9 MB / 7.8 ms at 1k records; ~11.4 MB / 209 ms at 10k).
 const MAX_UNCONFIRMED_PROMPTS = 256;
+// 1 MiB per room bounds retained UTF-8 recovery text without truncating drafts.
+const MAX_RECOVERY_BYTES = 1_048_576;
 const TRANSCRIPT_TIMEOUT_MS = 10_000;
 /** Mirrors the TUI guest's WELCOME_TIMEOUT_MS: a host that never answers hello ends the join. */
 const WELCOME_TIMEOUT_MS = 30_000;
@@ -225,6 +226,7 @@ export class GuestClient {
 	readonly #roomId: string;
 	readonly #clientGeneration: number;
 	#connectionGeneration = 0;
+	#closed = false;
 	#unconfirmedPrompts: readonly UnconfirmedPrompt[] = [];
 	#snapshot: GuestSnapshot;
 	/**
@@ -273,10 +275,14 @@ export class GuestClient {
 		this.#armWelcomeTimer();
 		this.#socket.connect();
 	}
+	get roomId(): string { return this.#roomId; }
 
 	close(): void {
+		if (this.#closed) return;
+		this.#closed = true;
 		this.#clearWelcomeTimer();
 		this.#clearSnapshotProgressTimer();
+		this.#unsubscribeRecoveryStore();
 		this.#socket.close();
 	}
 
@@ -291,12 +297,9 @@ export class GuestClient {
 		return this.#snapshot;
 	}
 
-	/**
-	 * Returns whether the prompt was handed to the socket or queued for the next
-	 * connect. `false` means the frame was refused (closed socket / full queue);
-	 * the caller must keep the user's draft and say so.
-	 */
+	/** false means known local refusal before dispatch; the caller keeps the draft. */
 	async sendPrompt(text: string): Promise<boolean> {
+		if (!this.#isCurrentClient() || !this.#welcomed) return false;
 		const prompt = this.recordPrompt(text);
 		if (prompt.id === 0) return false;
 		try {
@@ -312,8 +315,10 @@ export class GuestClient {
 
 	recordPrompt(text: string): UnconfirmedPrompt {
 		const existing = this.#promptList();
-		if (this.#recoveryStore.records.size >= MAX_UNCONFIRMED_PROMPTS) {
-			this.#pushNotice("error", `Recovery limit reached (${MAX_UNCONFIRMED_PROMPTS}); dismiss or recover an attempt before sending.`);
+		const usedBytes = existing.reduce((sum, prompt) => sum + new TextEncoder().encode(prompt.text).length, 0);
+		const bytes = new TextEncoder().encode(text).length;
+		if (!this.#isCurrentClient() || existing.length >= MAX_UNCONFIRMED_PROMPTS || usedBytes + bytes > MAX_RECOVERY_BYTES) {
+			this.#pushNotice("error", usedBytes + bytes > MAX_RECOVERY_BYTES ? "Recovery text limit reached (1 MiB per room); copy or dismiss older attempts before sending." : `Recovery limit reached (${MAX_UNCONFIRMED_PROMPTS}); dismiss or recover an attempt before sending.`);
 			this.#commit();
 			return { id: 0, text, at: Date.now(), status: "recovered", roomId: this.#roomId, sessionId: this.#header?.id ?? null, clientGeneration: this.#clientGeneration, connectionGeneration: this.#connectionGeneration };
 		}
@@ -332,18 +337,13 @@ export class GuestClient {
 		this.#updatePrompt(id, { status: "refused", error });
 	}
 
-	markPromptRecovered(id: number): void {
-		this.#updatePrompt(id, { status: "recovered" });
-	}
-	markPromptUnrecovered(id: number): void {
-		this.#updatePrompt(id, { status: "unconfirmed" });
-	}
+	markPromptRecovered(id: number): void { this.#updatePrompt(id, { status: "recovered" }); }
+	markPromptUnrecovered(id: number): void { this.#updatePrompt(id, { status: "unconfirmed" }); }
 	releaseRecoveredPrompts(ids: readonly number[]): void {
+		if (!this.#isCurrentClient()) return;
 		for (const id of ids) {
 			const prompt = this.#recoveryStore.records.get(id);
-			if (prompt?.roomId === this.#roomId && prompt.status === "recovered") {
-				this.#recoveryStore.records.set(id, { ...prompt, status: "unconfirmed" });
-			}
+			if (prompt?.roomId === this.#roomId && prompt.status === "recovered") this.#recoveryStore.records.set(id, { ...prompt, status: "unconfirmed" });
 		}
 		this.#recoveryStore.changed();
 		this.#unconfirmedPrompts = this.#promptList();
@@ -353,32 +353,27 @@ export class GuestClient {
 		this.#unconfirmedPrompts = this.#promptList();
 		this.#commit();
 	}
-
 	dismissPrompt(id: number): void {
 		if (!this.#isCurrentClient()) return;
 		const prompt = this.#recoveryStore.records.get(id);
-		if (!prompt || prompt.roomId !== this.#roomId) return;
+		if (!prompt) return;
+		// User dismissal follows stable id across rooms; host-event mutations remain room-scoped.
 		this.#recoveryStore.records.delete(id);
+		this.#recoveryStore.changed();
 		this.#unconfirmedPrompts = this.#promptList();
 		this.#commit();
 	}
-
 	confirmPrompt(predicate?: (p: UnconfirmedPrompt) => boolean): void {
 		const target = this.#promptList().find(prompt => (prompt.status === "unconfirmed" || prompt.status === "queued_local") && (!predicate || predicate(prompt)));
 		if (target) this.dismissPrompt(target.id);
 	}
-
 	#promptList(): readonly UnconfirmedPrompt[] {
 		return [...this.#recoveryStore.records.values()].filter(prompt => prompt.roomId === this.#roomId);
 	}
-
 	#isCurrentClient(): boolean {
 		return this.#recoveryStore.isCurrent(this.#roomId, this.#clientGeneration);
 	}
-	restoreRecoveryOwnership(): void {
-		this.#recoveryStore.restore(this.#roomId, this.#clientGeneration);
-	}
-
+	restoreRecoveryOwnership(): void { this.#recoveryStore.restore(this.#roomId, this.#clientGeneration); }
 	#updatePrompt(id: number, patch: Partial<UnconfirmedPrompt>): void {
 		if (!this.#isCurrentClient()) return;
 		const prompt = this.#recoveryStore.records.get(id);
@@ -387,6 +382,7 @@ export class GuestClient {
 		this.#unconfirmedPrompts = this.#promptList();
 		this.#commit();
 	}
+
 
 	async sendUiResponse(reqId: number, value?: CollabUiResponseValue): Promise<boolean> {
 		const sent = await this.#socket.send({ t: "ui-response", reqId, value });
@@ -593,12 +589,13 @@ export class GuestClient {
 				break;
 			}
 			case "entry":
-				if (frame.entry.type === "message" && frame.entry.message.role === "user") {
-					const content = typeof frame.entry.message.content === "string" ? frame.entry.message.content.trim() : "";
-					this.confirmPrompt(p => p.text.trim() === content);
-				} else if (frame.entry.type === "custom_message" && frame.entry.customType === "collab-prompt") {
-					const content = typeof frame.entry.content === "string" ? frame.entry.content.trim() : "";
-					this.confirmPrompt(p => p.text.trim() === content);
+				let content: string | null = null;
+				if (frame.entry.type === "message" && frame.entry.message.role === "user") content = typeof frame.entry.message.content === "string" ? frame.entry.message.content.trim() : "";
+				else if (frame.entry.type === "custom_message" && frame.entry.customType === "collab-prompt") content = typeof frame.entry.content === "string" ? frame.entry.content.trim() : "";
+				if (content !== null) {
+					// Echo lacks sender attribution; retain one matching attempt for inspection, never imply receipt was ours.
+					const echoed = this.#promptList().find(prompt => (prompt.status === "queued_local" || prompt.status === "unconfirmed") && prompt.text.trim() === content);
+					if (echoed) this.#updatePrompt(echoed.id, { status: "echoed" });
 				}
 				// The committed row supersedes the finished stream ghost, even when
 				// the row is buffered behind an in-flight snapshot.

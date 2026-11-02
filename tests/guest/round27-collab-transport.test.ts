@@ -104,39 +104,25 @@ describe("collab link errors do not echo the submitted link", () => {
 });
 
 describe("collab socket handshake gate", () => {
-  it("sends hello first and withholds every other frame until welcome", async () => {
+  it("refuses a prompt before the host welcome", async () => {
     const key = await importRoomKey(generateRoomKey());
     const { server, port } = await startServer();
     const received: string[] = [];
-
-    server.on("connection", (ws) => {
-      ws.on("message", (raw: Buffer) => {
-        const bytes = new Uint8Array(raw);
-        if (bytes.byteLength <= 4) return;
-        const payload = bytes.subarray(4);
-        void open(key, payload).then((frame) => {
-          if (!("t" in frame)) return;
-          received.push(frame.t);
-          if (frame.t === "hello") sendFrame(ws, key, { t: "welcome" } as HostFrame);
-        });
+    server.on("connection", (ws) => ws.on("message", (raw: Buffer) => {
+      const bytes = new Uint8Array(raw);
+      if (bytes.byteLength <= 4) return;
+      void open(key, bytes.subarray(4)).then(frame => {
+        if (!("t" in frame)) return;
+        received.push(frame.t);
+        if (frame.t === "hello") sendFrame(ws, key, { t: "welcome" } as HostFrame);
       });
-    });
-
-    const client = new CollabSocket({
-      wsUrl: `ws://127.0.0.1:${port}/r/room`,
-      role: "guest",
-      key,
-    });
-    sockets.push(client);
-    client.onOpen = () => client.send({ t: "hello" } as GuestFrame);
-    // Queued while the socket is still closed: must not precede hello, and must
-    // not reach the wire until the host has answered hello with a welcome.
-    client.send({ t: "prompt", text: "hi" } as GuestFrame);
-
+    }));
+    const client = new CollabSocket({ wsUrl: `ws://127.0.0.1:${port}/r/room`, role: "guest", key }); sockets.push(client);
+    client.onOpen = () => { void client.send({ t: "hello" } as GuestFrame); };
+    const refused = client.send({ t: "prompt", text: "hi" } as GuestFrame);
     client.connect();
-    await vi.waitFor(() => expect(received.length).toBe(2), { timeout: 5000 });
-    // hello went first; the queued prompt waited for the host's welcome.
-    expect(received).toEqual(["hello", "prompt"]);
+    await expect(refused).resolves.toBe(false);
+    await vi.waitFor(() => expect(received).toEqual(["hello"]), { timeout: 5000 });
   });
 
   it("treats a 4004 after a 4001 retry as terminal instead of retrying forever", async () => {
@@ -171,21 +157,15 @@ describe("collab socket handshake gate", () => {
     expect(connections).toBe(connectionsAfterTerminalClose);
   });
 
-  it("queues prompts but refuses abort immediately before a welcome", async () => {
+  it("refuses all prompts before welcome without closing socket", async () => {
     const key = await importRoomKey(generateRoomKey());
-    const client = new CollabSocket({
-      wsUrl: "ws://127.0.0.1:1/r/room",
-      role: "guest",
-      key,
-    });
+    const client = new CollabSocket({ wsUrl: "ws://127.0.0.1:1/r/room", role: "guest", key });
     sockets.push(client);
     const closes: Array<{ reason: string; willReconnect: boolean }> = [];
     client.onClose = (reason, willReconnect) => closes.push({ reason, willReconnect });
-
     await expect(client.send({ t: "abort" })).resolves.toBe(false);
-    const prompts = Array.from({ length: 400 }, () => client.send({ t: "prompt", text: "queued" }));
-    await expect(Promise.all(prompts.slice(256))).resolves.toEqual(Array.from({ length: 144 }, () => false));
-    expect(closes).toEqual([]);
-    expect(client.isOpen).toBe(false);
+    const prompts = Array.from({ length: 400 }, () => client.send({ t: "prompt", text: "refused" }));
+    await expect(Promise.all(prompts)).resolves.toEqual(Array.from({ length: 400 }, () => false));
+    expect(closes).toEqual([]); expect(client.isOpen).toBe(false);
   });
 });

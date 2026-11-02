@@ -116,7 +116,7 @@ afterEach(async () => {
 });
 
 describe("CAW-04 socket refuses stale lifecycle frames", () => {
-  it("refuses kill/revive/abort on an open-but-ungreeted link while prompt still queues", async () => {
+  it("refuses kill/revive/abort and prompt on an open-but-ungreeted link", async () => {
     // A live socket that never receives `welcome` is exactly the window the
     // defect buffers stale destructive frames into.
     const server = new WebSocketServer({ port: 0, host: "127.0.0.1" });
@@ -137,8 +137,7 @@ describe("CAW-04 socket refuses stale lifecycle frames", () => {
     expect(await settlesWithin(socket.send({ t: "agent-cmd", cmd: "revive", agentId: "agent-1" }), 500)).toBe(false);
     expect(await settlesWithin(socket.send({ t: "abort" }), 500)).toBe(false);
 
-    // The prompt is the one frame that must still be held for the next welcome.
-    expect(await settlesWithin(socket.send({ t: "prompt", text: "queued" }), 500)).toBe("pending");
+    expect(await settlesWithin(socket.send({ t: "prompt", text: "refused" }), 500)).toBe(false);
   });
 });
 

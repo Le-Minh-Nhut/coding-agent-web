@@ -7,6 +7,7 @@
  * the box and says so, instead of silently losing typed input.
  */
 import { describe, expect, it, vi } from "vitest";
+import React from "react";
 import { render, fireEvent, act } from "@testing-library/react";
 import { Composer } from "../../packages/guest/src/components/shell/Composer";
 import type { GuestClient } from "../../packages/guest/src/lib/client";
@@ -22,16 +23,11 @@ function stubClient(
 }
 
 function composer(client: GuestClient) {
-  return render(
-    <Composer
-      client={client}
-      phase="live"
-      readOnly={false}
-      uiRequest={null}
-      working={false}
-      queuedMessageCount={0}
-    />,
-  );
+  function Harness() {
+    const [draft, setDraft] = React.useState("");
+    return <Composer client={client} phase="live" readOnly={false} uiRequest={null} working={false} queuedMessageCount={0} draft={draft} onDraftChange={setDraft} />;
+  }
+  return render(<Harness />);
 }
 
 function typeDraft(container: HTMLElement, text: string): HTMLTextAreaElement {

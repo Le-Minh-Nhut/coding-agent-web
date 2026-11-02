@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import React from "react";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, waitFor, screen, within } from "@testing-library/react";
 import type { ReactNode } from "react";
@@ -37,16 +38,11 @@ function setupClient(): GuestClient {
 }
 
 function renderComposer(client: GuestClient) {
-  return render(
-    <Composer
-      client={client}
-      phase="live"
-      readOnly={false}
-      uiRequest={null}
-      working={false}
-      queuedMessageCount={0}
-    />,
-  );
+  function Harness() {
+    const [draft, setDraft] = React.useState("");
+    return <Composer client={client} phase="live" readOnly={false} uiRequest={null} working={false} queuedMessageCount={0} draft={draft} onDraftChange={setDraft} />;
+  }
+  return render(<Harness />);
 }
 
 describe("R30-03: prompt recovery notice accumulation and cursor monotonicity", () => {
@@ -483,10 +479,13 @@ describe("R30-04: prompt recovery when user types meanwhile and adversarial scen
       },
     });
 
-    // Prompt is now confirmed and removed from unconfirmed list
+    // Entry echo is non-destructive evidence, not proof of sender identity.
     await waitFor(() => {
-      expect(client.getSnapshot().unconfirmedPrompts.length).toBe(0);
+      expect(client.getSnapshot().unconfirmedPrompts).toHaveLength(1);
+      expect(client.getSnapshot().unconfirmedPrompts[0].status).toBe("echoed");
       expect(view.queryByRole("button", { name: "Recover" })).toBeNull();
+      expect(view.getByRole("button", { name: "Copy" })).toBeTruthy();
+      expect(view.getByRole("button", { name: "Dismiss" })).toBeTruthy();
     });
   });
 
@@ -525,7 +524,7 @@ describe("R30-04: prompt recovery when user types meanwhile and adversarial scen
         },
       },
     });
-    expect(client.getSnapshot().unconfirmedPrompts.length).toBe(0);
+    expect(client.getSnapshot().unconfirmedPrompts[0].status).toBe("echoed");
   });
 
   it("send A → send result resolves after a newer draft was entered", async () => {
@@ -658,8 +657,9 @@ describe("R30-04: prompt recovery when user types meanwhile and adversarial scen
       },
     });
 
-    // Only ONE record should be confirmed; second "continue" MUST still be unconfirmed!
-    expect(client.getSnapshot().unconfirmedPrompts.length).toBe(1);
+    // First echo settles one record; second identical attempt remains inspectable.
+    expect(client.getSnapshot().unconfirmedPrompts).toHaveLength(2);
+    expect(client.getSnapshot().unconfirmedPrompts.filter(p => p.status === "echoed")).toHaveLength(1);
   });
 
   it("Defect 3 fail-before: offline prompts beyond 50 are not evicted while held in socket queue", async () => {
@@ -762,7 +762,7 @@ describe("prompt recovery ended interactions and client replacement", () => {
     const recovered = client.recordPrompt("recover ended prompt");
     const dismissed = client.recordPrompt("dismiss ended prompt");
     client.applyFrameForTest({ t: "bye", reason: "ended" });
-    render(<Banners phase="ended" endedReason="ended" loading={null} client={client} readOnly={false} onRejoin={vi.fn()} onNewLink={vi.fn()} />);
+    render(<Banners phase="ended" endedReason="ended" loading={null} client={client} readOnly={false} draft="" onDraftChange={() => {}} onRejoin={vi.fn()} onNewLink={vi.fn()} />);
     const dialog = screen.getByRole("alertdialog", { name: "session ended" });
     expect(dialog).toBeTruthy();
     const recover = screen.getAllByRole("button", { name: "Recover" })[0];
@@ -802,13 +802,15 @@ describe("prompt recovery ended interactions and client replacement", () => {
   it("live echo in one room cannot delete another room's same-text recovery record", () => {
     const store = new PromptRecoveryStore();
     const roomA = new GuestClient(link, "tester", store);
+    roomA.applyFrameForTest({ t: "welcome", proto: 3, header: { id: "a" } as unknown as SessionHeader, state: { isStreaming: false, queuedMessageCount: 0, cwd: "", participants: [] }, agents: [], entryCount: 0 });
+    const attemptA = roomA.recordPrompt("continue");
     const roomBLink = "wss://example.com/r/CCCCCCCCCCCCCCCC." + "D".repeat(43);
     const roomB = new GuestClient(roomBLink, "tester", store);
-    const attemptA = roomA.recordPrompt("continue");
+    roomB.applyFrameForTest({ t: "welcome", proto: 3, header: { id: "b" } as unknown as SessionHeader, state: { isStreaming: false, queuedMessageCount: 0, cwd: "", participants: [] }, agents: [], entryCount: 0 });
     const attemptB = roomB.recordPrompt("continue");
     roomB.applyFrameForTest({ t: "entry", entry: { type: "message", id: "echo", parentId: null, timestamp: new Date().toISOString(), message: { role: "user", content: "continue", timestamp: Date.now() } } });
     expect(store.records.get(attemptA.id)).toMatchObject({ roomId: "AAAAAAAAAAAAAAAA", status: "queued_local" });
-    expect(store.records.has(attemptB.id)).toBe(false);
+    expect(store.records.get(attemptB.id)).toMatchObject({ status: "echoed" });
   });
 
   it("preserves unresolved record across Rejoin success, failed Rejoin and repeated replacement", () => {
@@ -834,7 +836,7 @@ describe("prompt recovery ended interactions and client replacement", () => {
     const client = setupClient();
     client.recordPrompt("tab order prompt");
     client.applyFrameForTest({ t: "bye", reason: "ended" });
-    const { container } = render(<Banners phase="ended" endedReason="ended" loading={null} client={client} readOnly={false} onRejoin={vi.fn()} onNewLink={vi.fn()} />);
+    const { container } = render(<Banners phase="ended" endedReason="ended" loading={null} client={client} readOnly={false} draft="" onDraftChange={() => {}} onRejoin={vi.fn()} onNewLink={vi.fn()} />);
     const dialog = screen.getByRole("alertdialog", { name: "session ended" });
     const controls = ["Recover", "Copy", "Dismiss", "Rejoin", "New link"].map(name => screen.getByRole("button", { name }));
     const positions = controls.map(el => [...dialog.querySelectorAll("button")].indexOf(el));
@@ -890,7 +892,7 @@ describe("prompt recovery ended interactions and client replacement", () => {
     const client = setupClient();
     const prompt = client.recordPrompt("copy this manually");
     Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: vi.fn().mockRejectedValue(new Error("clipboard denied")) } });
-    render(<Banners phase="ended" endedReason="ended" loading={null} client={client} readOnly={false} onRejoin={vi.fn()} onNewLink={vi.fn()} />);
+    render(<Banners phase="ended" endedReason="ended" loading={null} client={client} readOnly={false} draft="" onDraftChange={() => {}} onRejoin={vi.fn()} onNewLink={vi.fn()} />);
     fireEvent.click(screen.getByRole("button", { name: "Copy" }));
     expect((await screen.findByText(/Clipboard unavailable; select and copy prompt text manually/)).textContent).toContain("Clipboard unavailable; select and copy prompt text manually.");
     expect(client.getSnapshot().unconfirmedPrompts.some(p => p.id === prompt.id)).toBe(true);
@@ -959,7 +961,7 @@ describe("App prompt recovery lifecycle integration", () => {
     expect(original.getSnapshot().unconfirmedPrompts.find(p => p.id === prompt.id)?.status).toBe("recovered");
     fireEvent.click(screen.getByRole("button", { name: "Rejoin" }));
     await waitFor(() => expect(clients).toHaveLength(2));
-    expect(clients[1].getSnapshot().unconfirmedPrompts.find(p => p.id === prompt.id)?.status).toBe("unconfirmed");
-    expect((screen.getByRole("textbox") as HTMLTextAreaElement).value).toBe("");
+    expect(clients[1].getSnapshot().unconfirmedPrompts.find(p => p.id === prompt.id)?.status).toBe("recovered");
+    expect((screen.getByRole("textbox") as HTMLTextAreaElement).value).toBe("recover through overlay");
   });
 });
