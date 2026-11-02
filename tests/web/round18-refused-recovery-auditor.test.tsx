@@ -43,7 +43,7 @@ it("V18 refused text survives actual App Back/reopen navigation along with its n
 });
 it("V18 manual Recover preserves an occupied draft and keeps refused text recoverable",async()=>{
  const f=await fixture();f.type("REFUSED_A");await f.send();f.type("DRAFT_B");await f.refuse();
- fireEvent.click(f.view.getByRole("button",{name:"Recover"}));
+ fireEvent.click(f.view.getByRole("button",{name:"Recover to draft"}));
  expect(f.input().value).toBe("DRAFT_B\n\nREFUSED_A");
  expect(f.view.container.textContent).toContain("REFUSED_A");
 });

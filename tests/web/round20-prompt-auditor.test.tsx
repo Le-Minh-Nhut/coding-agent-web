@@ -49,8 +49,8 @@ it.each([false,true])("V20 one real collab-prompt echo acknowledges only one sam
  // entry. OMP emits a web prompt as custom_message/collab-prompt, not message.
  await f.emit({t:"snapshot-chunk",entries:[row("old",historical?"continue":"unrelated old row")],final:true});
  await f.emit({t:"entry",entry:collabRow("accepted-new","continue")});
- // There is exactly one new host receipt, plus one still-unconfirmed local
- // send. The baseline row, when same-text, is additional to those two rows.
+ // One identical live entry settles only one local attempt, and the settled copy remains inspectable.
+ expect(f.recovery().match(/Echoed — continue/g)).toHaveLength(1);
  const rows=f.view.getAllByText("continue").length;
  console.log("AUDIT20 same-text bootstrap real-wire order",JSON.stringify({historical,draft:f.input().value,newHostReceipts:1,localSends:2,rows,expectedRows:historical?3:2}));
  expect(f.input().value).toBe("NEW_UNSENT_DRAFT");
@@ -152,8 +152,8 @@ it("V20 an unrelated host error does not falsely refuse the pending prompt",asyn
  expect(f.recovery()).toBe("");expect(f.input().value).toBe("NEW_UNSENT_B");
 });
 
-// A genuine live collab-prompt echo clears recovery. Snapshot dump rows remain history.
-it("V20 a real collab-prompt entry echo clears an unconfirmed strip item",async()=>{
+// A genuine live echo settles one matching attempt; identity is unknowable on this protocol.
+it("V20 a real collab-prompt entry echo keeps the matching attempt inspectable",async()=>{
  const f=await fixture(0,true);
  await f.send("UNCONFIRMED_PROMPT_A");
  f.type("UNSENT_DRAFT_B");
@@ -161,13 +161,41 @@ it("V20 a real collab-prompt entry echo clears an unconfirmed strip item",async(
  fireEvent.click(await screen.findByText("Chat"));
  await waitFor(()=>expect(f.sockets).toHaveLength(2));
  await f.emit(welcome(0));
- const promoted=f.recovery();
+ expect(f.recovery()).toContain("Unconfirmed — host receipt unknown; may already have executed —");
  await f.emit({t:"entry",entry:collabRow("echo-collab-real","UNCONFIRMED_PROMPT_A")});
- const afterEcho=f.recovery();
- console.log("AUDIT20 collab echo ack",JSON.stringify({promoted,afterEcho}));
- expect(promoted).toContain("UNCONFIRMED_PROMPT_A");
- expect(afterEcho).toBe("");
+ expect(f.recovery()).toContain("UNCONFIRMED_PROMPT_A");
+ expect(f.recovery()).toContain("Echoed");
+ await f.emit(refusal);
+ expect(f.recovery()).toContain("Echoed — UNCONFIRMED_PROMPT_A");
 });
+it("V32 repeated recovery keeps occupied draft once; same text with different id recovers independently",async()=>{
+ const f=await fixture(0,true);
+ await f.send("REFUSAL_A");
+ f.type("NEW_DRAFT_B");
+ await f.emit(refusal);
+ await waitFor(()=>expect(f.recovery()).toContain("Refused — REFUSAL_A"));
+ const recover=screen.getByRole("button",{name:"Recover to draft"});
+ fireEvent.click(recover);
+ expect(f.input().value).toBe("NEW_DRAFT_B\n\nREFUSAL_A");
+ fireEvent.click(screen.getByRole("button",{name:"Recover to draft"}));
+ expect(f.input().value).toBe("NEW_DRAFT_B\n\nREFUSAL_A");
+ await f.send("REFUSAL_A");
+ f.type("NEW_DRAFT_C");
+ await f.emit(refusal);
+ await waitFor(()=>expect(screen.getAllByRole("button",{name:"Recover to draft"})).toHaveLength(2));
+ fireEvent.click(screen.getAllByRole("button",{name:"Recover to draft"})[1]!);
+ expect(f.input().value).toBe("NEW_DRAFT_C\n\nREFUSAL_A");
+});
+it("V32 dismissed records are removed by id and refused rows expose Dismiss",async()=>{
+ const f=await fixture(0,true);
+ await f.send("REFUSAL_A");
+ f.type("NEW_DRAFT_B");
+ await f.emit(refusal);
+ await waitFor(()=>expect(f.recovery()).toContain("Refused — REFUSAL_A"));
+ fireEvent.click(screen.getByRole("button",{name:"Dismiss"}));
+ expect(f.recovery()).toBe("");
+});
+
 it.each(["message","collab-prompt"] as const)("V20 a same-text dump row never acknowledges a pre-snapshot send (%s)",async(kind)=>{
  const f=await fixture(2,true);
  await f.send("DUMP_UNCERTAIN");
@@ -199,7 +227,7 @@ it("V20 saved mode keeps Copy but hides Recover, so draft staging cannot stomp t
  f.type("KEEP_MY_DRAFT");
  await f.emit(refusal);
  expect(f.recovery()).toContain("REFUSED_IN_SAVED");
- expect(screen.getByRole("button",{name:"Recover"})).not.toBeNull();
+ expect(screen.getByRole("button",{name:"Recover to draft"})).not.toBeNull();
  // Host gone: saved mode, composer hidden. Recover would call updateDraft and
  // stomp the App-owned draft (the only copy of the user's newer text).
  await act(async()=>f.sockets.at(-1)!.onClose?.("closed",false));
@@ -208,7 +236,7 @@ it("V20 saved mode keeps Copy but hides Recover, so draft staging cannot stomp t
  await act(async()=>fireEvent.click(screen.getByRole("button",{name:"Retry"})));
  await screen.findByText(/Saved transcript —/);
  await act(async()=>fireEvent.click(screen.getByRole("button",{name:"Copy"})));
- const recoverHidden=screen.queryByRole("button",{name:"Recover"})===null;
+ const recoverHidden=screen.queryByRole("button",{name:"Recover to draft"})===null;
  const copyPresent=screen.queryAllByRole("button",{name:/Copy|Copied|Copy failed/}).length>0;
  const composerHidden=f.view.container.querySelector("textarea.composer-input")===null;
  // Back live: Recover returns and the draft the App always owned is intact.
@@ -217,7 +245,7 @@ it("V20 saved mode keeps Copy but hides Recover, so draft staging cannot stomp t
  await waitFor(()=>expect(f.sockets).toHaveLength(2));
  await f.emit(welcome(0));
  const draftAfter=f.input().value;
- const recoverBack=screen.queryByRole("button",{name:"Recover"})!==null;
+ const recoverBack=screen.queryByRole("button",{name:"Recover to draft"})!==null;
  console.log("AUDIT20 saved-mode recovery gate",JSON.stringify({recoverHidden,copyPresent,composerHidden,draftAfter,recoverBack}));
  expect(recoverHidden).toBe(true);
  expect(copyPresent).toBe(true);

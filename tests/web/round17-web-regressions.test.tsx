@@ -95,7 +95,7 @@ describe("V17-02 refused prompt recovery", () => {
     expect(composer().value).toBe("DRAFT_C");
     expect(view.container.querySelectorAll(".message-card.user")).toHaveLength(0);
     expect(view.container.querySelector(".refused-prompt")?.textContent).toContain("PROMPT_B");
-    fireEvent.click(screen.getByRole("button", { name: "Recover" }));
+    fireEvent.click(screen.getByRole("button", { name: "Recover to draft" }));
     expect(composer().value).toBe("DRAFT_C\n\nPROMPT_B");
     expect(onDraftChange).toHaveBeenLastCalledWith("DRAFT_C\n\nPROMPT_B");
     expect(view.container.querySelector(".refused-prompt")?.textContent).toContain("PROMPT_B");
@@ -106,7 +106,7 @@ describe("V17-02 refused prompt recovery", () => {
     await refuseTypingDraft(composer);
     fireEvent.change(composer(), { target: { value: "" } });
     expect(view.container.querySelector(".refused-prompt")).not.toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "Recover" }));
+    fireEvent.click(screen.getByRole("button", { name: "Recover to draft" }));
     expect(composer().value).toBe("PROMPT_B");
   });
 

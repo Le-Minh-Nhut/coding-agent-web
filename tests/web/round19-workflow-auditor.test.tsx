@@ -89,8 +89,8 @@ it("V19 a post-snapshot send is acknowledged by its own echo as before",async()=
  await f.emit({t:"event",event:{type:"message_end",message:{role:"user",content:"hi",timestamp:1}}});
  await f.emit({t:"error",message:"prompting is unavailable until the host finishes starting up"});
  const recovery=f.view.container.querySelector(".refused-prompt")?.textContent??"";
- console.log("AUDIT19 post snapshot refusal",JSON.stringify({draft:composer.value,recovery,userRows:f.view.container.querySelectorAll(".message-card.user").length}));
- expect(recovery).toBe("");
+ console.log("AUDIT19 post snapshot receipt",JSON.stringify({draft:composer.value,recovery,userRows:f.view.container.querySelectorAll(".message-card.user").length}));
+ expect(recovery).toContain("Echoed — hi");
  expect(composer.value).toBe("");
 });
 
@@ -246,14 +246,15 @@ it.each(["entry","message_end","collab"] as const)("V19-fix1 a live echo during 
  // A is genuinely acknowledged: the NEXT refusal belongs to B, not to A.
  fireEvent.change(composer,{target:{value:"B_REFUSED"}});
  await act(async()=>fireEvent.click(f.view.getByRole("button",{name:"Send"})));
+ await act(async()=>{await Promise.resolve();});
  fireEvent.change(composer,{target:{value:"my newer draft"}});
  await f.emit({t:"error",message:"prompting is unavailable until the host finishes starting up"});
- const recovery=f.view.container.querySelector(".refused-prompt")?.textContent??"";
+ await waitFor(()=>expect([...f.view.container.querySelectorAll(".refused-prompt")].map((item)=>item.textContent).join("\n")).toContain("B_REFUSED"));
+ const recovery=[...f.view.container.querySelectorAll(".refused-prompt")].map((item)=>item.textContent).join("\n");
  console.log("AUDIT19-fix1 refusal attribution",JSON.stringify({kind,recovery,draft:composer.value,aRows:f.view.getAllByText("A_ACCEPTED").length}));
  expect(recovery).toContain("B_REFUSED");
- expect(recovery).not.toContain("A_ACCEPTED");
+ expect(recovery).toContain("Echoed — A_ACCEPTED");
  expect(composer.value).toBe("my newer draft");
- expect(f.view.getAllByText("A_ACCEPTED")).toHaveLength(1);
 });
 
 /** Snapshot rows remain uncertain regardless of host timestamp. */
