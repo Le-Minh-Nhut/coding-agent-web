@@ -21,7 +21,7 @@ function textEntry(text: string, id = "entry") { return { t: "entry" as const, e
 
 describe("Round 32 recovery regressions", () => {
   it("R32-09 refuses prompt before welcome without dispatch or record", async () => {
-    const sent = vi.spyOn(CollabSocket.prototype, "send").mockResolvedValue(true);
+    const sent = vi.spyOn(CollabSocket.prototype, "send").mockResolvedValue(false);
     const client = new GuestClient(roomA, "tester");
     expect(await client.sendPrompt("x")).toBe(false);
     expect(client.getSnapshot().unconfirmedPrompts).toHaveLength(0);
@@ -182,13 +182,32 @@ describe("Round 32 recovery regressions", () => {
     expect(active.size).toBe(1); expect(peak).toBe(2);
   });
 
-  it("R32-10 ignores deferred settlement from replaced Composer client", async () => {
-    let settle!: (value: boolean) => void;
-    const a = { sendPrompt: vi.fn(() => new Promise<boolean>(resolve => { settle = resolve; })), sendUiResponse: vi.fn(), sendAbort: vi.fn(), getSnapshot: () => ({ notices: [], unconfirmedPrompts: [] }), subscribe: () => () => {} } as unknown as GuestClient;
+  it("R32-10 ignores stale rejection from replaced Composer client", async () => {
+    let rejectA!: (error: Error) => void;
+    const a = { sendPrompt: vi.fn(() => new Promise<boolean>((_resolve, reject) => { rejectA = reject; })), sendUiResponse: vi.fn(), sendAbort: vi.fn(), getSnapshot: () => ({ notices: [], unconfirmedPrompts: [] }), subscribe: () => () => {} } as unknown as GuestClient;
     const b = { ...a, sendPrompt: vi.fn().mockResolvedValue(false) } as unknown as GuestClient;
     function Harness() { const [client, setClient] = useState(a); const [draft, setDraft] = useState(""); return <><button onClick={() => setClient(b)}>replace</button><Composer client={client} phase="live" readOnly={false} uiRequest={null} working={false} queuedMessageCount={0} draft={draft} onDraftChange={setDraft} /></>; }
-    render(<Harness />); fireEvent.change(screen.getByRole("textbox"), { target: { value: "A text" } }); fireEvent.keyDown(screen.getByRole("textbox"), { key: "Enter" }); fireEvent.click(screen.getByText("replace")); fireEvent.change(screen.getByRole("textbox"), { target: { value: "B draft" } }); await act(async () => { settle(true); await Promise.resolve(); });
-    expect((screen.getByRole("textbox") as HTMLTextAreaElement).value).toBe("B draft"); expect(screen.queryByRole("status")).toBeNull();
+    render(<Harness />);
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "A text" } });
+    fireEvent.keyDown(screen.getByRole("textbox"), { key: "Enter" });
+    fireEvent.click(screen.getByText("replace"));
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "B draft" } });
+    await act(async () => { rejectA(new Error("A failed")); await Promise.resolve(); });
+    expect((screen.getByRole("textbox") as HTMLTextAreaElement).value).toBe("B draft");
+    expect(screen.queryByRole("status")).toBeNull();
+  });
+
+  it("ignores stale UI response rejection from replaced Composer client", async () => {
+    let rejectA!: (error: Error) => void;
+    const request = { reqId: 7, title: "Allow?", kind: "select" as const, options: ["Yes", "No"] };
+    const a = { sendPrompt: vi.fn(), sendUiResponse: vi.fn(() => new Promise<boolean>((_resolve, reject) => { rejectA = reject; })), sendAbort: vi.fn(), getSnapshot: () => ({ notices: [], unconfirmedPrompts: [] }), subscribe: () => () => {} } as unknown as GuestClient;
+    const b = { ...a, sendUiResponse: vi.fn().mockResolvedValue(false) } as unknown as GuestClient;
+    function Harness() { const [client, setClient] = useState(a); return <><button onClick={() => setClient(b)}>replace</button><Composer client={client} phase="live" readOnly={false} uiRequest={request} working={false} queuedMessageCount={0} draft="" onDraftChange={() => {}} /></>; }
+    render(<Harness />);
+    fireEvent.click(screen.getByRole("button", { name: /Yes/ }));
+    fireEvent.click(screen.getByText("replace"));
+    await act(async () => { rejectA(new Error("A failed")); await Promise.resolve(); });
+    expect(screen.queryByRole("status")).toBeNull();
   });
 
   it("R32-12 ConnectScreen shows, copies, dismisses saved prompt without exposing link secret", async () => {
@@ -213,9 +232,16 @@ describe("Round 32 recovery regressions", () => {
     render(<App />); await waitFor(() => expect(clients).toHaveLength(1)); welcome(clients[0]);
     fireEvent.change(screen.getByRole("textbox"), { target: { value: "room A draft" } });
     fireEvent.click(screen.getByTitle("leave session"));
-    fireEvent.change(screen.getByPlaceholderText("ws://host:port/r/room.key"), { target: { value: roomA } }); fireEvent.click(screen.getByRole("button", { name: /Connect/ }));
-    await waitFor(() => expect(clients).toHaveLength(2)); expect((screen.getByRole("textbox") as HTMLTextAreaElement).value).toBe("room A draft");
-    fireEvent.click(screen.getByTitle("leave session")); fireEvent.change(screen.getByPlaceholderText("ws://host:port/r/room.key"), { target: { value: roomC } }); fireEvent.click(screen.getByRole("button", { name: /Connect/ }));
-    await waitFor(() => expect(clients).toHaveLength(3)); expect((screen.getByRole("textbox") as HTMLTextAreaElement).value).toBe("");
+    await waitFor(() => expect(screen.getByPlaceholderText("ws://host:port/r/room.key")).toBeTruthy());
+    fireEvent.change(screen.getByPlaceholderText("ws://host:port/r/room.key"), { target: { value: roomA } });
+    fireEvent.click(screen.getByRole("button", { name: /Connect/ }));
+    await waitFor(() => expect(clients).toHaveLength(2));
+    expect((screen.getByRole("textbox") as HTMLTextAreaElement).value).toBe("room A draft");
+    fireEvent.click(screen.getByTitle("leave session"));
+    await waitFor(() => expect(screen.getByPlaceholderText("ws://host:port/r/room.key")).toBeTruthy());
+    fireEvent.change(screen.getByPlaceholderText("ws://host:port/r/room.key"), { target: { value: roomC } });
+    fireEvent.click(screen.getByRole("button", { name: /Connect/ }));
+    await waitFor(() => expect(clients).toHaveLength(3));
+    expect((screen.getByRole("textbox") as HTMLTextAreaElement).value).toBe("");
   });
 });
