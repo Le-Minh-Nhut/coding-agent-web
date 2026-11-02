@@ -11,7 +11,7 @@ export interface ComposerProps {
   readOnly: boolean;
   /** Pending host-side UI request this guest can answer. */
   uiRequest: CollabUiRequest | null;
-  /** Host agent turn in flight. */
+  uiResponsePending?: boolean;
   working: boolean;
   /** App-owned draft, retained across client replacement. */
   queuedMessageCount: number;
@@ -130,6 +130,7 @@ export const Composer = memo(function Composer({
   phase,
   readOnly,
   uiRequest,
+  uiResponsePending = false,
   working,
   queuedMessageCount,
   draft: text,
@@ -198,7 +199,8 @@ export const Composer = memo(function Composer({
       if (currentClientRef.current !== sendingClient) return;
       if (!accepted) { setSendError("prompt not sent — press send to retry"); return; }
       // Dispatch means draft is no longer only copy of recovered prompts it carried.
-      for (const id of recoveredDraftsRef.current.keys()) {
+      // A recovered record can outlive the composer that added it; use shared store identity.
+      for (const id of sendingClient.getRecoveredPromptIds?.() ?? []) {
         const prompt = recovered.find(item => item.id === id);
         if (prompt && ("\n" + submitted + "\n").includes("\n" + prompt.text + "\n")) {
           sendingClient.dismissPrompt(id);
@@ -213,7 +215,7 @@ export const Composer = memo(function Composer({
   }, [client, live, readOnly, text]);
 
   const submitUiResponse = useCallback((reqId: number, value?: string): void => {
-    if (answeringClientRef.current === client) return;
+    if (uiResponsePending || answeringClientRef.current === client) return;
     answeringClientRef.current = client;
     setUiResponseError(null);
     const answeringClient = client;
@@ -221,7 +223,7 @@ export const Composer = memo(function Composer({
       if (currentClientRef.current === answeringClient && !accepted) setUiResponseError("response not sent — retry or check connection");
     }, () => { if (currentClientRef.current === answeringClient) setUiResponseError("response not sent — retry or check connection"); })
       .finally(() => { if (currentClientRef.current === answeringClient && answeringClientRef.current === answeringClient) answeringClientRef.current = null; });
-  }, [client]);
+  }, [client, uiResponsePending]);
 
 	const handleRecover = (prompt: UnconfirmedPrompt): void => {
     if (prompt.status === "recovered" || recoveringRef.current.has(prompt.id)) return;
@@ -260,6 +262,7 @@ export const Composer = memo(function Composer({
   if (uiRequest && canPrompt) {
     return (
       <div className="sh-composer sh-composer-ask">
+        {uiResponsePending && <div className="sh-ask-title" role="status">Response sent — awaiting host</div>}
         <div className="sh-ask-title">{uiRequest.title}</div>
         {uiRequest.kind === "select" ? (
           <div className="sh-ask-options">
@@ -341,6 +344,9 @@ export const Composer = memo(function Composer({
 	const activeUnconfirmed = client.getSnapshot?.().unconfirmedPrompts ?? localUnconfirmed;
 	// Present means exact contiguous whole-line block; edits elsewhere preserve it, deletion re-enables Recover, and substrings do not count.
 	const blockPresent = (draft: string, text: string): boolean => ("\n" + draft + "\n").includes("\n" + text + "\n");
+	for (const prompt of activeUnconfirmed) {
+		if (prompt.status === "recovered" && blockPresent(text, prompt.text)) recoveredDraftsRef.current.set(prompt.id, text);
+	}
 	const visibleRecoveries = activeUnconfirmed.filter(p => p.status !== "recovered" && !blockPresent(text, p.text));
 
   return (
@@ -375,7 +381,7 @@ export const Composer = memo(function Composer({
           onChange={(e) => {
             const nextText = e.target.value;
             for (const prompt of activeUnconfirmed) {
-              if (prompt.status === "recovered" && !blockPresent(nextText, prompt.text)) {
+              if (recoveredDraftsRef.current.has(prompt.id) && prompt.status === "recovered" && !blockPresent(nextText, prompt.text)) {
                 recoveringRef.current.delete(prompt.id);
                 recoveredDraftsRef.current.delete(prompt.id);
                 client.markPromptUnrecovered?.(prompt.id);

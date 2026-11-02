@@ -48,6 +48,7 @@ export interface Notice {
 }
 
 export class PromptRecoveryStore {
+	readonly recoveredPromptIds = new Set<number>();
 	readonly #listeners = new Set<() => void>();
 	readonly records = new Map<number, UnconfirmedPrompt>();
 	#activeGeneration = 0;
@@ -127,8 +128,10 @@ export interface GuestSnapshot {
 	working: boolean;
 	/** True when this guest joined through a read-only (view) link. */
 	readOnly: boolean;
-	/** Pending host-side UI request (`ask` select/editor) this guest can answer. */
-	uiRequest: CollabUiRequest | null;
+ 	/** Pending host-side UI request (`ask` select/editor) this guest can answer. */
+ 	uiRequest: CollabUiRequest | null;
+ 	/** Current UI response was sent locally and awaits host settlement. */
+ 	uiResponsePending: boolean;
 	/** Capped at 50, newest last. */
 	notices: readonly Notice[];
 	/** Snapshot download progress between `welcome` and its final chunk, else null. */
@@ -220,6 +223,7 @@ export class GuestClient {
 	#readOnly = false;
 	#uiRequest: CollabUiRequest | null = null;
 	#uiRequestQueue: CollabUiRequest[] = [];
+ 	#pendingUiResponses = new Set<number>();
 	#notices: readonly Notice[] = [];
 	readonly #recoveryStore: PromptRecoveryStore;
 	readonly #unsubscribeRecoveryStore: () => void;
@@ -260,8 +264,11 @@ export class GuestClient {
 			if (this.#isCurrentClient()) this.#applyFrameSafe(frame);
 		};
 		this.#socket.onClose = (reason, willReconnect) => {
-			if (this.#isCurrentClient()) this.#handleClose(reason, willReconnect);
-		};
+ 			if (this.#isCurrentClient()) {
+ 				this.#pendingUiResponses.clear();
+ 				this.#handleClose(reason, willReconnect);
+ 			}
+ 		};
 		this.#snapshot = this.#buildSnapshot();
 	}
 
@@ -282,6 +289,8 @@ export class GuestClient {
 		this.#closed = true;
 		this.#clearWelcomeTimer();
 		this.#clearSnapshotProgressTimer();
+ 		this.#cancelFrameCommit?.();
+ 		this.#cancelFrameCommit = null;
 		this.#unsubscribeRecoveryStore();
 		this.#socket.close();
 	}
@@ -299,7 +308,7 @@ export class GuestClient {
 
 	/** false means known local refusal before dispatch; the caller keeps the draft. */
 	async sendPrompt(text: string): Promise<boolean> {
-		if (!this.#isCurrentClient() || !this.#welcomed) return false;
+ 		if (!this.#isCurrentClient() || !this.#welcomed || this.#readOnly) return false;
 		const prompt = this.recordPrompt(text);
 		if (prompt.id === 0) return false;
 		try {
@@ -337,70 +346,94 @@ export class GuestClient {
 		this.#updatePrompt(id, { status: "refused", error });
 	}
 
-	markPromptRecovered(id: number): void { this.#updatePrompt(id, { status: "recovered" }); }
-	markPromptUnrecovered(id: number): void { this.#updatePrompt(id, { status: "unconfirmed" }); }
-	releaseRecoveredPrompts(ids: readonly number[]): void {
-		if (!this.#isCurrentClient()) return;
-		for (const id of ids) {
-			const prompt = this.#recoveryStore.records.get(id);
-			if (prompt?.roomId === this.#roomId && prompt.status === "recovered") this.#recoveryStore.records.set(id, { ...prompt, status: "unconfirmed" });
-		}
-		this.#recoveryStore.changed();
-		this.#unconfirmedPrompts = this.#promptList();
-		this.#commit();
-	}
-	refreshRecoverySnapshot(): void {
-		this.#unconfirmedPrompts = this.#promptList();
-		this.#commit();
-	}
-	dismissPrompt(id: number): void {
+	markPromptRecovered(id: number): void {
 		if (!this.#isCurrentClient()) return;
 		const prompt = this.#recoveryStore.records.get(id);
 		if (!prompt) return;
-		// User dismissal follows stable id across rooms; host-event mutations remain room-scoped.
-		this.#recoveryStore.records.delete(id);
+		this.#recoveryStore.records.set(id, { ...prompt, status: "recovered" });
+		this.#recoveryStore.recoveredPromptIds.add(id);
 		this.#recoveryStore.changed();
 		this.#unconfirmedPrompts = this.#promptList();
 		this.#commit();
 	}
-	#promptList(): readonly UnconfirmedPrompt[] {
-		return [...this.#recoveryStore.records.values()].filter(prompt => prompt.roomId === this.#roomId);
-	}
-	#isCurrentClient(): boolean {
-		return this.#recoveryStore.isCurrent(this.#roomId, this.#clientGeneration);
-	}
-	restoreRecoveryOwnership(): void { this.#recoveryStore.restore(this.#roomId, this.#clientGeneration); }
-	#updatePrompt(id: number, patch: Partial<UnconfirmedPrompt>): void {
-		if (!this.#isCurrentClient()) return;
-		const prompt = this.#recoveryStore.records.get(id);
-		if (!prompt || prompt.roomId !== this.#roomId) return;
-		this.#recoveryStore.records.set(id, { ...prompt, ...patch });
-		this.#unconfirmedPrompts = this.#promptList();
-		this.#commit();
-	}
+ 	markPromptUnrecovered(id: number): void {
+ 		if (!this.#isCurrentClient()) return;
+ 		const prompt = this.#recoveryStore.records.get(id);
+ 		if (!prompt) return;
+ 		this.#recoveryStore.records.set(id, { ...prompt, status: "unconfirmed" });
+ 		this.#recoveryStore.recoveredPromptIds.delete(id);
+ 		this.#recoveryStore.changed();
+ 		this.#unconfirmedPrompts = this.#promptList();
+ 		this.#commit();
+ 	}
+ 	getRecoveredPromptIds(): readonly number[] {
+ 		return [...this.#recoveryStore.recoveredPromptIds];
+ 	}
+ releaseRecoveredPrompts(ids: readonly number[]): void {
+   if (!this.#isCurrentClient()) return;
+   for (const id of ids) {
+     const prompt = this.#recoveryStore.records.get(id);
+     if (prompt?.roomId === this.#roomId && prompt.status === "recovered") this.#recoveryStore.records.set(id, { ...prompt, status: "unconfirmed" });
+   }
+   this.#recoveryStore.changed();
+   this.#unconfirmedPrompts = this.#promptList();
+   this.#commit();
+ }
+ refreshRecoverySnapshot(): void {
+   this.#unconfirmedPrompts = this.#promptList();
+   this.#commit();
+ }
+ dismissPrompt(id: number): void {
+   if (!this.#isCurrentClient()) return;
+   const prompt = this.#recoveryStore.records.get(id);
+   if (!prompt) return;
+   // User dismissal follows stable id across rooms; host-event mutations remain room-scoped.
+   this.#recoveryStore.records.delete(id);
+   this.#recoveryStore.changed();
+		this.#recoveryStore.recoveredPromptIds.delete(id);
+   this.#unconfirmedPrompts = this.#promptList();
+   this.#commit();
+ }
+ #promptList(): readonly UnconfirmedPrompt[] {
+   return [...this.#recoveryStore.records.values()].filter(prompt => prompt.roomId === this.#roomId);
+ }
+ #isCurrentClient(): boolean {
+   return this.#recoveryStore.isCurrent(this.#roomId, this.#clientGeneration);
+ }
+ restoreRecoveryOwnership(): void { this.#recoveryStore.restore(this.#roomId, this.#clientGeneration); }
+ #updatePrompt(id: number, patch: Partial<UnconfirmedPrompt>): void {
+   if (!this.#isCurrentClient()) return;
+   const prompt = this.#recoveryStore.records.get(id);
+   if (!prompt || prompt.roomId !== this.#roomId) return;
+   this.#recoveryStore.records.set(id, { ...prompt, ...patch });
+   this.#unconfirmedPrompts = this.#promptList();
+   this.#commit();
+ }
 
 
-	async sendUiResponse(reqId: number, value?: CollabUiResponseValue): Promise<boolean> {
-		const sent = await this.#socket.send({ t: "ui-response", reqId, value });
-		if (!sent) {
-			this.#pushNotice("error", "response not sent — connection lost or offline");
-			this.#commit();
-			return false;
-		}
-		if (this.#uiRequest?.reqId === reqId) {
-			this.#showNextUiRequest();
-			this.#commit();
-		}
-		return true;
-	}
+ 	async sendUiResponse(reqId: number, value?: CollabUiResponseValue): Promise<boolean> {
+ 		if (!this.#isCurrentClient() || this.#readOnly || this.#pendingUiResponses.has(reqId)) return false;
+ 		this.#pendingUiResponses.add(reqId);
+ 		const sent = await this.#socket.send({ t: "ui-response", reqId, value });
+ 		if (!sent || !this.#isCurrentClient()) {
+ 			this.#pendingUiResponses.delete(reqId);
+ 			if (!sent && this.#isCurrentClient()) {
+ 				this.#pushNotice("error", "response not sent — connection lost or offline");
+ 				this.#commit();
+ 			}
+ 			return false;
+ 		}
+ 		this.#commit();
+ 		return true;
+ 	}
 
-	sendAbort(): Promise<boolean> {
-		return this.#socket.send({ t: "abort" });
-	}
+ 	sendAbort(): Promise<boolean> {
+ 		return this.#readOnly ? Promise.resolve(false) : this.#socket.send({ t: "abort" });
+ 	}
 
-	sendAgentCmd(cmd: "chat" | "kill" | "revive", agentId: string, text?: string): Promise<boolean> {
-		return this.#socket.send({ t: "agent-cmd", cmd, agentId, text });
-	}
+ 	sendAgentCmd(cmd: "chat" | "kill" | "revive", agentId: string, text?: string): Promise<boolean> {
+ 		return this.#readOnly ? Promise.resolve(false) : this.#socket.send({ t: "agent-cmd", cmd, agentId, text });
+ 	}
 
 	/**
 	 * Incremental subagent-transcript read. Resolves a {@link TranscriptResult}
@@ -434,10 +467,10 @@ export class GuestClient {
 	 * `flush` (default), a commit deferred to the next animation frame is
 	 * published now, so the snapshot reflects the frame on return.
 	 */
-	applyFrameForTest(frame: HostFrame, options: { flush?: boolean } = {}): void {
-		this.#applyFrameSafe(frame);
-		if ((options.flush ?? true) && this.#cancelFrameCommit !== null) this.#commit();
-	}
+ 	applyFrameForTest(frame: HostFrame, options: { flush?: boolean } = {}): void {
+ 		if (this.#isCurrentClient()) this.#applyFrameSafe(frame);
+ 		if ((options.flush ?? true) && this.#cancelFrameCommit !== null) this.#commit();
+ 	}
 
 	#armWelcomeTimer(): void {
 		this.#clearWelcomeTimer();
@@ -460,8 +493,10 @@ export class GuestClient {
 	}
 
 	#handleClose(reason: string, willReconnect: boolean): void {
-		this.#clearWelcomeTimer();
-		this.#clearSnapshotProgressTimer();
+ 		this.#pendingUiResponses.clear();
+ 		// why: host.ts v18.15.0 re-presents unanswered approvals after welcome; local acceptance from replaced connection is not settlement.
+ 		this.#clearWelcomeTimer();
+ 		this.#clearSnapshotProgressTimer();
 		if (this.#phase === "ended") return;
 		if (willReconnect) {
 			this.#phase = "reconnecting";
@@ -548,10 +583,7 @@ export class GuestClient {
 				this.#activeTools = new Map();
 				this.#progress = new Map();
 				this.#lifecycle = new Map();
-				this.#unlistedBusIds.clear();
-				this.#working = frame.state.isStreaming;
 				this.#readOnly = frame.readOnly === true;
-				this.#clearUiRequests();
 				this.#welcomed = true;
 				this.#clearWelcomeTimer();
 				if (frame.entryCount === 0) {
@@ -640,14 +672,20 @@ export class GuestClient {
 					this.#lifecycle = new Map(this.#lifecycle).set(payload.id, payload);
 				}
 				break;
-			case "ui-request":
-				if (this.#uiRequest) this.#uiRequestQueue = [...this.#uiRequestQueue, frame.request];
-				else this.#uiRequest = frame.request;
-				break;
-			case "ui-request-end":
-				if (this.#uiRequest?.reqId === frame.reqId) this.#showNextUiRequest();
-				else this.#uiRequestQueue = this.#uiRequestQueue.filter(request => request.reqId !== frame.reqId);
-				break;
+ 			case "ui-request":
+ 				if (this.#uiRequest?.reqId === frame.request.reqId || this.#uiRequestQueue.some(request => request.reqId === frame.request.reqId)) break;
+ 				if (this.#uiRequest) this.#uiRequestQueue = [...this.#uiRequestQueue, frame.request];
+ 				else this.#uiRequest = frame.request;
+ 				break;
+ 			case "ui-request-end":
+ 				if (this.#uiRequest?.reqId === frame.reqId) {
+ 					this.#pendingUiResponses.delete(frame.reqId);
+ 					this.#showNextUiRequest();
+ 				} else if (this.#uiRequestQueue.some(request => request.reqId === frame.reqId)) {
+ 					this.#pendingUiResponses.delete(frame.reqId);
+ 					this.#uiRequestQueue = this.#uiRequestQueue.filter(request => request.reqId !== frame.reqId);
+ 				}
+ 				break;
 			case "transcript": {
 				const pending = this.#pendingTranscripts.get(frame.reqId);
 				if (pending) {
@@ -819,10 +857,11 @@ export class GuestClient {
 		this.#notices = next;
 	}
 
-	#clearUiRequests(): void {
-		this.#uiRequest = null;
-		this.#uiRequestQueue = [];
-	}
+ 	#clearUiRequests(): void {
+ 		this.#uiRequest = null;
+ 		this.#uiRequestQueue = [];
+ 		this.#pendingUiResponses.clear();
+ 	}
 
 	#showNextUiRequest(): void {
 		const [next, ...rest] = this.#uiRequestQueue;
@@ -850,6 +889,7 @@ export class GuestClient {
 			working: this.#working,
 			readOnly: this.#readOnly,
 			uiRequest: this.#uiRequest,
+ 			uiResponsePending: this.#uiRequest !== null && this.#pendingUiResponses.has(this.#uiRequest.reqId),
 			notices: this.#notices,
             // Keep foreign-room records visible with origin labels; the contract permits explicit recovery/copy/dismiss across rooms, while host mutations stay room-scoped.
             unconfirmedPrompts: [...this.#recoveryStore.records.values()],

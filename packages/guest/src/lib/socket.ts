@@ -70,10 +70,10 @@ export class CollabSocket {
 			try {
 				if (this.#closed || this.#closeGen !== closeGenAtCall) return outcome.settle(false);
 				if (frame.t !== "hello" && (!this.#helloAcknowledged || this.#connGen !== connGenAtCall)) return outcome.settle(false);
-				const sealed = await seal(await this.#opts.key, frame);
-				if (this.#closed || this.#closeGen !== closeGenAtCall) return outcome.settle(false);
-				const envelope = packEnvelope(targetPeer, sealed);
 				const ws = this.#ws;
+				const sealed = await seal(await this.#opts.key, frame);
+				if (this.#closed || this.#closeGen !== closeGenAtCall || this.#connGen !== connGenAtCall || this.#ws !== ws || (frame.t !== "hello" && !this.#helloAcknowledged)) return outcome.settle(false);
+				const envelope = packEnvelope(targetPeer, sealed);
 				if (!ws || ws.readyState !== WebSocket.OPEN) return outcome.settle(false);
 				ws.send(envelope);
 				outcome.settle(true);

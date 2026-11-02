@@ -238,6 +238,7 @@ function Session({ client, connectError, onLeave, onRejoin, draft, onDraftChange
             phase={snap.phase}
             readOnly={snap.readOnly}
             uiRequest={snap.uiRequest}
+            uiResponsePending={snap.uiResponsePending}
             working={snap.working}
             queuedMessageCount={snap.state?.queuedMessageCount ?? 0}
             draft={draft}
