@@ -730,6 +730,26 @@ describe("supervisor.start", () => {
     });
   });
 
+  it("rejects the fourth live main agent without counting saved histories, subagents, or browser guests", async () => {
+    const world = makeWorld();
+    for (const [index, state] of ["running", "idle", "running"].entries()) {
+      const id = `$${index + 1}`;
+      world.seed({ id: `c${index + 1}`, state, tmuxSessionId: id, tmuxServerIdentity: "private-socket:1" });
+      world.tmuxSessions.push({ id, name: `caw-c${index + 1}`, alive: true, panePid: 11 + index, serverIdentity: "private-socket:1" });
+    }
+    world.seed({ id: "c4", state: "stopped" });
+    world.seed({ id: "saved-history", state: "stopped" });
+    // OMP subagents and browser guests share the main OMP process; registry
+    // participants do not represent additional managed tmux sessions.
+    world.hosts.push(hostRow({ pid: 99, sessionId: "unrelated-native", participants: 99 }));
+    const supervisor = createSupervisor({ store: world.store, adapters: world.adapters, clock: instantClock, maxActive: 3 });
+
+    await expect(supervisor.start("c4", { conversationId: "c4", name: "caw-c4", cwd: "/tmp/project" }))
+      .rejects.toMatchObject({ code: "conflict_limit" });
+    expect(await supervisor.activeCount()).toMatchObject({ count: 3, known: true });
+    expect(world.launches).toHaveLength(0);
+  });
+
   it("refuses past the concurrency cap without launching", async () => {
     const world = makeWorld();
     // Slots are counted from live processes, so the occupying conversations must
