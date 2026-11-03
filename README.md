@@ -41,10 +41,10 @@ Design and evidence: `docs/adr/0001-runtime-architecture.md`,
 
 ## Requirements
 
-| Component | Version tested | Notes |
+| Component | Source/docs baseline | Notes |
 | --- | --- | --- |
 | Ubuntu | 26.04 LTS (Linux 7.0) | any modern Linux with tmux will do |
-| OMP | **18.13.0** | `omp --version`; see `docs/research/omp-compatibility.md` |
+| OMP | **18.15.0** | Installed on owner's machine; `pnpm compat` read-only: 17 ok / 1 warn / 0 fail. Full real-agent acceptance not run against 18.15.0. CI 18.12.2 is opt-in historical/manual (`workflow_dispatch`). |
 | tmux | 3.6 | required — it is what keeps agents alive |
 | Node.js | 20.19+ | server and tooling |
 | pnpm | 10.x | workspace manager |
@@ -60,7 +60,7 @@ node scripts/build-guest.mjs          # builds the browser guest client
 pnpm --filter @caw/web build          # builds the web app
 pnpm test                              # unit, integration and web tests (free; no agent is spawned)
 
-# point it at the folders you allow, then run it
+# Repo-root caw.config.json is auto-discovered by pnpm start.
 cat > caw.config.json <<'JSON'
 {
   "allowedRoots": ["/home/you/projects", "/home/you/data"],
@@ -69,6 +69,8 @@ cat > caw.config.json <<'JSON'
 }
 JSON
 pnpm start
+# Config stored elsewhere: absolute path override
+CAW_CONFIG=/absolute/path/to/caw.config.json pnpm start
 ```
 
 First start prints a random bootstrap token to server stdout. It expires after

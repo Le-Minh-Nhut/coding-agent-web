@@ -26,25 +26,17 @@ tailscale serve status
 
 Open `https://<machine>.<tailnet>.ts.net/` on your phone.
 
-Make sure `publicOrigin` in `caw.config.json` (or `CAW_PUBLIC_ORIGIN`) matches this
-exact origin (`https://<machine>.<tailnet>.ts.net`). The server uses this to mint
-live-session deep links that point at your Serve endpoint rather than internal loopback.
+Make sure `publicOrigin` in `caw.config.json` (auto-discovered at repository root) or `CAW_PUBLIC_ORIGIN` matches this exact origin (`https://<machine>.<tailnet>.ts.net`) with no trailing slash or path. Use `CAW_CONFIG=/absolute/path/to/caw.config.json` when config is stored elsewhere. The server uses `publicOrigin` to mint live-session deep links.
+For initial local setup, start from the repository root with `pnpm start` (it auto-loads `caw.config.json`) or use `CAW_CONFIG=/absolute/path/to/caw.config.json pnpm start` when stored elsewhere. Keep app/API at `127.0.0.1:8791`, relay at loopback `127.0.0.1:8792`; proxy only `8791` through Serve, never funnel.
 
 Setting `publicOrigin` alone is sufficient for the phone's browser to open the
-relay WebSocket: `apps/server/src/server.ts` includes `publicOrigin` in the relay's
-allowed origins alongside loopback browser origins (`http://localhost:<port>`,
-`http://127.0.0.1:<port>`, `http://[::1]:<port>` and their `https:` variants), so
-machine-local debugging continues to work. The `relayAllowedOrigins` configuration
-is available for additional, different origins (e.g. a separate public web
-origin), but is not required for the standard single-origin Tailscale setup.
+relay WebSocket: `customRelayOrigins` in `apps/server/src/server.ts` includes `publicOrigin`
+alongside loopback browser origins (`http://localhost:<port>`, `http://127.0.0.1:<port>`,
+`http://[::1]:<port>` and their `https:` variants), so machine-local debugging works.
 
 *Operational note on `trustTailscaleOrigin`:* The `trustTailscaleOrigin` configuration
 flag (default `false`) only permits `https://*.ts.net` Origin headers for Fastify **HTTP**
-requests (`apps/server/src/app.ts:127`). It is **not** consulted by the relay's WebSocket
-origin check (`apps/server/src/server.ts:523-533`). Setting `trustTailscaleOrigin: true`
-alone without `publicOrigin` allows HTTP requests while WebSocket guest connections
-fail with `403 Forbidden`. Setting `publicOrigin` is recommended because it satisfies
-both HTTP and WebSocket origin allowlists, as well as link minting.
+requests (`trustTailscaleOrigin` in `apps/server/src/app.ts`). It is not consulted by relay WebSocket origin verification (`customRelayOrigins` in `apps/server/src/server.ts`). Setting `publicOrigin` is recommended because it satisfies both HTTP and WebSocket origin allowlists, as well as link minting.
 **The relay port must never be proxied.** The app listens on `8791` and the private
 Collab relay listens on `8792`. Only `8791` goes through Serve. The relay's host
 endpoint — the one our own agents connect to — is deliberately reachable only from
@@ -111,7 +103,7 @@ the app's settings screen (or by deleting the state directory on the laptop).
 ## 5. Rotating access
 
 ```bash
-# laptop: revoke every active session cookie at once (sessions are held in memory)
+# Only if you own this service and are not actively using the app:
 systemctl --user restart coding-agent-web
 
 # to reset the password and generate a fresh one-time setup token on next boot:
