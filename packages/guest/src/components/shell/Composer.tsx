@@ -140,7 +140,7 @@ export const Composer = memo(function Composer({
 }: ComposerProps): ReactNode {
   const setText = onDraftChange;
 	const [sendError, setSendError] = useState<string | null>(null);
-	const [uiResponseError, setUiResponseError] = useState<string | null>(null);
+	const [uiResponseError, setUiResponseError] = useState<{ reqId: number; client: GuestClient; message: string } | null>(null);
 	const [unconfirmedPrompts, setUnconfirmedPrompts] = useState<readonly UnconfirmedPrompt[]>(() => client.getSnapshot?.().unconfirmedPrompts ?? []);
   const [localUnconfirmed, setLocalUnconfirmed] = useState<UnconfirmedPrompt[]>([]);
   const [copiedId, setCopiedId] = useState<number | null>(null);
@@ -148,6 +148,8 @@ export const Composer = memo(function Composer({
   localUnconfirmedRef.current = localUnconfirmed;
 	const currentClientRef = useRef(client);
 	currentClientRef.current = client;
+  const currentUiRequestRef = useRef({ reqId: uiRequest?.reqId ?? null, client });
+  currentUiRequestRef.current = { reqId: uiRequest?.reqId ?? null, client };
   const recoveredDraftsRef = useRef(new Map<number, string>());
   const approvalDraftRef = useRef<{ reqId: number; text: string } | null>(null);
   const approvalReqId = uiRequest?.kind === "editor" ? uiRequest.reqId : null;
@@ -231,8 +233,8 @@ export const Composer = memo(function Composer({
     setUiResponseError(null);
     const answeringClient = client;
     void Promise.resolve(answeringClient.sendUiResponse(reqId, value)).then(accepted => {
-      if (currentClientRef.current === answeringClient && !accepted) setUiResponseError("response not sent — retry or check connection");
-    }, () => { if (currentClientRef.current === answeringClient) setUiResponseError("response not sent — retry or check connection"); })
+      if (currentClientRef.current === answeringClient && !accepted) setUiResponseError({ reqId, client: answeringClient, message: "response not sent — retry or check connection" });
+    }, () => { if (currentClientRef.current === answeringClient) setUiResponseError({ reqId, client: answeringClient, message: "response not sent — retry or check connection" }); })
       .finally(() => { if (currentClientRef.current === answeringClient && answeringClientRef.current === answeringClient) answeringClientRef.current = null; });
   }, [client, uiResponsePending]);
 
@@ -329,9 +331,9 @@ export const Composer = memo(function Composer({
           >
             Cancel
           </button>
-          {uiResponseError && (
+          {uiResponseError?.reqId === uiRequest.reqId && uiResponseError.client === client && (
             <span className="sh-send-error" role="status">
-              {uiResponseError}
+              {uiResponseError.message}
             </span>
           )}
           {busy && (
@@ -341,9 +343,9 @@ export const Composer = memo(function Composer({
               onClick={() => {
                 void Promise.resolve(client.sendAbort()).then(
                   (sent) => {
-                    if (!sent) setUiResponseError("stop request not sent — connection lost or offline");
+                    if (currentUiRequestRef.current.reqId === uiRequest.reqId && currentUiRequestRef.current.client === client && !sent) setUiResponseError({ reqId: uiRequest.reqId, client, message: "stop request not sent — connection lost or offline" });
                   },
-                  () => setUiResponseError("stop request not sent — connection lost or offline"),
+                  () => { if (currentUiRequestRef.current.reqId === uiRequest.reqId && currentUiRequestRef.current.client === client) setUiResponseError({ reqId: uiRequest.reqId, client, message: "stop request not sent — connection lost or offline" }); },
                 );
               }}
               disabled={!live}
@@ -438,9 +440,9 @@ export const Composer = memo(function Composer({
               onClick={() => {
                 void Promise.resolve(client.sendAbort()).then(
                   (sent) => {
-                    if (!sent) setSendError("stop request not sent — connection lost or offline");
+                    if (!sent && currentClientRef.current === client) setSendError("stop request not sent — connection lost or offline");
                   },
-                  () => setSendError("stop request not sent — connection lost or offline"),
+                  () => { if (currentClientRef.current === client) setSendError("stop request not sent — connection lost or offline"); },
                 );
               }}
               disabled={!live}

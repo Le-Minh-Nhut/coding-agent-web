@@ -292,7 +292,7 @@ function Session({ client, connectError, onLeave, onRejoin, draft, onDraftChange
         onDraftChange={onDraftChange}
         connectError={connectError}
       />
-      <Toasts notices={snap.notices} />
+      <Toasts notices={snap.notices} client={client} />
     </div>
   );
 }

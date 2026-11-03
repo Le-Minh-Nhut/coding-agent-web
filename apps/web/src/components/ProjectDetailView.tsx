@@ -6,6 +6,11 @@ function hasLiveCollabHost(session: NativeSessionSummary): boolean {
   return session.hasCollabHost;
 }
 
+function retryableNativeConversation(conversation: Conversation): boolean {
+  return conversation.ownership === "managed" &&
+    (conversation.state === "error" || conversation.state === "stopped");
+}
+
 interface ProjectDetailViewProps {
   projectId: string;
   onBack: () => void;
@@ -52,6 +57,9 @@ export function ProjectDetailView({
   };
   useEffect(() => {
     viewActiveRef.current = true;
+    setCreating(false);
+    setResumingSessionId(null);
+    setAttachingSessionId(null);
     viewGenerationRef.current++;
     void loadData();
     return () => { viewActiveRef.current = false; viewGenerationRef.current++; };
@@ -64,10 +72,17 @@ export function ProjectDetailView({
     setError(null);
 
     const res = await api.createConversation(projectId, "New chat");
-    if (generation !== viewGenerationRef.current) return;
+    if (generation !== viewGenerationRef.current) { setCreating(false); return; }
     setCreating(false);
     if (res.ok) onSelectConversation(res.data.id);
-    else setError(res.error.message || "Failed to create conversation");
+    else {
+      const message = res.error.message || "Failed to create conversation";
+      setError(message);
+      const list = await api.listConversations(projectId);
+      if (generation !== viewGenerationRef.current) return;
+      if (list.ok) { setConversations(list.data); setConversationsLoaded(true); }
+      else setError(`${message} Conversation list unavailable: ${list.error.message || "Could not load conversations."}`);
+    }
   };
 
   const handleResume = async (session: NativeSessionSummary) => {
@@ -76,7 +91,7 @@ export function ProjectDetailView({
     setResumingSessionId(session.sessionId);
     setError(null);
     const result = await api.createConversation(projectId, session.title ?? "Resumed session", session.sessionId);
-    if (generation !== viewGenerationRef.current) return;
+    if (generation !== viewGenerationRef.current) { setResumingSessionId(null); return; }
     setResumingSessionId(null);
     if (result.ok) onSelectConversation(result.data.id);
     else if (result.error.code === "conflict_owner") {
@@ -89,7 +104,7 @@ export function ProjectDetailView({
     setResumingSessionId(conversation.id);
     setError(null);
     const result = await api.restartConversation(conversation.id);
-    if (!viewActiveRef.current || generation !== viewGenerationRef.current) return;
+    if (!viewActiveRef.current || generation !== viewGenerationRef.current) { setResumingSessionId(null); return; }
     setResumingSessionId(null);
     if (result.ok) onSelectConversation(conversation.id);
     else if (result.error.code === "conflict_owner") setError("This session already has a writer or its lease cannot be verified. Attach in the terminal instead; no second agent was started.");
@@ -102,7 +117,7 @@ export function ProjectDetailView({
     setAttachingSessionId(session.sessionId);
     setError(null);
     const result = await api.attachLiveSession(projectId, session.sessionId);
-    if (generation !== viewGenerationRef.current) return;
+    if (generation !== viewGenerationRef.current) { setAttachingSessionId(null); return; }
     setAttachingSessionId(null);
     if (result.ok) onSelectConversation(result.data.id);
     else setError(result.error.message);
@@ -235,8 +250,8 @@ export function ProjectDetailView({
                     {resumingSessionId === sess.sessionId ? "Resuming…" : "Resume in app"}
                   </button>
                 )}
-                {sess.tracked && sess.live === false && conversations.some((item) => item.nativeSessionId === sess.sessionId && item.ownership === "managed" && (item.state === "error" || item.state === "stopped")) && (
-                  <button type="button" className="primary" disabled={resumingSessionId !== null} onClick={(event) => { event.stopPropagation(); const conversation = conversations.find((item) => item.nativeSessionId === sess.sessionId); if (conversation) void handleRetryConversation(conversation); }}>
+                {sess.tracked && sess.live === false && conversations.some((item) => item.nativeSessionId === sess.sessionId && retryableNativeConversation(item)) && (
+                  <button type="button" className="primary" disabled={resumingSessionId !== null} onClick={(event) => { event.stopPropagation(); const conversation = conversations.find((item) => item.nativeSessionId === sess.sessionId && retryableNativeConversation(item)); if (conversation) void handleRetryConversation(conversation); }}>
                     {resumingSessionId !== null ? "Retrying…" : "Retry"}
                   </button>
                 )}

@@ -37,7 +37,7 @@ export function AgentDrawer(props: {
   const [draft, setDraft] = useState("");
   /** Resumes a stopped poll loop; null while no loop is mounted. */
   const resumePollingRef = useRef<(() => void) | null>(null);
-  const sendingChatRef = useRef(false);
+  const sendingChatAgentsRef = useRef(new Set<string>());
   const quiescentRef = useRef(false);
   const agentIdRef = useRef(agent.id);
   agentIdRef.current = agent.id;
@@ -143,10 +143,10 @@ export function AgentDrawer(props: {
 
   const sendChat = (): void => {
     const text = draft.trim();
-    if (!text || sendingChatRef.current) return;
-    sendingChatRef.current = true;
-    setSendError(null);
     const issuedFor = agent.id;
+    if (!text || sendingChatAgentsRef.current.has(issuedFor)) return;
+    sendingChatAgentsRef.current.add(issuedFor);
+    setSendError(null);
     void client.sendAgentCmd("chat", issuedFor, text).then(
       (accepted) => {
         if (agentIdRef.current !== issuedFor) return;
@@ -155,7 +155,7 @@ export function AgentDrawer(props: {
       },
       () => { if (agentIdRef.current === issuedFor) setSendError("message not sent — press send to retry"); },
     ).finally(() => {
-      sendingChatRef.current = false;
+      sendingChatAgentsRef.current.delete(issuedFor);
     });
   };
 

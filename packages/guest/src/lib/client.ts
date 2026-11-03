@@ -586,11 +586,13 @@ export class GuestClient {
 				}
 				this.#state = frame.state;
 				this.#working = frame.state.isStreaming;
+				this.#agents = [...frame.agents];
 				this.#stream = null;
 				this.#streamDone = false;
 				this.#activeTools = new Map();
 				this.#progress = new Map();
 				this.#lifecycle = new Map();
+				this.#unlistedBusIds.clear();
 				this.#readOnly = frame.readOnly === true;
 				this.#welcomed = true;
 				this.#clearWelcomeTimer();
