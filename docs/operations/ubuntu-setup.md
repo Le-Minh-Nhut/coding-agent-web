@@ -103,11 +103,14 @@ Environment variables override file values (`CAW_PORT`, `CAW_ALLOWED_ROOTS`, `CA
 
 ## 4. First run
 
+For a one-time manual run, start from repository root:
+
 ```bash
 pnpm start
 # Config elsewhere (absolute path only):
 CAW_CONFIG=/absolute/path/to/caw.config.json pnpm start
 ```
+Only one server can bind port 8791; stop an enabled service before manual run.
 
 The first start prints a random bootstrap token to server stdout. It expires
 after 15 minutes and can authenticate once to open a setup-only session; choose
@@ -198,7 +201,7 @@ journalctl --user -u coding-agent-web -f
 journalctl --user -u coding-agent-web -g 'configuration loaded'
 ```
 
-The `configuration loaded` record shows configFile, allowedRoots, publicOrigin, host, port, and relayPort; it contains no secrets. Verify it before phone access. Do not restart while actively using the app, and never restart a service you did not start.
+The `configuration loaded` record shows configFile, allowedRoots, publicOrigin, host, port, and relayPort; it contains no secrets. Verify it before phone access. Do not restart while actively using the app, and never restart a service you did not start. The service is the only server instance; stop any manual `pnpm start` before enabling it.
 
 ## 6. Upgrade procedure
 ```bash
@@ -206,13 +209,19 @@ git pull
 pnpm install
 node scripts/build-guest.mjs
 pnpm --filter @caw/web build
-pnpm start                       # choose this for repo-root caw.config.json
-# OR, when config lives elsewhere (absolute path only):
-CAW_CONFIG=/absolute/path/to/caw.config.json pnpm start
-pnpm compat                      # confirm the OMP surface is unchanged
+pnpm compat                      # free, read-only OMP capability probe
 pnpm test
-systemctl --user restart coding-agent-web  # only after you own unit; never while actively using app
 ```
+
+The app binds one port (8791); two instances cannot coexist. Check the active
+server with `systemctl --user is-active coding-agent-web` and `ss -ltnp | grep 8791`.
+Choose exactly one run mode; never run both at once:
+
+- **systemd install**: `systemctl --user restart coding-agent-web` (run
+  `systemctl --user daemon-reload` first only if the unit changed; never restart
+  while actively using the app).
+- **manual run**: from the repository root, run `pnpm start`. Stop the service
+  first if it is enabled, because two servers cannot share port 8791.
 
 If `pnpm compat` reports `FAIL` after an OMP upgrade, stop and read
 `docs/research/omp-compatibility.md` before restarting: the product's duplicate
