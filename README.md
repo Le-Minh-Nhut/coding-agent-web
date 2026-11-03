@@ -98,7 +98,11 @@ origins (`http://localhost:<port>`, `http://127.0.0.1:<port>`, `http://[::1]:<po
 and their `https:` variants) are always allowed for machine-local browser debugging.
 `relayAllowedOrigins` remains available if you need additional, different browser
 origins (e.g. a separate public web origin), but is not required for the standard
-`publicOrigin` must be a bare origin—scheme and host only, with no trailing slash, path, query, or fragment (`https://my-workstation.tailnet-name.ts.net`, not `https://my-workstation.tailnet-name.ts.net/`).
+single-origin Tailscale setup.
+
+It must be a bare origin — scheme and host only, no trailing slash, path, query,
+or fragment: `https://my-workstation.tailnet-name.ts.net`, not
+`https://my-workstation.tailnet-name.ts.net/`.
 Verify the whole loop yourself:
 
 ```bash
