@@ -142,12 +142,11 @@ the current credential keeps working; change it via the authenticated password
 route. No forced migration is required.
 
 Forgotten password recovery is local-only: stop the server, then from the repo
-root run `pnpm --filter @caw/server exec tsx src/auth.ts reset` (set the same
-`CAW_STATE_DIR` or `CAW_CONFIG` as the service if non-default). The command
-replaces only `auth-password.json`, leaves other state files untouched, and
-prints a fresh 15-minute bootstrap token to stdout. Restart the server, then
-log in with that token and set a new password. Sessions live only in server
-memory, so stopping the server discards all sessions.
+root run `pnpm --filter @caw/server exec tsx src/auth.ts reset`. It auto-discovers
+repo-root `caw.config.json` and honours `CAW_CONFIG`/`CAW_STATE_DIR`, using same
+state directory as service without extra flags. It replaces only `auth-password.json`,
+leaves other state files untouched, and prints a fresh 15-minute setup token.
+Then restart the server, log in with that token, and set a new password. Stopping the server discards all in-memory sessions.
 
 State lives in `~/.local/state/coding-agent-web/` (metadata, password hash `auth-password.json`, and the private tmux socket `tmux.sock`); override with `CAW_STATE_DIR`.
 

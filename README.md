@@ -83,9 +83,10 @@ with `POST /api/auth/change-password` if you want to replace it.
 If you forget the password, stop the service and run
 `pnpm --filter @caw/server exec tsx src/auth.ts reset` locally. It writes a new
 15-minute setup token to stdout and replaces only the auth record. Restart the
-service, log in with that token, and set a new password. Password changes
-revoke all sessions except the current one. Use the same `CAW_STATE_DIR` or
-`CAW_CONFIG` overrides as the server; reset command runs locally, not over HTTP.
+service, log in with that token, and set a new password. Password changes revoke
+all sessions except the current one. The reset command auto-discovers repo-root
+`caw.config.json` and honours `CAW_CONFIG`/`CAW_STATE_DIR`, so it uses the same
+state directory as the service without extra flags; it runs locally, not over HTTP.
 Then open `http://127.0.0.1:8791` locally, or follow
 `docs/operations/iphone-setup.md` to reach it from your phone.
 
@@ -97,7 +98,7 @@ origins (`http://localhost:<port>`, `http://127.0.0.1:<port>`, `http://[::1]:<po
 and their `https:` variants) are always allowed for machine-local browser debugging.
 `relayAllowedOrigins` remains available if you need additional, different browser
 origins (e.g. a separate public web origin), but is not required for the standard
-single-origin Tailscale setup.
+`publicOrigin` must be a bare origin—scheme and host only, with no trailing slash, path, query, or fragment (`https://my-workstation.tailnet-name.ts.net`, not `https://my-workstation.tailnet-name.ts.net/`).
 Verify the whole loop yourself:
 
 ```bash
