@@ -229,7 +229,8 @@ describe("R35 GUEST findings", () => {
     client.applyFrameForTest({ t: "welcome", proto: 3, header: { id: "s" } as unknown as SessionHeader, state: { isStreaming: false, queuedMessageCount: 0, cwd: "", participants: [] }, agents: [], entryCount: 0 });
     client.applyFrameForTest({ t: "ui-request", request: req });
     expect(client.getSnapshot().uiRequest?.reqId).toBe(9);
-    expect(client.getSnapshot().uiResponsePending).toBe(true);
+    // Reconnect clears the old transport's pending marker; replay is a fresh actionable request.
+    expect(client.getSnapshot().uiResponsePending).toBe(false);
     expect(send).toHaveBeenCalledTimes(1);
     client.close();
   });

@@ -42,7 +42,7 @@ export function ConnectScreen({ defaultName, error, onConnect, recoveries, onDis
         <button className="sh-btn sh-btn-primary sh-connect-submit" type="submit">Connect <ArrowRight size={14} /></button>
         <div className="sh-connect-foot"><Lock size={12} />End-to-end encrypted. The room key stays in the link and never reaches the relay.</div>
       </form>
-      {recoveries.length > 0 && <details className="sh-recoverable-prompts"><summary>Saved prompts ({recoveries.length})</summary>{recoveries.map(record => <article className="sh-recoverable-prompt" key={record.id}><small>room {record.roomId}{record.sessionId ? ` / session ${record.sessionId}` : ""}</small><pre className="sh-recoverable-text">{record.text}</pre><button type="button" className="sh-btn" onClick={() => void copy(record)}>{copiedId === record.id ? "Copied" : "Copy"}</button><button type="button" className="sh-btn" onClick={() => onDismissRecovery(record.id)}>Dismiss</button></article>)}</details>}
+      {recoveries.length > 0 && <details className="sh-recoverable-prompts"><summary>Saved prompts ({recoveries.length})</summary>{recoveries.map(record => <article className="sh-recoverable-prompt" key={record.id}><small>room {record.roomId}{record.sessionId ? ` / session ${record.sessionId}` : ""}</small>{record.error && <small role="status">{record.error}</small>}<pre className="sh-recoverable-text">{record.text}</pre><button type="button" className="sh-btn" onClick={() => void copy(record)}>{copiedId === record.id ? "Copied" : "Copy"}</button><button type="button" className="sh-btn" onClick={() => onDismissRecovery(record.id)}>Dismiss</button></article>)}</details>}
     </div>
   );
 }

@@ -39,6 +39,7 @@ export function AgentDrawer(props: {
   const resumePollingRef = useRef<(() => void) | null>(null);
   const sendingChatRef = useRef(false);
   const quiescentRef = useRef(false);
+  useEffect(() => { setDraft(""); }, [agent.id]);
   quiescentRef.current = agent.status !== "running";
 
   useEffect(() => {
@@ -145,7 +146,7 @@ export function AgentDrawer(props: {
     setSendError(null);
     void client.sendAgentCmd("chat", agent.id, text).then(
       (accepted) => {
-        if (accepted) setDraft((current) => current.trim() === text ? "" : current);
+        if (accepted) setSendError("sent to socket; host execution unconfirmed");
         else setSendError("message not sent — press send to retry");
       },
       () => setSendError("message not sent — press send to retry"),

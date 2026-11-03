@@ -337,6 +337,7 @@ export class GuestClient {
 			clientGeneration: this.#clientGeneration, connectionGeneration: this.#connectionGeneration,
 		};
 		this.#recoveryStore.records.set(prompt.id, prompt);
+		this.#recoveryStore.changed();
 		this.#unconfirmedPrompts = [...existing, prompt];
 		this.#commit();
 		return prompt;
@@ -405,9 +406,10 @@ export class GuestClient {
    if (!this.#isCurrentClient()) return;
    const prompt = this.#recoveryStore.records.get(id);
    if (!prompt || prompt.roomId !== this.#roomId) return;
-   this.#recoveryStore.records.set(id, { ...prompt, ...patch });
-   this.#unconfirmedPrompts = this.#promptList();
-   this.#commit();
+		this.#recoveryStore.records.set(id, { ...prompt, ...patch });
+		this.#recoveryStore.changed();
+		this.#unconfirmedPrompts = this.#promptList();
+		this.#commit();
  }
 
 
@@ -568,6 +570,8 @@ export class GuestClient {
 				// A fresh welcome (first join or reconnect) restarts the snapshot.
 				// Entries already on screen stay until the new snapshot replaces
 				// them once complete, so a resync never blanks the transcript.
+				// Host queues outstanding requests after welcome and snapshot chunks.
+				this.#clearUiRequests();
 				this.#header = frame.header;
 				if (frame.entryCount === 0) {
 					this.#entries = [];
@@ -577,7 +581,7 @@ export class GuestClient {
 					this.#pendingSnapshot = { entries: [], live: [], total: frame.entryCount };
 				}
 				this.#state = frame.state;
-				this.#agents = [...frame.agents];
+				this.#working = frame.state.isStreaming;
 				this.#stream = null;
 				this.#streamDone = false;
 				this.#activeTools = new Map();
