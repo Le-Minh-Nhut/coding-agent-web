@@ -30,72 +30,102 @@ tmux_path=$(resolve_bin tmux)
 node_version=$("$node_path" -p 'process.versions.node')
 "$node_path" -e 'const [a,b,c]=process.argv[1].split(".").map(Number); if(a<20||(a===20&&(b<19))) process.exit(1)' "$node_version" || fail "Node $node_version found; Node >=20.19 required."
 [[ -f $config_file ]] || fail "Config not found: $config_file. Create a valid caw.config.json first."
-"$node_path" - "$config_file" <<'NODE'
-const fs=require('node:fs');
-const file=process.argv[2]; let c;
-try { c=JSON.parse(fs.readFileSync(file,'utf8')); } catch(e) { console.error(`Invalid config ${file}: ${e.message}`); process.exit(1); }
-if (!c || Array.isArray(c) || typeof c!=='object') { console.error('Config must be a JSON object.'); process.exit(1); }
-if (!['127.0.0.1','::1','localhost'].includes(c.host ?? process.env.CAW_HOST ?? '127.0.0.1')) { console.error('host must be loopback.'); process.exit(1); }
-const port=c.port ?? process.env.CAW_PORT ?? 8791;
-const relayPort=c.relayPort ?? process.env.CAW_RELAY_PORT ?? 8792;
-for (const [key,value] of [['port',port],['relayPort',relayPort]]) if (!Number.isInteger(Number(value)) || Number(value)<1 || Number(value)>65535) { console.error(`${key} must be an integer in 1..65535: ${value}.`); process.exit(1); }
-if (Number(port)===Number(relayPort)) { console.error(`port and relayPort must differ; both are ${Number(port)}.`); process.exit(1); }
-const origin=c.publicOrigin ?? process.env.CAW_PUBLIC_ORIGIN ?? `http://127.0.0.1:${port}`;
-let u; try { u=new URL(origin); } catch { console.error('publicOrigin must be an absolute HTTP(S) origin.'); process.exit(1); }
-if (!['http:','https:'].includes(u.protocol) || u.username || u.password || u.pathname!=='/' || u.search || u.hash || origin !== u.origin) { console.error('publicOrigin must be an absolute http(s) origin without path/query/fragment.'); process.exit(1); }
-const stateDir=require('node:path').resolve(c.stateDir ?? process.env.CAW_STATE_DIR ?? require('node:path').join(require('node:os').homedir(),'.local/state/coding-agent-web'));
-const isDirectory=p=>{ try { return fs.statSync(p).isDirectory(); } catch { return false; } };
-if (!isDirectory(stateDir) && !isDirectory(require('node:path').dirname(stateDir))) { console.error(`stateDir must exist or have an existing parent directory: ${stateDir}.`); process.exit(1); }
-const roots=process.env.CAW_ALLOWED_ROOTS === undefined ? (c.allowedRoots ?? []) : process.env.CAW_ALLOWED_ROOTS.split(',');
-if (!Array.isArray(roots) || roots.some(p=>typeof p!=='string' || !require('node:path').isAbsolute(p) || !fs.existsSync(p))) { console.error('Every allowedRoots entry must be absolute and exist.'); process.exit(1); }
+config_error=$(mktemp)
+rendered=''
+ready_body=''
+cleanup() { rm -f "${config_error:-}" "${rendered:-}" "${ready_body:-}"; }
+trap cleanup EXIT
+config_info=$(cd "$repo_root" && "$node_path" --import tsx --input-type=module -e '
+import { loadConfig } from "./apps/server/src/config.ts";
+try {
+  const config = await loadConfig({ filePath: process.argv.at(-1), env: {} });
+  if (config.host !== "127.0.0.1") throw new Error("host must be exactly 127.0.0.1 because Tailscale Serve proxies only 127.0.0.1:<port>.");
+  console.log(JSON.stringify({ port: config.port, stateDir: config.stateDir }));
+} catch (error) { console.error(error instanceof Error ? error.message : String(error)); process.exit(1); }
+' "$config_file" 2>"$config_error") || fail "Invalid server config: $(cat "$config_error")"
+readarray -t validated < <(printf '%s' "$config_info" | "$node_path" -e 'const c=JSON.parse(require("node:fs").readFileSync(0,"utf8")); console.log(c.port); console.log(c.stateDir)')
+port=${validated[0]}; state_dir=${validated[1]}
+config_changed=0
+if [[ -n ${CAW_MAX_ACTIVE_AGENTS:-} && $CAW_MAX_ACTIVE_AGENTS != 3 ]]; then fail 'CAW_MAX_ACTIVE_AGENTS must be exactly 3; it is ignored by the service and does not reach it.'; fi
+max_state=$("$node_path" - "$config_file" <<'NODE'
+const fs=require('node:fs'); const c=JSON.parse(fs.readFileSync(process.argv[2],'utf8'));
+if (Object.hasOwn(c,'maxActiveAgents') && !Number.isInteger(c.maxActiveAgents)) { console.error(`maxActiveAgents must be an integer; found ${JSON.stringify(c.maxActiveAgents)}.`); process.exit(1); }
+console.log(Object.hasOwn(c,'maxActiveAgents')?String(c.maxActiveAgents):'missing');
 NODE
-if [[ ${CAW_MAX_ACTIVE_AGENTS:-3} != 3 ]]; then fail 'CAW_MAX_ACTIVE_AGENTS must be exactly 3 for this deployment.'; fi
-if ! "$node_path" - "$config_file" <<'NODE'
-const fs=require('node:fs'); const c=JSON.parse(fs.readFileSync(process.argv[2],'utf8')); process.exit(c.maxActiveAgents===3?0:1);
-NODE
-then
+) || fail 'Cannot validate maxActiveAgents.'
+if [[ $max_state != 3 ]]; then
   backup=$config_file.$(date +%Y%m%d%H%M%S).bak
   [[ ! -e $backup ]] || fail "Backup already exists: $backup; refusing to overwrite."
   cp -p "$config_file" "$backup"
   "$node_path" - "$config_file" <<'NODE'
-const fs=require('node:fs'); const f=process.argv[2]; let s=fs.readFileSync(f,'utf8');
-if (/"maxActiveAgents"\s*:/.test(s)) s=s.replace(/("maxActiveAgents"\s*:\s*)[^,}\n]+/, (_m, key)=>`${key}3`);
-else {
-  const close=/\}\s*$/.exec(s); if (!close) throw new Error('Cannot safely add maxActiveAgents.');
-  const before=s.slice(0,close.index).replace(/\s+$/,'');
-  s=before+(before.endsWith('{')?'':',')+'\n  "maxActiveAgents": 3\n'+s.slice(close.index);
-}
-JSON.parse(s); fs.writeFileSync(f,s);
+const fs=require('node:fs'); const path=require('node:path'); const f=process.argv[2]; const c=JSON.parse(fs.readFileSync(f,'utf8')); c.maxActiveAgents=3;
+const tmp=path.join(path.dirname(f),`.${path.basename(f)}.${process.pid}.tmp`); const mode=fs.statSync(f).mode;
+try { fs.writeFileSync(tmp,JSON.stringify(c,null,2)+'\n',{mode}); fs.chmodSync(tmp,mode); fs.renameSync(tmp,f); } finally { try { fs.unlinkSync(tmp); } catch (e) { if (e.code!=='ENOENT') throw e; } }
 NODE
-  printf 'LOUD: set maxActiveAgents to 3; timestamped backup: %s\n' "$backup"
+  config_changed=1
+  printf 'LOUD: set maxActiveAgents from %s to 3; timestamped backup: %s\n' "$max_state" "$backup"
 fi
-if [[ ${1:-} == --build || ! -d $repo_root/packages/guest/dist || ! -d $repo_root/apps/web/dist ]]; then
-  (cd "$repo_root" && "$node_path" scripts/build-guest.mjs && "$pnpm_path" --filter @caw/web build)
-fi
-port=$("$node_path" -p 'JSON.parse(require("node:fs").readFileSync(process.argv[1])).port || 8791' "$config_file")
+pending_restart=0
+service_active=0
 if "$systemctl_path" --user is-active --quiet "$unit_name"; then
+  service_active=1
   printf 'Service already active; preserving running process.\n'
-elif curl --silent --output /dev/null --max-time 2 "http://127.0.0.1:$port/"; then
+elif port_status=$(curl --silent --output /dev/null --max-time 2 --write-out '%{http_code}' "http://127.0.0.1:$port/" 2>/dev/null) && [[ $port_status =~ ^[23][0-9][0-9]$ ]]; then
   fail "Port $port is already serving while unit is inactive; refusing to start a second server. Stop the existing server yourself, then rerun."
 fi
 mkdir -p "$unit_dir"
-path_value="$(dirname "$node_path"):$(dirname "$pnpm_path"):$(dirname "$omp_path"):$(dirname "$tmux_path"):/usr/bin:/bin"
+extra_path=''
+for dir in "$HOME/.local/bin" "$HOME/.bun/bin" "$HOME/.local/share/uv" "$HOME/.local/share/pnpm" "$HOME/.nvm/versions/node"/*/bin "$HOME/miniconda3/bin" /opt/jdk-25/bin; do
+  [[ -d $dir ]] || continue
+  owner=$(stat -c %U "$dir") || continue
+  mode=$(stat -c %a "$dir") || continue
+  (( (8#$mode & 0002) == 0 )) && [[ $owner == "$USER" || $owner == root ]] || continue
+  case ":$extra_path:" in *":$dir:"*) continue;; esac
+  extra_path+="${extra_path:+:}$dir"
+done
+path_value="$(dirname "$node_path"):$(dirname "$pnpm_path"):$(dirname "$omp_path"):$(dirname "$tmux_path")${extra_path:+:$extra_path}:/usr/bin:/bin"
 rendered=$(mktemp)
-trap 'rm -f "$rendered"' EXIT
-sed -e "s|@REPO_ROOT@|$repo_root|g" -e "s|@CONFIG_PATH@|$config_file|g" -e "s|@PATH_VALUE@|$path_value|g" -e "s|@PNPM_PATH@|$pnpm_path|g" "$repo_root/deploy/systemd/coding-agent-web.service" > "$rendered"
+"$node_path" - "$repo_root/deploy/systemd/coding-agent-web.service" "$rendered" "$repo_root" "$config_file" "$path_value" "$pnpm_path" <<'NODE'
+const fs = require('node:fs');
+const [template, output, ...values] = process.argv.slice(2);
+const keys = ['@REPO_ROOT@', '@CONFIG_PATH@', '@PATH_VALUE@', '@PNPM_PATH@'];
+const substitutions = new Map(keys.map((key, i) => [key, values[i]]));
+fs.writeFileSync(output, fs.readFileSync(template, 'utf8').replace(/@(?:REPO_ROOT|CONFIG_PATH|PATH_VALUE|PNPM_PATH)@/g, (key) => substitutions.get(key)));
+NODE
 if [[ -f $unit_file ]] && ! cmp -s "$rendered" "$unit_file"; then
   backup=$unit_file.$(date +%Y%m%d%H%M%S).bak
   [[ ! -e $backup ]] || fail "Unit backup already exists: $backup; refusing to overwrite."
   printf 'LOUD: replacing different existing unit at %s; backup: %s\n' "$unit_file" "$backup" >&2
   cp -p "$unit_file" "$backup"
+  ((service_active)) && pending_restart=1
 fi
+if ((service_active && config_changed)); then pending_restart=1; fi
 install -m 0644 "$rendered" "$unit_file"
 "$systemctl_path" --user daemon-reload
 "$systemctl_path" --user enable "$unit_name"
-if ! "$systemctl_path" --user is-active --quiet "$unit_name"; then "$systemctl_path" --user start "$unit_name"; fi
-if ! "$systemctl_path" --user is-active --quiet "$unit_name"; then fail "Service not active. Inspect: journalctl --user -u $unit_name -n 100 --no-pager"; fi
-for _ in {1..30}; do curl --silent --output /dev/null --max-time 2 "http://127.0.0.1:$port/" && break; sleep 1; done
-curl --silent --output /dev/null --max-time 2 "http://127.0.0.1:$port/" || fail "HTTP readiness failed on port $port. Inspect journal."
+if ((pending_restart)); then
+  printf 'INSTALLED: %s\nENABLED: yes\nSTARTED: no (existing service left running)\nPENDING_RESTART: yes — run: systemctl --user restart %s\n' "$unit_name" "$unit_name"
+else
+  if ! "$systemctl_path" --user is-active --quiet "$unit_name"; then
+    "$systemctl_path" --user start "$unit_name"
+    printf 'STARTED: yes\n'
+  else
+    printf 'STARTED: no (already active)\n'
+  fi
+  printf 'INSTALLED: %s\nENABLED: yes\n' "$unit_name"
+fi
+if ((pending_restart)); then exit 0; fi
+ready_status=000
+ready_body=$(mktemp)
+for _ in {1..30}; do
+  ready_status=$(curl --silent --show-error --max-time 2 --output "$ready_body" --write-out '%{http_code}' "http://127.0.0.1:$port/api/auth/me" 2>/dev/null || true)
+  [[ $ready_status == 401 ]] && break
+  sleep 1
+done
+if [[ $ready_status != 401 ]]; then
+  hint=$(tr '\n' ' ' < "$ready_body" | cut -c1-200)
+  fail "HEALTHY: no — expected HTTP 401 from /api/auth/me, got $ready_status${hint:+; body: $hint}. Inspect: journalctl --user -u $unit_name -n 100 --no-pager"
+fi
 "$systemctl_path" --user status "$unit_name" --no-pager >/dev/null
 journalctl --user -u "$unit_name" -g 'configuration loaded' -n 1 --no-pager || true
-printf 'SUCCESS: installed and enabled %s; active and HTTP-ready on 127.0.0.1:%s.\n' "$unit_name" "$port"
+printf 'HEALTHY: yes — app identity confirmed by /api/auth/me (HTTP 401).\n'

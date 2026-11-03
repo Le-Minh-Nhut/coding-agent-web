@@ -11,7 +11,7 @@ async function setup() {
   dirs.push(stateDir);
   let now = 1_000_000;
   const output: string[] = [];
-  const auth = createAuthenticationService({ stateDir, ttlHours: 1, now: () => now, setupOutput: (token) => output.push(token) });
+  const auth = createAuthenticationService({ stateDir, ttlHours: 1, now: () => now, setupOutput: (path) => output.push(path) });
   const init = await auth.initAuth();
   return { stateDir, auth, init, output, now: () => now, advance: (ms: number) => { now += ms; } };
 }
@@ -28,8 +28,9 @@ afterEach(async () => { await Promise.all(dirs.splice(0).map((dir) => rm(dir, { 
 describe("AuthenticationService", () => {
   it("consumes bootstrap token once, sets password, and keeps token invalid across reloads", async () => {
     const { stateDir, auth, init, output } = await setup();
-    expect(init.setupRequired).toBe(true);
-    expect(output).toEqual([init.setupToken]);
+    expect(output).toEqual([join(stateDir, "setup-token")]);
+    expect((await stat(output[0]!)).mode & 0o777).toBe(0o600);
+    expect(await readFile(output[0]!, "utf8")).toBe(init.setupToken);
     const setupLogin = await auth.authenticate(init.setupToken!, "owner-ip");
     expect(setupLogin).toBe("setup");
     expect(await auth.verifyPassword(init.setupToken!, "another-ip")).toBe(false);
@@ -41,6 +42,7 @@ describe("AuthenticationService", () => {
 
     expect(await auth.completePasswordSetup(init.setupToken!, setupSession.token)).toBe("matches_pending_token");
     expect(await auth.completePasswordSetup("correct horse battery", setupSession.token)).toBe("changed");
+    await expect(stat(join(stateDir, "setup-token"))).rejects.toMatchObject({ code: "ENOENT" });
     expect(await auth.authenticate("correct horse battery", "owner-ip")).toBe("password");
     expect(await auth.authenticate("wrong password", "wrong-ip")).toBe(false);
     expect(await auth.authenticate(init.setupToken!, "reuse-ip")).toBe(false);
@@ -94,9 +96,10 @@ describe("AuthenticationService", () => {
     await writeFile(markerPath, "preserve this metadata\n");
     const existingSession = auth.createSession();
     const output: string[] = [];
-    const resetter = createAuthenticationService({ stateDir, setupOutput: (token) => output.push(token) });
+    const resetter = createAuthenticationService({ stateDir, setupOutput: (path) => output.push(path) });
     const newToken = await resetter.resetAuth();
-    expect(output).toEqual([newToken]);
+    expect(output).toEqual([join(stateDir, "setup-token")]);
+    expect(await readFile(output[0]!, "utf8")).toBe(newToken);
     expect(newToken).not.toBe(init.setupToken);
     expect(await readFile(markerPath, "utf8")).toBe("preserve this metadata\n");
     expect(auth.verifySession(existingSession.token)).not.toBeNull();

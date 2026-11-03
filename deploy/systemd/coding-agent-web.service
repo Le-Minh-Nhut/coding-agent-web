@@ -1,6 +1,5 @@
 [Unit]
 Description=Coding Agent Web
-After=default.target
 StartLimitIntervalSec=60
 StartLimitBurst=5
 
@@ -9,13 +8,19 @@ Type=simple
 WorkingDirectory=@REPO_ROOT@
 Environment=CAW_CONFIG=@CONFIG_PATH@
 Environment=PATH=@PATH_VALUE@
-ExecStart=@PNPM_PATH@ start
+ExecStart=node --import tsx @REPO_ROOT@/apps/server/src/server.ts
+# Not `pnpm start`: the app must BE the main process. systemd signals only MAINPID
+# under KillMode=process, and `pnpm start` is a shell shim that forks the real pnpm
+# (which forks `sh -c tsx …`) without forwarding the signal, so stop would kill the
+# shim and leave the HTTP server holding its port while the unit reports "stopped".
+# Running the server entrypoint directly makes the app's own SIGTERM handler the
+# thing systemd stops, which is the half of the contract KillMode=process needs.
+KillMode=process
 Restart=on-failure
 RestartSec=3
 KillSignal=SIGTERM
 StandardOutput=journal
 StandardError=journal
-CPUAccounting=yes
 MemoryAccounting=yes
 
 [Install]

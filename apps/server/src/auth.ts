@@ -1,7 +1,7 @@
 import { createHash, randomBytes, scrypt as scryptCallback, timingSafeEqual } from "node:crypto";
 import { constants } from "node:fs";
 import { promisify } from "node:util";
-import { chmod, mkdir, open, rename, writeFile } from "node:fs/promises";
+import { chmod, mkdir, open, rename, unlink, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadConfig } from "./config.js";
@@ -44,8 +44,9 @@ function safeEqual(left: string, right: string): boolean {
 
 const GLOBAL_FAILURE_THRESHOLD = 50;
 
-export function createAuthenticationService(options: { stateDir: string; ttlHours?: number; insecureCookies?: boolean; now?: () => number; setupOutput?: (token: string) => void }): AuthenticationService {
+export function createAuthenticationService(options: { stateDir: string; ttlHours?: number; insecureCookies?: boolean; now?: () => number; setupOutput?: (path: string) => void }): AuthenticationService {
   const file = join(options.stateDir, "auth-password.json");
+  const setupTokenFile = join(options.stateDir, "setup-token");
   const cookieName = options.insecureCookies ? "caw_session" : COOKIE_NAME;
   const sessions = new Map<string, SessionRecord>();
   const ipRates = new Map<string, RateState>();
@@ -125,6 +126,7 @@ export function createAuthenticationService(options: { stateDir: string; ttlHour
         credentialWriteInProgress = true;
         try {
           await persistRecord({ ...pending, used: true });
+          await unlink(setupTokenFile).catch((error: NodeJS.ErrnoException) => { if (error.code !== "ENOENT") throw error; });
           result = "setup";
         } catch {
           result = false;
@@ -146,13 +148,30 @@ export function createAuthenticationService(options: { stateDir: string; ttlHour
   async function mintPendingToken(): Promise<string> {
     const setupToken = randomBytes(32).toString("base64url");
     const salt = randomBytes(16);
-    await persistRecord({
-      kind: "pending",
-      salt: salt.toString("hex"),
-      hash: (await derive(setupToken, salt)).toString("hex"),
-      expiresAt: now() + PENDING_TOKEN_TTL_MS,
-    });
+    await mkdir(options.stateDir, { recursive: true, mode: 0o700 });
+    await chmod(options.stateDir, 0o700);
+    await unlink(setupTokenFile).catch((error: NodeJS.ErrnoException) => { if (error.code !== "ENOENT") throw error; });
+    const tokenHandle = await open(setupTokenFile, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, 0o600);
+    try {
+      await tokenHandle.writeFile(setupToken);
+      await tokenHandle.chmod(0o600);
+      await tokenHandle.sync();
+    } finally {
+      await tokenHandle.close();
+    }
+    try {
+      await persistRecord({
+        kind: "pending",
+        salt: salt.toString("hex"),
+        hash: (await derive(setupToken, salt)).toString("hex"),
+        expiresAt: now() + PENDING_TOKEN_TTL_MS,
+      });
+    } catch (error) {
+      await unlink(setupTokenFile).catch(() => undefined);
+      throw error;
+    }
     sessions.clear();
+    (options.setupOutput ?? ((path) => process.stdout.write(`Coding Agent Web first-run setup token written to ${path}; read it with: cat ${path}\n`)))(setupTokenFile);
     return setupToken;
   }
 
@@ -168,7 +187,6 @@ export function createAuthenticationService(options: { stateDir: string; ttlHour
       catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw new Error(`Cannot open auth password record: ${error instanceof Error ? error.message : String(error)}`);
         const setupToken = await mintPendingToken();
-        (options.setupOutput ?? ((token) => process.stdout.write(`Coding Agent Web one-time setup token: ${token}\n`)))(setupToken);
         return { setupRequired: true, setupToken };
       }
 
@@ -195,6 +213,39 @@ export function createAuthenticationService(options: { stateDir: string; ttlHour
         }
       } finally {
         await handle?.close();
+      }
+      if (authRecord?.kind === "pending" && authRecord.used && authRecord.expiresAt > now()) {
+        const setupToken = await mintPendingToken();
+        return { setupRequired: true, setupToken };
+      }
+      if (authRecord?.kind === "pending") {
+        let tokenHandle;
+        try { tokenHandle = await open(setupTokenFile, constants.O_RDONLY | constants.O_NOFOLLOW); }
+        catch (error) {
+          if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+            const setupToken = await mintPendingToken();
+            return { setupRequired: true, setupToken };
+          }
+          throw new Error(`Cannot open setup token file ${setupTokenFile}: ${error instanceof Error ? error.message : String(error)}`);
+        }
+        let token: string;
+        try {
+          if (!(await tokenHandle.stat()).isFile()) {
+            await tokenHandle.close();
+            tokenHandle = undefined;
+            const setupToken = await mintPendingToken();
+            return { setupRequired: true, setupToken };
+          }
+          token = await tokenHandle.readFile("utf8");
+        } catch (error) {
+          throw new Error(`Cannot read setup token file ${setupTokenFile}: ${error instanceof Error ? error.message : String(error)}`);
+        } finally {
+          await tokenHandle?.close().catch((error: unknown) => { throw new Error(`Cannot close setup token file ${setupTokenFile}: ${error instanceof Error ? error.message : String(error)}`); });
+        }
+        if (!/^[A-Za-z0-9_-]{43}$/.test(token)) {
+          const setupToken = await mintPendingToken();
+          return { setupRequired: true, setupToken };
+        }
       }
       return { setupRequired: authRecord?.kind === "pending" };
     },
@@ -249,6 +300,7 @@ export function createAuthenticationService(options: { stateDir: string; ttlHour
           session.passwordSetupRequired = false;
           sessions.set(key, session);
         }
+        await unlink(setupTokenFile).catch((error: NodeJS.ErrnoException) => { if (error.code !== "ENOENT") throw error; });
         return "changed";
       } finally {
         credentialWriteInProgress = false;
@@ -289,7 +341,6 @@ export function createAuthenticationService(options: { stateDir: string; ttlHour
     },
     async resetAuth() {
       const setupToken = await mintPendingToken();
-      (options.setupOutput ?? ((token) => process.stdout.write(`Coding Agent Web one-time setup token: ${token}\n`)))(setupToken);
       return setupToken;
     },
     cookie(token, maxAgeSeconds) {

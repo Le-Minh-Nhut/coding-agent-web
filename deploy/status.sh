@@ -1,21 +1,25 @@
 #!/usr/bin/env bash
 set -euo pipefail
 unit=coding-agent-web.service
-resolve_bin() { local name found; found=$(command -v "$1") || return 1; if [[ $found != /* ]]; then found=$(readlink -f "$found") || return 1; fi; [[ -x $found ]] || return 1; printf '%s\n' "$found"; }
-node_path=$(resolve_bin node) || { echo 'Config reader unavailable: node executable not found/resolvable.' >&2; exit 1; }
-systemctl_path=$(resolve_bin systemctl) || { echo 'systemctl executable not found/resolvable.' >&2; exit 1; }
+resolve_bin() { local found; found=$(command -v "$1") || return 1; readlink -f "$found"; }
+node_path=$(resolve_bin node 2>/dev/null || true)
+systemctl_path=$(resolve_bin systemctl 2>/dev/null || true)
 tmux_path=$(resolve_bin tmux 2>/dev/null || true)
 config=${CAW_CONFIG:-$(cd "$(dirname "$0")/.." && pwd)/caw.config.json}
-"$systemctl_path" --user is-enabled "$unit" 2>/dev/null || echo 'enabled: unknown'
-"$systemctl_path" --user is-active "$unit" 2>/dev/null || echo 'running: unknown'
-"$systemctl_path" --user show "$unit" -p MainPID -p ActiveEnterTimestamp -p MemoryCurrent -p CPUUsageNSec 2>/dev/null || echo 'service metrics: unknown'
-started=$("$systemctl_path" --user show "$unit" -p ActiveEnterTimestampMonotonic --value 2>/dev/null || echo unknown)
-if [[ $started =~ ^[0-9]+$ ]] && now=$(awk '{printf "%.0f",$1*1000000}' /proc/uptime); then
-  age=$(((now-started)/1000000)); ((age >= 0)) && echo "Service uptime: ${age}s" || echo 'Service uptime: unknown'
-else echo 'Service uptime: unknown'; fi
-if [[ -r $config ]]; then
-  readarray -t values < <("$node_path" - "$config" <<'NODE'
-const fs=require('node:fs'); try { const c=JSON.parse(fs.readFileSync(process.argv[2],'utf8')); console.log(c.port??8791); console.log(c.stateDir??`${process.env.HOME}/.local/state/coding-agent-web`); } catch { console.log('unknown\nunknown'); }
+port=unknown; state_dir=unknown; started=unknown
+if [[ -n $systemctl_path ]]; then
+  enabled_state=$("$systemctl_path" --user is-enabled "$unit" 2>/dev/null) && echo "enabled: $enabled_state" || echo 'enabled: unknown'
+  if state=$("$systemctl_path" --user is-active "$unit" 2>/dev/null); then echo "running: $state"; else case ${state:-unknown} in inactive) echo 'running: inactive';; failed) echo 'running: failed';; *) echo 'running: unknown';; esac; fi
+  "$systemctl_path" --user show "$unit" -p MainPID -p ActiveEnterTimestamp -p MemoryCurrent -p CPUUsageNSec 2>/dev/null || echo 'service metrics: unknown'
+  started=$("$systemctl_path" --user show "$unit" -p ActiveEnterTimestampMonotonic --value 2>/dev/null || echo unknown)
+else
+  echo 'enabled: unknown'; echo 'running: unknown'; echo 'service metrics: unknown'; started=unknown
+fi
+if [[ $started =~ ^[0-9]+$ ]] && now=$(awk '{printf "%.0f",$1*1000000}' /proc/uptime); then age=$(((now-started)/1000000)); ((age >= 0)) && echo "Service uptime: ${age}s" || echo 'Service uptime: unknown'; else echo 'Service uptime: unknown'; fi
+if [[ -n $node_path ]]; then
+  readarray -t values < <("$node_path" - "$config" "$(cd "$(dirname "$0")/.." && pwd)" <<'NODE'
+const fs=require('node:fs'), path=require('node:path'), os=require('node:os');
+try { const root=process.argv[3]; const c=fs.existsSync(process.argv[2])?JSON.parse(fs.readFileSync(process.argv[2],'utf8')):{}; console.log(c.port??8791); console.log(path.resolve(root,process.env.CAW_STATE_DIR??c.stateDir??path.join(os.homedir(),'.local/state/coding-agent-web'))); } catch { console.log('unknown\nunknown'); }
 NODE
 )
   port=${values[0]:-unknown}; state_dir=${values[1]:-unknown}
