@@ -38,7 +38,7 @@ const schema = z.object({
   ompBinaryPath: z.string().min(1).optional(),
 });
 
-export type ServerConfig = z.infer<typeof schema> & { webDistDir?: string; guestDistDir?: string };
+export type ServerConfig = z.infer<typeof schema> & { webDistDir?: string; guestDistDir?: string; configFile?: string };
 type RawConfig = Record<string, unknown>;
 
 export function findRepoRoot(): string {
@@ -117,18 +117,21 @@ export function validatePublicOrigin(origin: string): string {
   return `${url.protocol}//${url.host}`;
 }
 
-export async function loadConfig(options: { env?: NodeJS.ProcessEnv; filePath?: string } = {}): Promise<ServerConfig> {
+export async function loadConfig(options: { env?: NodeJS.ProcessEnv; filePath?: string; repoRoot?: string } = {}): Promise<ServerConfig> {
   const env = options.env ?? process.env;
+  const repoRoot = options.repoRoot ?? findRepoRoot();
   let file: RawConfig = {};
-  const filePath = options.filePath ?? env.CAW_CONFIG;
-  if (filePath) {
+  const explicitFilePath = options.filePath ?? env.CAW_CONFIG;
+  const filePath = explicitFilePath ?? join(repoRoot, "caw.config.json");
+  const hasConfigFile = explicitFilePath !== undefined || existsSync(filePath);
+  if (hasConfigFile) {
     try {
       const value: unknown = JSON.parse(await readFile(filePath, "utf8"));
       const parsedFile = z.record(z.string(), z.unknown()).safeParse(value);
       if (!parsedFile.success) throw new Error("configuration JSON must be an object");
       file = parsedFile.data;
     } catch (error) {
-      throw new Error(`Cannot read CAW_CONFIG file ${filePath}: ${error instanceof Error ? error.message : String(error)}`);
+      throw new Error(`Cannot read config file ${filePath}: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
   const parsed = schema.safeParse({ ...file, ...envConfig(env) });
@@ -136,7 +139,7 @@ export async function loadConfig(options: { env?: NodeJS.ProcessEnv; filePath?: 
     const issues = parsed.error.issues.map((issue) => `${issue.path.join(".") || "config"}: ${issue.message}`).join("; ");
     throw new Error(`Invalid server configuration: ${issues}. Check config file and CAW_* environment variables.`);
   }
-  const config = parsed.data;
+  const config: ServerConfig = parsed.data;
   if (config.port === config.relayPort) throw new Error("port and relayPort must differ; the host relay has a separate loopback listener");
   if (config.insecureCookies && !["localhost", "127.0.0.1", "::1"].includes(config.host)) throw new Error("insecureCookies is allowed only when host is localhost");
   if (!config.publicOrigin || config.publicOrigin.trim() === "") {
@@ -149,8 +152,8 @@ export async function loadConfig(options: { env?: NodeJS.ProcessEnv; filePath?: 
     if (!isAbsolute(expanded)) throw new Error(`allowedRoots entry must be absolute: ${root}`);
     return resolve(expanded);
   });
-  const repoRoot = findRepoRoot();
   config.webDistDir = resolveDistDir(config.webDistDir ?? "apps/web/dist", repoRoot, "webDistDir");
   config.guestDistDir = resolveDistDir(config.guestDistDir ?? "packages/guest/dist", repoRoot, "guestDistDir");
+  if (hasConfigFile) config.configFile = resolve(filePath);
   return config;
 }

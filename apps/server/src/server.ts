@@ -519,6 +519,7 @@ const app = buildApp({
   tmuxServerIdentity: () => tmux.serverIdentity(),
 });
 await app.ready();
+app.log.info({ configFile: config.configFile ?? "built-in defaults", allowedRoots: config.allowedRoots, publicOrigin: config.publicOrigin, host: config.host, port: config.port, relayPort: config.relayPort }, "configuration loaded");
 
 
 // The host listener is separate from the app/Serve-facing listener and binds loopback only.
