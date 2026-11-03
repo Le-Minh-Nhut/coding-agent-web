@@ -39,7 +39,9 @@ export function AgentDrawer(props: {
   const resumePollingRef = useRef<(() => void) | null>(null);
   const sendingChatRef = useRef(false);
   const quiescentRef = useRef(false);
-  useEffect(() => { setDraft(""); }, [agent.id]);
+  const agentIdRef = useRef(agent.id);
+  agentIdRef.current = agent.id;
+  useEffect(() => { setDraft(""); setSendError(null); }, [agent.id]);
   quiescentRef.current = agent.status !== "running";
 
   useEffect(() => {
@@ -144,12 +146,14 @@ export function AgentDrawer(props: {
     if (!text || sendingChatRef.current) return;
     sendingChatRef.current = true;
     setSendError(null);
-    void client.sendAgentCmd("chat", agent.id, text).then(
+    const issuedFor = agent.id;
+    void client.sendAgentCmd("chat", issuedFor, text).then(
       (accepted) => {
+        if (agentIdRef.current !== issuedFor) return;
         if (accepted) setSendError("sent to socket; host execution unconfirmed");
         else setSendError("message not sent — press send to retry");
       },
-      () => setSendError("message not sent — press send to retry"),
+      () => { if (agentIdRef.current === issuedFor) setSendError("message not sent — press send to retry"); },
     ).finally(() => {
       sendingChatRef.current = false;
     });
@@ -180,11 +184,12 @@ export function AgentDrawer(props: {
               type="button"
               className="ag-btn ag-btn--danger"
               onClick={() => {
-                void client.sendAgentCmd("kill", agent.id).then(
+                const issuedFor = agent.id;
+                void client.sendAgentCmd("kill", issuedFor).then(
                   (accepted) => {
-                    if (!accepted) setSendError("kill command not sent — check connection");
+                    if (agentIdRef.current === issuedFor && !accepted) setSendError("kill command not sent — check connection");
                   },
-                  () => setSendError("kill command not sent — check connection"),
+                  () => { if (agentIdRef.current === issuedFor) setSendError("kill command not sent — check connection"); },
                 );
               }}
             >
@@ -198,11 +203,12 @@ export function AgentDrawer(props: {
               type="button"
               className="ag-btn"
               onClick={() => {
-                void client.sendAgentCmd("revive", agent.id).then(
+                const issuedFor = agent.id;
+                void client.sendAgentCmd("revive", issuedFor).then(
                   (accepted) => {
-                    if (!accepted) setSendError("revive command not sent — check connection");
+                    if (agentIdRef.current === issuedFor && !accepted) setSendError("revive command not sent — check connection");
                   },
-                  () => setSendError("revive command not sent — check connection"),
+                  () => { if (agentIdRef.current === issuedFor) setSendError("revive command not sent — check connection"); },
                 );
               }}
             >

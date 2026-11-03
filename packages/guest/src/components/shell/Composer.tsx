@@ -12,6 +12,7 @@ export interface ComposerProps {
   /** Pending host-side UI request this guest can answer. */
   uiRequest: CollabUiRequest | null;
   uiResponsePending?: boolean;
+  uiRequestEnd?: number | null;
   working: boolean;
   /** App-owned draft, retained across client replacement. */
   queuedMessageCount: number;
@@ -69,7 +70,8 @@ function useCompositionGuard(): {
 }
 
 interface AskEditorProps {
-  prefill: string | undefined;
+  draft: string;
+  onDraftChange(value: string): void;
   onSubmit(value: string): void;
 }
 
@@ -78,8 +80,7 @@ interface AskEditorProps {
  * draft seeded from `prefill`, while re-sends of the same request never clobber a half-typed
  * draft. Submits verbatim — whitespace-only responses are intentional.
  */
-function AskEditor({ prefill, onSubmit }: AskEditorProps): ReactNode {
-  const [draft, setDraft] = useState(prefill ?? "");
+function AskEditor({ draft, onDraftChange, onSubmit }: AskEditorProps): ReactNode {
   const taRef = useRef<HTMLTextAreaElement | null>(null);
   const { composingRef, onCompositionStart, onCompositionEnd } =
     useCompositionGuard();
@@ -101,7 +102,7 @@ function AskEditor({ prefill, onSubmit }: AskEditorProps): ReactNode {
         ref={taRef}
         className="sh-composer-input"
         value={draft}
-        onChange={(e) => setDraft(e.target.value)}
+        onChange={(e) => onDraftChange(e.target.value)}
         onKeyDown={onKeyDown}
         onCompositionStart={onCompositionStart}
         onCompositionEnd={onCompositionEnd}
@@ -131,6 +132,7 @@ export const Composer = memo(function Composer({
   readOnly,
   uiRequest,
   uiResponsePending = false,
+	uiRequestEnd = null,
   working,
   queuedMessageCount,
   draft: text,
@@ -147,6 +149,15 @@ export const Composer = memo(function Composer({
 	const currentClientRef = useRef(client);
 	currentClientRef.current = client;
   const recoveredDraftsRef = useRef(new Map<number, string>());
+  const approvalDraftRef = useRef<{ reqId: number; text: string } | null>(null);
+  const approvalReqId = uiRequest?.kind === "editor" ? uiRequest.reqId : null;
+  if (approvalReqId !== null && approvalDraftRef.current?.reqId !== approvalReqId) approvalDraftRef.current = null;
+  const [approvalDraft, setApprovalDraft] = useState<{ reqId: number; text: string } | null>(null);
+	useEffect(() => {
+		if (uiRequestEnd === null) return;
+		if (approvalDraftRef.current?.reqId === uiRequestEnd) approvalDraftRef.current = null;
+		setApprovalDraft(current => current?.reqId === uiRequestEnd ? null : current);
+	}, [uiRequestEnd]);
   const recoveringRef = useRef(new Set<number>());
   const taRef = useRef<HTMLTextAreaElement | null>(null);
 	const textRef = useRef(text);
@@ -301,7 +312,12 @@ export const Composer = memo(function Composer({
         ) : (
           <AskEditor
             key={uiRequest.reqId}
-            prefill={uiRequest.prefill}
+            draft={approvalDraft?.reqId === uiRequest.reqId ? approvalDraft.text : approvalDraftRef.current?.reqId === uiRequest.reqId ? approvalDraftRef.current.text : uiRequest.prefill ?? ""}
+            onDraftChange={(value) => {
+              const next = { reqId: uiRequest.reqId, text: value };
+              approvalDraftRef.current = next;
+              setApprovalDraft(next);
+            }}
             onSubmit={(value) => submitUiResponse(uiRequest.reqId, value)}
           />
         )}

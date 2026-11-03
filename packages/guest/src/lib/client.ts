@@ -131,7 +131,10 @@ export interface GuestSnapshot {
  	/** Pending host-side UI request (`ask` select/editor) this guest can answer. */
  	uiRequest: CollabUiRequest | null;
  	/** Current UI response was sent locally and awaits host settlement. */
- 	uiResponsePending: boolean;
+  /** Current UI response was sent locally and awaits host settlement. */
+  uiResponsePending: boolean;
+  /** Most recent UI request settlement, used to discard its editor draft. */
+  uiRequestEnd: number | null;
 	/** Capped at 50, newest last. */
 	notices: readonly Notice[];
 	/** Snapshot download progress between `welcome` and its final chunk, else null. */
@@ -223,6 +226,7 @@ export class GuestClient {
 	#readOnly = false;
 	#uiRequest: CollabUiRequest | null = null;
 	#uiRequestQueue: CollabUiRequest[] = [];
+	#uiRequestEnd: number | null = null;
  	#pendingUiResponses = new Set<number>();
 	#notices: readonly Notice[] = [];
 	readonly #recoveryStore: PromptRecoveryStore;
@@ -676,12 +680,13 @@ export class GuestClient {
 					this.#lifecycle = new Map(this.#lifecycle).set(payload.id, payload);
 				}
 				break;
- 			case "ui-request":
- 				if (this.#uiRequest?.reqId === frame.request.reqId || this.#uiRequestQueue.some(request => request.reqId === frame.request.reqId)) break;
- 				if (this.#uiRequest) this.#uiRequestQueue = [...this.#uiRequestQueue, frame.request];
- 				else this.#uiRequest = frame.request;
- 				break;
- 			case "ui-request-end":
+			case "ui-request":
+				if (this.#uiRequest?.reqId === frame.request.reqId || this.#uiRequestQueue.some(request => request.reqId === frame.request.reqId)) break;
+				if (this.#uiRequest) this.#uiRequestQueue = [...this.#uiRequestQueue, frame.request];
+				else this.#uiRequest = frame.request;
+				break;
+			case "ui-request-end":
+				this.#uiRequestEnd = frame.reqId;
  				if (this.#uiRequest?.reqId === frame.reqId) {
  					this.#pendingUiResponses.delete(frame.reqId);
  					this.#showNextUiRequest();
@@ -893,6 +898,7 @@ export class GuestClient {
 			working: this.#working,
 			readOnly: this.#readOnly,
 			uiRequest: this.#uiRequest,
+			uiRequestEnd: this.#uiRequestEnd,
  			uiResponsePending: this.#uiRequest !== null && this.#pendingUiResponses.has(this.#uiRequest.reqId),
 			notices: this.#notices,
             // Keep foreign-room records visible with origin labels; the contract permits explicit recovery/copy/dismiss across rooms, while host mutations stay room-scoped.

@@ -6,6 +6,7 @@ import type { SessionHeader } from "../../packages/guest/src/vendor/wire";
 import { GuestClient, PromptRecoveryStore } from "../../packages/guest/src/lib/client";
 import { CollabSocket } from "../../packages/guest/src/lib/socket";
 import { AgentDrawer } from "../../packages/guest/src/components/agents/AgentDrawer";
+import { Composer } from "../../packages/guest/src/components/shell/Composer";
 
 let App: () => React.ReactNode;
 const link = "wss://example.com/r/AAAAAAAAAAAAAAAA." + "B".repeat(43);
@@ -147,5 +148,54 @@ describe("Round 36 guest fixes", () => {
     view.unmount();
     render(<AgentDrawer agent={agent} client={client} phase="live" onClose={() => {}} />);
     expect((screen.getByPlaceholderText(/message worker/i) as HTMLInputElement).value).toBe("");
+  });
+
+  it("does not show agent A chat result in reused drawer switched to B", async () => {
+    let settle!: (accepted: boolean) => void;
+    const client = { sendAgentCmd: vi.fn(() => new Promise<boolean>(resolve => { settle = resolve; })), fetchTranscript: vi.fn() } as unknown as GuestClient;
+    const agentA = { id: "a", displayName: "worker A", kind: "sub" as const, status: "parked" as const, hasSessionFile: false, createdAt: 0, lastActivity: 0 };
+    const view = render(<AgentDrawer agent={agentA} client={client} phase="live" onClose={() => {}} />);
+    fireEvent.change(screen.getByPlaceholderText(/message worker A/i), { target: { value: "chat A" } });
+    fireEvent.click(screen.getByRole("button", { name: "send" }));
+    view.rerender(<AgentDrawer agent={{ ...agentA, id: "b", displayName: "worker B" }} client={client} phase="live" onClose={() => {}} />);
+    await act(async () => { settle(true); });
+    expect(screen.getByRole("dialog", { name: "worker B" }).textContent).not.toContain("host execution unconfirmed");
+  });
+
+  it("preserves approval editor draft across reconnect replay", () => {
+    const client = new GuestClient(link, "guest", new PromptRecoveryStore());
+    const state = { isStreaming: false, queuedMessageCount: 0, cwd: "", participants: [] };
+    const request = { reqId: 41, kind: "editor" as const, title: "Approve?", prefill: "" };
+    const renderComposer = (uiRequest: typeof request | null) => <Composer client={client} phase="live" readOnly={false} uiRequest={uiRequest} working={false} queuedMessageCount={0} draft="" onDraftChange={() => {}} />;
+    const view = render(renderComposer(request));
+    fireEvent.change(screen.getByPlaceholderText("type your response…"), { target: { value: "my typed approval" } });
+    client.applyFrameForTest({ t: "welcome", proto: 3, header: { id: "session" } as unknown as SessionHeader, state, agents: [], entryCount: 0 });
+    view.rerender(renderComposer(null));
+    client.applyFrameForTest({ t: "ui-request", request });
+    view.rerender(renderComposer(request));
+    expect((screen.getByPlaceholderText("type your response…") as HTMLTextAreaElement).value).toBe("my typed approval");
+    const differentRequest = { ...request, reqId: 42, prefill: "new prefill" };
+    view.rerender(renderComposer(differentRequest));
+    expect((screen.getByPlaceholderText("type your response…") as HTMLTextAreaElement).value).toBe("new prefill");
+    client.close();
+  });
+
+  it("drops approval draft settled while a different request is current", async () => {
+    const client = new GuestClient(link, "guest", new PromptRecoveryStore());
+    const state = { isStreaming: false, queuedMessageCount: 0, cwd: "", participants: [] };
+    const first = { reqId: 41, kind: "editor" as const, title: "Approve?", prefill: "first prefill" };
+    const second = { reqId: 42, kind: "editor" as const, title: "Other?", prefill: "second prefill" };
+    let active: typeof first | typeof second | null = first;
+    let ended: number | null = null;
+    const renderComposer = () => <Composer client={client} phase="live" readOnly={false} uiRequest={active} uiRequestEnd={ended} working={false} queuedMessageCount={0} draft="" onDraftChange={() => {}} />;
+    const view = render(renderComposer());
+    fireEvent.change(screen.getByPlaceholderText("type your response…"), { target: { value: "stale approval" } });
+    act(() => { active = second; view.rerender(renderComposer()); });
+    expect((screen.getByPlaceholderText("type your response…") as HTMLTextAreaElement).value).toBe("second prefill");
+    act(() => { client.applyFrameForTest({ t: "ui-request-end", reqId: 41 }); ended = 41; view.rerender(renderComposer()); });
+    await act(async () => { await Promise.resolve(); });
+    act(() => { active = first; view.rerender(renderComposer()); });
+    expect((screen.getByPlaceholderText("type your response…") as HTMLTextAreaElement).value).toBe("first prefill");
+    client.close();
   });
 });
