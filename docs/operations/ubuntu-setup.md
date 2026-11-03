@@ -202,6 +202,7 @@ journalctl --user -u coding-agent-web -g 'configuration loaded'
 ```
 
 The `configuration loaded` record shows configFile, allowedRoots, publicOrigin, host, port, and relayPort; it contains no secrets. Verify it before phone access. Do not restart while actively using the app, and never restart a service you did not start. The service is the only server instance; stop any manual `pnpm start` before enabling it.
+For the idempotent installer, status/idle benchmark, and removal steps, see [`deployment.md`](deployment.md).
 
 ## 6. Upgrade procedure
 ```bash

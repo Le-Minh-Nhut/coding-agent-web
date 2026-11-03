@@ -1,0 +1,22 @@
+[Unit]
+Description=Coding Agent Web
+After=default.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+WorkingDirectory=@REPO_ROOT@
+Environment=CAW_CONFIG=@CONFIG_PATH@
+Environment=PATH=@PATH_VALUE@
+ExecStart=@PNPM_PATH@ start
+Restart=on-failure
+RestartSec=3
+KillSignal=SIGTERM
+StandardOutput=journal
+StandardError=journal
+CPUAccounting=yes
+MemoryAccounting=yes
+
+[Install]
+WantedBy=default.target
