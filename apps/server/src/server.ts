@@ -559,33 +559,47 @@ const hostRelayListening = new Promise<void>((resolve, reject) => {
     resolve();
   });
 });
-await hostRelayListening;
-try {
-  await relay.start();
-  app.log.info({ port: config.port }, "private collab relay attached at /r/<roomId>?role=host|guest");
-} catch (error) {
-  const message = error instanceof Error ? String(redactLogValue(error.message)) : "Unknown relay error";
-  app.log.error({ message }, "relay failed to attach");
-}
 
-// Reconcile before listening: the UI's first paint should show what is really
-// running, not what we remember from the last process.
-const report = await supervisor.reconcile();
-app.log.info(report, "runtime reconciled");
-
-const shutdown = async (signal: string) => {
-  await relay.stop().catch(() => undefined);
-  await app.close().catch(() => undefined);
+let shutdownPromise: Promise<void> | undefined;
+const shutdown = async (_signal: string) => {
+  if (shutdownPromise) return shutdownPromise;
+  shutdownPromise = (async () => {
+    await relay.stop().catch(() => undefined);
+    await hostRelayListening.catch(() => undefined);
+    if (hostRelayServer.listening) {
+      await new Promise<void>((resolve) => hostRelayServer.close(() => resolve()));
+    }
+    await app.close().catch(() => undefined);
+  })();
+  return shutdownPromise;
 };
 process.on("SIGTERM", () => void shutdown("SIGTERM"));
 process.on("SIGINT", () => void shutdown("SIGINT"));
 
 try {
+  await hostRelayListening;
+  if (shutdownPromise) return;
+  try {
+    await relay.start();
+    if (shutdownPromise) return;
+    app.log.info({ port: config.port }, "private collab relay attached at /r/<roomId>?role=host|guest");
+  } catch (error) {
+    const message = error instanceof Error ? String(redactLogValue(error.message)) : "Unknown relay error";
+    app.log.error({ message }, "relay failed to attach");
+  }
+
+  // Reconcile before listening: the UI's first paint should show what is really
+  // running, not what we remember from the last process.
+  const report = await supervisor.reconcile();
+  if (shutdownPromise) return;
+  app.log.info(report, "runtime reconciled");
+
   await app.listen({ host: config.host, port: config.port });
 } catch (error) {
-  const message = error instanceof Error ? String(redactLogValue(error.message)) : "Unknown listen error";
-  app.log.error({ message }, "server failed to listen");
+  const message = error instanceof Error ? String(redactLogValue(error.message)) : "Unknown startup error";
+  app.log.error({ message }, "server failed to start");
   process.exitCode = 1;
+  await shutdown("startup failure");
 }
 }
 
