@@ -26,6 +26,7 @@ export function ProjectDetailView({
   const [attachingSessionId, setAttachingSessionId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const viewGenerationRef = useRef(0);
+  const viewActiveRef = useRef(false);
   const [conversationsLoaded, setConversationsLoaded] = useState(false);
 
   const loadData = async () => {
@@ -49,11 +50,11 @@ export function ProjectDetailView({
     if (sessRes.ok) setNativeSessions(sessRes.data);
     else setError(sessRes.error.message || "Could not verify native session hosts.");
   };
-
   useEffect(() => {
+    viewActiveRef.current = true;
     viewGenerationRef.current++;
     void loadData();
-    return () => { viewGenerationRef.current++; };
+    return () => { viewActiveRef.current = false; viewGenerationRef.current++; };
   }, [projectId]);
 
   const handleNewChat = async () => {
@@ -82,14 +83,13 @@ export function ProjectDetailView({
       setError("This session already has a writer or its lease cannot be verified. Attach in the terminal instead; no second agent was started.");
     } else setError(result.error.message);
   };
-  const handleRetry = async (sessionId: string) => {
-    const conversation = conversations.find((item) => item.nativeSessionId === sessionId && item.ownership === "managed" && (item.state === "error" || item.state === "stopped"));
-    if (!conversation || resumingSessionId) return;
+  const handleRetryConversation = async (conversation: Conversation) => {
+    if (resumingSessionId) return;
     const generation = viewGenerationRef.current;
-    setResumingSessionId(sessionId);
+    setResumingSessionId(conversation.id);
     setError(null);
     const result = await api.restartConversation(conversation.id);
-    if (generation !== viewGenerationRef.current) return;
+    if (!viewActiveRef.current || generation !== viewGenerationRef.current) return;
     setResumingSessionId(null);
     if (result.ok) onSelectConversation(conversation.id);
     else if (result.error.code === "conflict_owner") setError("This session already has a writer or its lease cannot be verified. Attach in the terminal instead; no second agent was started.");
@@ -183,6 +183,11 @@ export function ProjectDetailView({
                   {conv.statusDetail}
                 </p>
               )}
+              {conv.ownership === "managed" && !conv.nativeSessionId && (conv.state === "error" || conv.state === "stopped") && (
+                <button type="button" className="primary" disabled={resumingSessionId !== null} onClick={(event) => { event.stopPropagation(); void handleRetryConversation(conv); }}>
+                  {resumingSessionId === conv.id ? "Retrying…" : "Retry launch"}
+                </button>
+              )}
             </div>
           ))}
         </div>
@@ -231,8 +236,8 @@ export function ProjectDetailView({
                   </button>
                 )}
                 {sess.tracked && sess.live === false && conversations.some((item) => item.nativeSessionId === sess.sessionId && item.ownership === "managed" && (item.state === "error" || item.state === "stopped")) && (
-                  <button type="button" className="primary" disabled={resumingSessionId !== null} onClick={(event) => { event.stopPropagation(); void handleRetry(sess.sessionId); }}>
-                    {resumingSessionId === sess.sessionId ? "Retrying…" : "Retry"}
+                  <button type="button" className="primary" disabled={resumingSessionId !== null} onClick={(event) => { event.stopPropagation(); const conversation = conversations.find((item) => item.nativeSessionId === sess.sessionId); if (conversation) void handleRetryConversation(conversation); }}>
+                    {resumingSessionId !== null ? "Retrying…" : "Retry"}
                   </button>
                 )}
               </div>
