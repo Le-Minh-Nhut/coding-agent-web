@@ -279,3 +279,31 @@ exit 0
     expect(result.stdout).toMatch(/Would leave untouched/);
   });
 });
+describe("status.sh service state reporting", () => {
+  it.each([
+    ["disabled", "disabled", "enabled: disabled", "running: inactive"],
+    ["enabled but inactive", "enabled", "enabled: enabled", "running: inactive"],
+    ["missing unit", "not-found", "enabled: unknown", "running: unknown"],
+  ])("reports %s without conflating enabled and running", (_label, enabled, expectedEnabled, expectedRunning) => {
+    const dir = scratch("caw-status-");
+    const bin = join(dir, "bin");
+    mkdirSync(bin);
+    const script = join(repoRoot, "deploy/status.sh");
+    writeFileSync(join(bin, "systemctl"), `#!/bin/sh
+case "$*" in
+  *" is-enabled "*) printf '%s\\n' ${JSON.stringify(enabled)}; [ ${JSON.stringify(enabled)} = enabled ];;
+  *" is-active "*) if [ ${JSON.stringify(enabled)} = not-found ]; then printf '%s\\n' unknown; exit 4; else printf '%s\\n' inactive; exit 3; fi;;
+  *" show "*) exit 0;;
+esac
+exit 0
+`);
+    chmodSync(join(bin, "systemctl"), 0o755);
+    const result = execFileSync("bash", [script], {
+      cwd: dir,
+      encoding: "utf8",
+      env: { ...process.env, PATH: `${bin}:${dirname(process.execPath)}:/usr/bin:/bin`, CAW_CONFIG: join(dir, "missing-config") },
+    });
+    expect(result).toContain(expectedEnabled);
+    expect(result).toContain(expectedRunning);
+  });
+});

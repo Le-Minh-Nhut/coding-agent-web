@@ -8,7 +8,8 @@ tmux_path=$(resolve_bin tmux 2>/dev/null || true)
 config=${CAW_CONFIG:-$(cd "$(dirname "$0")/.." && pwd)/caw.config.json}
 port=unknown; state_dir=unknown; started=unknown
 if [[ -n $systemctl_path ]]; then
-  enabled_state=$("$systemctl_path" --user is-enabled "$unit" 2>/dev/null) && echo "enabled: $enabled_state" || echo 'enabled: unknown'
+  enabled_state=$("$systemctl_path" --user is-enabled "$unit" 2>/dev/null || true)
+  case $enabled_state in enabled|enabled-runtime|disabled|disabled-runtime|static|indirect|masked|masked-runtime|generated|transient|linked|linked-runtime|alias) echo "enabled: $enabled_state";; *) echo 'enabled: unknown';; esac
   if state=$("$systemctl_path" --user is-active "$unit" 2>/dev/null); then echo "running: $state"; else case ${state:-unknown} in inactive) echo 'running: inactive';; failed) echo 'running: failed';; *) echo 'running: unknown';; esac; fi
   "$systemctl_path" --user show "$unit" -p MainPID -p ActiveEnterTimestamp -p MemoryCurrent -p CPUUsageNSec 2>/dev/null || echo 'service metrics: unknown'
   started=$("$systemctl_path" --user show "$unit" -p ActiveEnterTimestampMonotonic --value 2>/dev/null || echo unknown)

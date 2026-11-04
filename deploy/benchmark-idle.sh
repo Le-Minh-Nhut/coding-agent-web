@@ -25,7 +25,8 @@ sessions() {
   fi
   "$tmux_path" -S "$socket" list-sessions -F '#{session_id}' 2>/dev/null
 }
-sessions >/dev/null || { echo 'Refusing idle label: private tmux state unknown.'; exit 1; }
+active_start=$(sessions) || { echo 'Refusing idle label: private tmux state unknown.'; exit 1; }
+[[ -z $active_start ]] || { echo 'Refusing idle label: managed agents existed at measurement start.'; exit 1; }
 get() { "$systemctl_path" --user show "$unit" -p "$1" --value 2>/dev/null | head -n1; }
 mem1=$(get MemoryCurrent); cpu1=$(get CPUUsageNSec); pid1=$(get MainPID); tasks1=$(get TasksCurrent); cgroup1=$(get ControlGroup)
 [[ $mem1 =~ ^[0-9]+$ && $cpu1 =~ ^[0-9]+$ && $pid1 =~ ^[1-9][0-9]*$ && -n $cgroup1 ]] || { echo 'Required service cgroup metrics missing; measurement unknown.'; exit 1; }
