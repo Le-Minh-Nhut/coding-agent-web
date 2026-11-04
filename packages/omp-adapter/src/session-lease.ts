@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
-import { homedir } from "node:os";
 import path from "node:path";
+import { resolveOmpDirs } from "./omp-dirs.js";
 import type { SessionLeaseProbe } from "./types.js";
 
 export const HIGH_SEED = 0x4f4d502d4c4f434bn;
@@ -110,9 +110,7 @@ export class DefaultSessionLeaseProbe implements SessionLeaseProbe {
     this.#ownersDir =
       options.ownersDir ??
       process.env.OMP_SESSION_OWNERS_DIR ??
-      (process.env.XDG_STATE_HOME
-        ? path.join(process.env.XDG_STATE_HOME, "omp", "run", "session-owners")
-        : path.join(homedir(), ".omp", "run", "session-owners"));
+      resolveOmpDirs().sessionOwnersDir;
     this.#procNetUnixPath = options.procNetUnixPath ?? "/proc/net/unix";
   }
 

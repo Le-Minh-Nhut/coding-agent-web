@@ -161,14 +161,7 @@ export class CollabSocket {
 		if (this.#closed) return;
 		const fatalReason = RELAY_CLOSE_REASONS[code];
 		const closeReason = fatalReason ?? (reason || `connection lost (code ${code})`);
-		// A 4004 after a 4001 retry means the recreated room never came back.
-		if (this.#opts.role === "guest" && code === 4004 && this.#retryMissingRoom) {
-			this.#closed = true;
-			this.#retryMissingRoom = false;
-			this.onClose?.(closeReason, false);
-			return;
-		}
-		const retryRoom = this.#opts.role === "guest" && code === 4001;
+		const retryRoom = this.#opts.role === "guest" && (code === 4001 || (code === 4004 && this.#retryMissingRoom));
 		if (retryRoom) {
 			this.#retryMissingRoom = true;
 			this.onClose?.(closeReason, true);

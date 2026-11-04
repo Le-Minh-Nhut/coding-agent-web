@@ -189,16 +189,13 @@ try {
   check("session store present", "warn", `${sessionsRoot} (no sessions yet)`);
 }
 
-const ownersDir = path.join(homedir(), ".omp", "run", "session-owners");
 try {
   await access(path.join(homedir(), ".omp", "run"));
   check("run dir present", "ok", path.join(homedir(), ".omp", "run"));
 } catch {
   check("run dir present", "warn", "owner leases are created lazily on first lock; absence is normal");
 }
-void ownersDir;
 
-// Linux abstract-socket leases are how we detect a live writer.
 if (process.platform === "linux") {
   try {
     const unix = await readFile("/proc/net/unix", "utf8");

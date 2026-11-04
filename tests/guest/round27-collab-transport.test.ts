@@ -125,7 +125,7 @@ describe("collab socket handshake gate", () => {
     await vi.waitFor(() => expect(received).toEqual(["hello"]), { timeout: 5000 });
   });
 
-  it("treats a 4004 after a 4001 retry as terminal instead of retrying forever", async () => {
+  it("retries a 4004 after a 4001 room teardown", async () => {
     const key = await importRoomKey(generateRoomKey());
     const { server, port } = await startServer();
     let connections = 0;
@@ -151,10 +151,8 @@ describe("collab socket handshake gate", () => {
     await vi.waitFor(() => expect(closes.length).toBe(2), { timeout: 8000 });
 
     expect(closes[0]).toEqual({ reason: "room closed", willReconnect: true });
-    expect(closes[1]?.willReconnect).toBe(false);
-    const connectionsAfterTerminalClose = connections;
-    await new Promise((resolve) => setTimeout(resolve, 1500));
-    expect(connections).toBe(connectionsAfterTerminalClose);
+    expect(closes[1]).toEqual({ reason: "no such room", willReconnect: true });
+    await vi.waitFor(() => expect(connections).toBeGreaterThan(2), { timeout: 8000 });
   });
 
   it("refuses all prompts before welcome without closing socket", async () => {

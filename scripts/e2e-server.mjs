@@ -175,10 +175,9 @@ chmodSync(passwordFile, 0o600);
 // Two extra layers keep the *registry* route clean on a runner with no OMP:
 // first, the product answers `[]` on its own when the registry directory is
 // absent (no directory means no host has ever published); second, the pinned
-// stub answers `collab list` with an empty host list. The registry directory is
-// pointed at the harness temp tree through `XDG_STATE_HOME` so the *populated
-// directory* case is exercised hermetically — the owner's real
-// `~/.omp/run/collab-hosts` is never read by a test.
+// OMP's collab registry is rooted at getBaseConfigRoot()/run/collab-hosts and
+// ignores XDG_STATE_HOME. Sandbox HOME so registry, sessions, and default OMP
+// config stay under this harness; XDG_STATE_HOME still exercises lease adoption.
 const stubBinDir = join(tempRoot, "stub-bin");
 mkdirSync(stubBinDir, { recursive: true });
 const stubOmp = join(stubBinDir, "omp");
@@ -187,7 +186,10 @@ const canaryDir = join(tempRoot, "canary-bin");
 mkdirSync(canaryDir, { recursive: true });
 const canaryLog = join(tempRoot, "omp-canary.jsonl");
 const xdgStateHome = join(tempRoot, "xdg-state");
-const registryDir = join(xdgStateHome, "omp", "run", "collab-hosts");
+const ompHome = join(tempRoot, "home");
+mkdirSync(join(xdgStateHome, "omp", "run", "session-owners"), { recursive: true });
+mkdirSync(ompHome, { recursive: true });
+const registryDir = join(ompHome, ".omp", "run", "collab-hosts");
 mkdirSync(registryDir, { recursive: true });
 writeFileSync(
   stubOmp,
@@ -227,8 +229,14 @@ writeFileSync(
   { mode: 0o755 },
 );
 
+const clearedOmpEnvKeys = new Set([
+  "HOME", "PI_CONFIG_DIR", "PI_CODING_AGENT_DIR", "PI_CODING_AGENT_SESSION_DIR", "PI_CONFIG_FILES",
+  "PI_PROFILE", "OMP_PROFILE", "XDG_STATE_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "OMP_SESSION_OWNERS_DIR",
+]);
+const cleanParentEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) => !clearedOmpEnvKeys.has(key)));
+
 const env = {
-  ...process.env,
+  ...cleanParentEnv,
   CAW_HOST: "127.0.0.1",
   CAW_PORT: process.env.CAW_E2E_PORT ?? "4399",
   CAW_STATE_DIR: stateDir,
@@ -238,9 +246,8 @@ const env = {
   CAW_OMP_BINARY_PATH: stubOmp,
   CAW_E2E_OMP_STUB_LOG: stubLog,
   CAW_E2E_OMP_CANARY_LOG: canaryLog,
-  // Collab registry directory (and the session-lease owner dir) live in the harness
-  // temp tree, so the "directory exists" branch is exercised without reading the
-  // owner's real ~/.omp state.
+  // Registry uses HOME/.omp; leases use the existing XDG_STATE_HOME/omp branch.
+  HOME: ompHome,
   XDG_STATE_HOME: xdgStateHome,
   // Canary first: if any code path still runs a bare `omp`, it lands here and the
   // no-launch spec fails on a non-empty canary log instead of quietly paying for a

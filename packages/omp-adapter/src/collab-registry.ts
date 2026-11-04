@@ -1,8 +1,7 @@
 import { execFile } from "node:child_process";
 import { access, constants } from "node:fs/promises";
-import { homedir } from "node:os";
-import path from "node:path";
 import { promisify } from "node:util";
+import { resolveOmpDirs } from "./omp-dirs.js";
 import { AdapterError, RegistryUnreadableError, StaleGenerationError } from "./errors.js";
 import type {
   CollabHost,
@@ -111,11 +110,9 @@ export class DefaultCollabRegistryService implements CollabRegistryService {
 
   constructor(options: CollabRegistryOptions = {}) {
     this.#ompBinary = options.ompBinary ?? "omp";
-    this.#registryDir =
-      options.registryDir ??
-      (process.env.XDG_STATE_HOME
-        ? path.join(process.env.XDG_STATE_HOME, "omp", "run", "collab-hosts")
-        : path.join(homedir(), ".omp", "run", "collab-hosts"));
+    // OMP's `collabHostsRuntimeDir()` is `getBaseConfigRoot()/run/collab-hosts`
+    // with no XDG branch, so `XDG_STATE_HOME` must not move it.
+    this.#registryDir = options.registryDir ?? resolveOmpDirs().collabHostsDir;
   }
 
   /**

@@ -174,14 +174,9 @@ export class CollabSocket {
     if (this.#closed) return;
     const fatalReason = RELAY_CLOSE_REASONS[code];
     const closeReason = fatalReason ?? (reason || `connection lost (code ${code})`);
-    const retryRoom = this.#role === "guest" && code === 4001;
+    // Mirrors upstream relay-client.ts:753-760: retry 4004 while recovering from 4001.
+    const retryRoom = this.#role === "guest" && (code === 4001 || (code === 4004 && this.#retryMissingRoom));
 
-    if (this.#role === "guest" && code === 4004 && this.#retryMissingRoom) {
-      this.#closed = true;
-      this.#retryMissingRoom = false;
-      this.onClose?.(closeReason, false, true);
-      return;
-    }
 
     if (retryRoom) {
       this.#retryMissingRoom = true;

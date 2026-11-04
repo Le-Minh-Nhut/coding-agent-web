@@ -78,9 +78,9 @@ afterwards:
   no directory means no host has ever published, so the empty list is a
   confirmed fact (proved by `tests/adapter/collab-registry.test.ts`). Layer 2 is
   the pinned stub, which answers that call with an empty host list. The launcher
-  also sets `XDG_STATE_HOME` to the harness temp dir, so the registry directory
-  *exists* under the harness (the "populated directory" branch is what gets
-  exercised) and the owner's real `~/.omp/run/collab-hosts` is never read.
+  sandboxes `HOME` inside its temp tree and creates `$HOME/.omp/run/collab-hosts`,
+  matching OMP's `getBaseConfigRoot()/run/collab-hosts` rule (the registry ignores
+  `XDG_STATE_HOME`). `XDG_STATE_HOME` remains sandboxed too, covering lease adoption.
 - The server is started as `tsx apps/server/src/server.ts` (via the workspace's
   own `node_modules/.bin/tsx`, overridable with `CAW_E2E_TSX`) rather than a
   TypeScript build, so the suite exercises current source.

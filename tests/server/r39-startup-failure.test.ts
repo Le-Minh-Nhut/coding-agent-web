@@ -55,7 +55,7 @@ async function expectStartupFailure(busy: "app" | "relay") {
   await writeFile(stubPath, "#!/usr/bin/env node\nprocess.stdout.write('{\"hosts\":[]}');\n", { mode: 0o700 });
   const child = spawn(process.execPath, ["--import", "tsx", join(repoRoot, "apps/server/src/server.ts")], {
     cwd: repoRoot,
-    env: { ...process.env, CAW_CONFIG: configPath, CAW_STATE_DIR: join(dir, "state"), CAW_OMP_BINARY_PATH: stubPath, XDG_STATE_HOME: join(dir, "xdg"), TMPDIR: process.env.HOME ? join(process.env.HOME, ".cache") : tmpdir() },
+    env: { ...process.env, HOME: dir, CAW_CONFIG: configPath, CAW_STATE_DIR: join(dir, "state"), CAW_OMP_BINARY_PATH: stubPath, XDG_STATE_HOME: join(dir, "xdg"), TMPDIR: process.env.HOME ? join(process.env.HOME, ".cache") : tmpdir() },
     stdio: ["ignore", "pipe", "pipe"],
     shell: false,
   });

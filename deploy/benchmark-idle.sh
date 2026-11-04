@@ -43,6 +43,6 @@ procs=/sys/fs/cgroup$cgroup/cgroup.procs
 [[ -r $procs ]] || { echo 'Cgroup process list unavailable; measurement unknown.'; exit 1; }
 processes=$(wc -l < "$procs")
 cpu=$(awk -v d="$((cpu2-cpu1))" -v w="$interval" 'BEGIN {printf "%.3f",d/1000000000/w*100}')
-report=$(printf 'Measurement: idle (zero agents confirmed by absent socket/process or live socket enumerated empty)\nInterval: %s s\nAverage service CPU: %s%%\nCgroup MemoryCurrent: %s\nMain process: %s\nProcess count: %s\nThreads (process): %s; cgroup TasksCurrent: %s -> %s\nProcess RSS: %s\nCgroup MemoryCurrent and CPUUsageNSec cover whole service cgroup, including pnpm and descendants; RSS/threads count MainPID only.\n' "$interval" "$cpu" "$mem2" "$pid1" "$processes" "$threads" "${tasks1:-unknown}" "${tasks2:-unknown}" "$rss")
+report=$(printf 'Measurement: idle at sampled endpoints (zero agents confirmed by absent socket/process or live socket enumerated empty); transient activity between samples is not detected\nInterval: %s s\nAverage service CPU: %s%%\nCgroup MemoryCurrent: %s\nMain process: %s\nProcess count: %s\nThreads (process): %s; cgroup TasksCurrent: %s -> %s\nProcess RSS: %s\nCgroup MemoryCurrent and CPUUsageNSec cover whole service cgroup, including pnpm and descendants; RSS/threads count MainPID only.\n' "$interval" "$cpu" "$mem2" "$pid1" "$processes" "$threads" "${tasks1:-unknown}" "${tasks2:-unknown}" "$rss")
 printf '%s\n' "$report"
 [[ -z $out ]] || printf '%s\n' "$report" > "$out"

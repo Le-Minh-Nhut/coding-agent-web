@@ -37,7 +37,7 @@ async function portReachable(port: number): Promise<boolean> {
 async function startServer(dir: string, port: number, relayPort: number) {
   const child = spawn(process.execPath, ["--import", "tsx", join(repoRoot, "apps/server/src/server.ts")], {
     cwd: repoRoot,
-    env: { ...process.env, CAW_CONFIG: join(dir, "config.json"), CAW_OMP_BINARY_PATH: join(dir, "omp-stub.mjs"), XDG_STATE_HOME: join(dir, "xdg"), TMPDIR: process.env.HOME ? join(process.env.HOME, ".cache") : tmpdir() },
+    env: { ...process.env, HOME: dir, CAW_CONFIG: join(dir, "config.json"), CAW_OMP_BINARY_PATH: join(dir, "omp-stub.mjs"), XDG_STATE_HOME: join(dir, "xdg"), TMPDIR: process.env.HOME ? join(process.env.HOME, ".cache") : tmpdir() },
     stdio: ["ignore", "pipe", "pipe"],
     shell: false,
   });

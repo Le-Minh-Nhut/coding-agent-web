@@ -18,7 +18,7 @@ class FakeWebSocket {
 
 afterEach(() => { vi.useRealTimers(); FakeWebSocket.sockets = []; });
 
-it("stops retrying after room-closed followed by no-such-room", async () => {
+it("retries after room-closed followed by no-such-room, matching upstream relay-client.ts:753-760", async () => {
   vi.useFakeTimers();
   const closes: Array<{ reason: string; willReconnect: boolean; roomRetired?: boolean }> = [];
   const client = new CollabSocket({ wsUrl: "ws://127.0.0.1/r/retired-fixture", role: "guest", key: {} as CryptoKey, WebSocketClass: FakeWebSocket as unknown as typeof WebSocket });
@@ -31,13 +31,11 @@ it("stops retrying after room-closed followed by no-such-room", async () => {
     FakeWebSocket.sockets[1]!.open();
     FakeWebSocket.sockets[1]!.serverClose(4004);
     await vi.advanceTimersByTimeAsync(40_000);
-    expect(FakeWebSocket.sockets).toHaveLength(2);
-    expect(closes.map(({ willReconnect, roomRetired }) => ({ willReconnect, roomRetired }))).toEqual([
-      { willReconnect: true, roomRetired: undefined },
-      { willReconnect: false, roomRetired: true },
-    ]);
+    expect(FakeWebSocket.sockets).toHaveLength(3);
+    expect(closes.map(({ willReconnect }) => willReconnect)).toEqual([true, true]);
     expect(new Set(FakeWebSocket.sockets.map((socket) => socket.url)).size).toBe(1);
   } finally {
     client.close();
   }
 });
+

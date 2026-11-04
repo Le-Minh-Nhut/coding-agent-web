@@ -23,6 +23,7 @@ import { afterAll, describe, expect, it } from "vitest";
  * pre-fix artifacts to prove they fail there; they default to the repo files.
  */
 const repoRoot = fileURLToPath(new URL("../..", import.meta.url));
+const installPath = process.env.R40_INSTALL_SCRIPT ?? join(repoRoot, "deploy/install.sh");
 const unitTemplatePath = process.env.R40_UNIT_TEMPLATE ?? join(repoRoot, "deploy/systemd/coding-agent-web.service");
 const uninstallPath = process.env.R40_UNINSTALL_SCRIPT ?? join(repoRoot, "deploy/uninstall.sh");
 
@@ -35,7 +36,6 @@ function scratch(prefix: string): string {
 afterAll(() => {
   for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
 });
-
 /** Render the unit template the way deploy/install.sh does. */
 function renderUnit(): string {
   const values: Record<string, string> = {
@@ -43,9 +43,25 @@ function renderUnit(): string {
     "@CONFIG_PATH@": join(repoRoot, "caw.config.json"),
     "@PATH_VALUE@": "/usr/bin:/bin",
     "@PNPM_PATH@": "/home/example/.local/share/pnpm/pnpm",
+    "@STATE_DIR@": "/home/example/.local/state/coding-agent-web",
   };
-  return readFileSync(unitTemplatePath, "utf8").replace(/@(?:REPO_ROOT|CONFIG_PATH|PATH_VALUE|PNPM_PATH)@/g, (key) => values[key] ?? key);
+  return readFileSync(unitTemplatePath, "utf8").replace(/@(?:REPO_ROOT|CONFIG_PATH|PATH_VALUE|PNPM_PATH|STATE_DIR)@/g, (key) => values[key] ?? key);
 }
+
+describe("systemd environment contract", () => {
+  it("pins installer-validated state directory and unsets only ambient overrides", () => {
+    const directives = renderUnit().split("\n").map((line) => line.trim());
+    expect(directives).toContain("Environment=CAW_STATE_DIR=/home/example/.local/state/coding-agent-web");
+    const unset = directives.find((line) => line.startsWith("UnsetEnvironment="));
+    expect(unset).toContain("CAW_MAX_ACTIVE_AGENTS");
+    expect(unset).not.toMatch(/\bCAW_CONFIG\b|\bCAW_STATE_DIR\b/);
+    expect(readFileSync(unitTemplatePath, "utf8")).toContain("UnsetEnvironment runs after Environment; never list CAW_CONFIG or CAW_STATE_DIR here.");
+  });
+
+  it("rejects percent and newline in substituted installer values", () => {
+    expect(readFileSync(installPath, "utf8")).toMatch(/value != \*%\* && \$value != \*\$'\\n'\*/);
+  });
+});
 
 describe("systemd unit lifecycle contract", () => {
   it("stops the unit with KillMode=process so the cgroup kill cannot reach managed agents", () => {

@@ -65,7 +65,7 @@ async function launch() {
   await writeFile(stubPath, `#!/usr/bin/env node\nconst fs = await import('node:fs');\nfs.appendFileSync(process.env.OMP_INVOCATIONS, JSON.stringify(process.argv.slice(2)) + '\\n');\nprocess.stdout.write('{"hosts":[]}');\n`, { mode: 0o700 });
   const child = spawn(process.execPath, ["--import", "tsx", join(repoRoot, "apps/server/src/server.ts")], {
     cwd: repoRoot,
-    env: { ...process.env, CAW_CONFIG: configPath, CAW_STATE_DIR: stateDir, CAW_OMP_BINARY_PATH: stubPath, OMP_INVOCATIONS: invocationsPath, XDG_STATE_HOME: join(dir, "xdg"), TMPDIR: process.env.HOME ? join(process.env.HOME, ".cache") : tmpdir() },
+    env: { ...process.env, HOME: dir, CAW_CONFIG: configPath, CAW_STATE_DIR: stateDir, CAW_OMP_BINARY_PATH: stubPath, OMP_INVOCATIONS: invocationsPath, XDG_STATE_HOME: join(dir, "xdg"), TMPDIR: process.env.HOME ? join(process.env.HOME, ".cache") : tmpdir() },
     stdio: ["ignore", "pipe", "pipe"],
     shell: false,
   });

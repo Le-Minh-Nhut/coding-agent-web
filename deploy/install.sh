@@ -46,7 +46,7 @@ try {
 readarray -t validated < <(printf '%s' "$config_info" | "$node_path" -e 'const c=JSON.parse(require("node:fs").readFileSync(0,"utf8")); console.log(c.port); console.log(c.stateDir)')
 port=${validated[0]}; state_dir=${validated[1]}
 config_changed=0
-if [[ -n ${CAW_MAX_ACTIVE_AGENTS:-} && $CAW_MAX_ACTIVE_AGENTS != 3 ]]; then fail 'CAW_MAX_ACTIVE_AGENTS must be exactly 3; it is ignored by the service and does not reach it.'; fi
+if [[ -n ${CAW_MAX_ACTIVE_AGENTS:-} && $CAW_MAX_ACTIVE_AGENTS != 3 ]]; then fail 'CAW_MAX_ACTIVE_AGENTS must be 3 in the installer environment for consistency; the unit unsets ambient overrides and config maxActiveAgents is authoritative.'; fi
 max_state=$("$node_path" - "$config_file" <<'NODE'
 const fs=require('node:fs'); const c=JSON.parse(fs.readFileSync(process.argv[2],'utf8'));
 if (Object.hasOwn(c,'maxActiveAgents') && !Number.isInteger(c.maxActiveAgents)) { console.error(`maxActiveAgents must be an integer; found ${JSON.stringify(c.maxActiveAgents)}.`); process.exit(1); }
@@ -84,13 +84,16 @@ for dir in "$HOME/.local/bin" "$HOME/.bun/bin" "$HOME/.local/share/uv" "$HOME/.l
   extra_path+="${extra_path:+:}$dir"
 done
 path_value="$(dirname "$node_path"):$(dirname "$pnpm_path"):$(dirname "$omp_path"):$(dirname "$tmux_path")${extra_path:+:$extra_path}:/usr/bin:/bin"
+for value in "$repo_root" "$config_file" "$state_dir" "$path_value"; do
+  [[ $value != *%* && $value != *$'\n'* ]] || fail "Cannot render systemd unit: substituted value contains % or newline: $value"
+done
 rendered=$(mktemp)
-"$node_path" - "$repo_root/deploy/systemd/coding-agent-web.service" "$rendered" "$repo_root" "$config_file" "$path_value" "$pnpm_path" <<'NODE'
+"$node_path" - "$repo_root/deploy/systemd/coding-agent-web.service" "$rendered" "$repo_root" "$config_file" "$path_value" "$pnpm_path" "$state_dir" <<'NODE'
 const fs = require('node:fs');
 const [template, output, ...values] = process.argv.slice(2);
-const keys = ['@REPO_ROOT@', '@CONFIG_PATH@', '@PATH_VALUE@', '@PNPM_PATH@'];
+const keys = ['@REPO_ROOT@', '@CONFIG_PATH@', '@PATH_VALUE@', '@PNPM_PATH@', '@STATE_DIR@'];
 const substitutions = new Map(keys.map((key, i) => [key, values[i]]));
-fs.writeFileSync(output, fs.readFileSync(template, 'utf8').replace(/@(?:REPO_ROOT|CONFIG_PATH|PATH_VALUE|PNPM_PATH)@/g, (key) => substitutions.get(key)));
+fs.writeFileSync(output, fs.readFileSync(template, 'utf8').replace(/@(?:REPO_ROOT|CONFIG_PATH|PATH_VALUE|PNPM_PATH|STATE_DIR)@/g, (key) => substitutions.get(key)));
 NODE
 if [[ -f $unit_file ]] && ! cmp -s "$rendered" "$unit_file"; then
   backup=$unit_file.$(date +%Y%m%d%H%M%S).bak

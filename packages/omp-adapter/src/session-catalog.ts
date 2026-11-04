@@ -3,6 +3,7 @@ import { constants, realpathSync } from "node:fs";
 import { open, readdir, realpath, stat } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
+import { resolveOmpDirs } from "./omp-dirs.js";
 import type { NativeSessionSummary } from "@caw/contracts";
 import { DefaultSessionLeaseProbe } from "./session-lease.js";
 import type { NativeSessionCatalog, NativeSessionHeader, NativeSessionHistory, SessionLeaseProbe } from "./types.js";
@@ -112,11 +113,7 @@ export class DefaultNativeSessionCatalog implements NativeSessionCatalog {
   readonly #isTracked: (sessionId: string) => boolean;
   readonly #stat: typeof stat;
   constructor(options: SessionCatalogOptions = {}) {
-    this.#sessionsRoot =
-      options.sessionsRoot ??
-      (process.env.PI_CODING_AGENT_DIR
-        ? path.join(process.env.PI_CODING_AGENT_DIR, "sessions")
-        : path.join(homedir(), ".omp", "agent", "sessions"));
+    this.#sessionsRoot = options.sessionsRoot ?? resolveOmpDirs({ agentDirOverride: process.env.PI_CODING_AGENT_DIR }).sessionsDir;
     this.#leaseProbe = options.leaseProbe ?? new DefaultSessionLeaseProbe();
     this.#isTracked = options.isTracked ?? (() => false);
     this.#stat = options.stat ?? stat;
