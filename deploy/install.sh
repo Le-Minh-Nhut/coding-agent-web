@@ -79,7 +79,7 @@ for dir in "$HOME/.local/bin" "$HOME/.bun/bin" "$HOME/.local/share/uv" "$HOME/.l
   [[ -d $dir ]] || continue
   owner=$(stat -c %U "$dir") || continue
   mode=$(stat -c %a "$dir") || continue
-  (( (8#$mode & 0002) == 0 )) && [[ $owner == "$USER" || $owner == root ]] || continue
+  (( (8#$mode & 0022) == 0 )) && [[ $owner == "$USER" || $owner == root ]] || continue
   case ":$extra_path:" in *":$dir:"*) continue;; esac
   extra_path+="${extra_path:+:}$dir"
 done
