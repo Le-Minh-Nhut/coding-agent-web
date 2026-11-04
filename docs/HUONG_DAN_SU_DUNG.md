@@ -75,6 +75,8 @@ OMP ghi session journal gốc ở `~/.omp/agent/sessions/<encoded-cwd>/<timestam
 
 Chọn **View history** để đọc transcript journal ở chế độ chỉ đọc; thao tác này không gửi prompt và không khởi chạy agent. Dùng **Load older** để đọc trang cũ. Nếu journal đang có writer hoặc không xác định được writer, việc đọc có thể bị chặn để tránh đọc snapshot đang thay đổi. Một số bản ghi quá lớn hoặc dữ liệu bị cắt có thể làm transcript hiển thị không đầy đủ; journal gốc không bị sửa bởi thao tác xem.
 
+Mỗi dòng session có các nút theo trạng thái của nó: session **đã tracked** hiển thị **Open conversation** và mở thẳng conversation CAW đã liên kết; session **chưa tracked**, đã dừng, thư mục còn tồn tại và thư mục đã là project hiển thị **Resume**; session đang live có host và relay xác nhận hiển thị **Open live**; khi chưa đủ điều kiện, nút tương ứng bị vô hiệu kèm lý do thay vì biến mất.
+
 `History-only` là session có journal nhưng thư mục làm việc không còn tồn tại. Có thể xem lịch sử nếu đọc được, nhưng không thể Resume vào thư mục đã mất. Native session chưa thuộc project đã đăng ký vẫn có thể hiện trong danh sách toàn cục nếu nằm trong `allowedRoots`; phải thêm thư mục đó thành project trước khi Resume.
 
 Trên máy này đã kiểm kê 61 journal: 49 nằm trong `allowedRoots`, 12 nằm ngoài nên không được hiển thị. Số lượng có thể thay đổi theo máy và thời điểm.
@@ -85,7 +87,7 @@ Các nhãn dưới đây không cùng một loại trạng thái. `Tracked` là 
 
 | Nhãn | Ý nghĩa |
 |---|---|
-| **Tracked** | CAW đã có conversation liên kết với native session đó. Có thể đang chạy hoặc đã dừng. Thường không thể Resume thêm lần nữa từ mục native session; mở conversation đã liên kết. |
+| **Tracked** | CAW đã có conversation liên kết với native session đó. Có thể đang chạy hoặc đã dừng. Mục native session hiển thị **Open conversation** để đi thẳng tới conversation đó; **Resume** không được đưa ra vì session đã có liên kết. |
 | **Untracked** | Chưa có conversation CAW liên kết session native đó. Đây là thuộc tính liên kết, không nói session còn chạy hay không. |
 | **Running** | OMP báo có lượt đang chạy trong host được xác nhận. Không đồng nghĩa với hoàn tất. |
 | **Stopped** | Process do CAW quản lý đã dừng và native journal vẫn đọc được. Có thể mở conversation hoặc dùng hành động thử lại phù hợp. |
@@ -100,6 +102,8 @@ Các nhãn dưới đây không cùng một loại trạng thái. `Tracked` là 
 
 Các trạng thái runtime chính xác trong hợp đồng CAW: `starting`, `running`, `idle`, `awaiting_input`, `stopping`, `stopped`, `error`, `unknown`. `idle` chỉ có nghĩa hiện không có lượt đang chạy; OMP có thể còn việc chờ, vì thế không nên hiểu là đã hoàn tất. `error` có thể cho biết process đã mất và journal không đọc được.
 
+Một session **tracked luôn hiển thị nút Open conversation** (ở History toàn cục và ở danh sách native session trong project) để mở đúng conversation CAW đã liên kết, nên tracked không bao giờ là ngõ cụt. Ngược lại, session **untracked** chỉ có **Resume** khi đã dừng, thư mục còn tồn tại và thư mục đó đã là project.
+
 ## 7. Phân biệt các thao tác
 
 Bảng mô tả ý nghĩa và tác động theo hành vi UI/API. “Slot” là một trong tối đa ba agent chính hoạt động; việc chỉ đọc hoặc mở viewer không tạo slot mới.
@@ -108,7 +112,7 @@ Bảng mô tả ý nghĩa và tác động theo hành vi UI/API. “Slot” là 
 |---|---|---:|---:|---|---|---|
 | **View history** | Đọc transcript journal trong giao diện chỉ đọc. | Không | Không | Không; chỉ đọc. | Không | Dùng để xem lịch sử. Có thể bị chặn khi writer đang chạy hoặc không xác minh được. |
 | **Resume** | Tạo conversation CAW gắn với native session cũ và khởi chạy OMP dựa trên journal đó. Sau đó session được Tracked; prompt bị ngắt không tự phát lại. | Có, nếu được chấp nhận | Có | Có; OMP có thể ghi tiếp cùng journal | Không chủ ý | Chỉ khi writer đã xác nhận không hoạt động, thư mục còn tồn tại và đã đăng ký project. Nếu lease unknown/live, thao tác bị chặn. |
-| **Open conversation** | Mở bản ghi CAW đã có; nếu có Collab host, giao diện có thể kết nối room. | Không | Không thêm slot | Không bởi thao tác mở | Không | Dùng để trở lại conversation đã tracked; không phải Resume. |
+| **Open conversation** | Bấm nút **Open conversation** trên mục session đã tracked (ở History toàn cục hoặc danh sách native session trong project) để mở đúng conversation CAW đã liên kết; nếu có Collab host, giao diện có thể kết nối room. | Không | Không thêm slot | Không bởi thao tác mở | Không | Dùng để trở lại conversation đã tracked; không phải Resume, và không cần rời trang để tìm lại conversation. |
 | **Open live** | Gắn CAW conversation external vào native session đang chạy có host và relay kết nối; mở viewer. | Không | Không tạo agent process/slot mới | Không bởi thao tác gắn | Không | Khi writer và Collab host/relay đều được xác nhận. External process vẫn do người khởi chạy quản lý. |
 | **Attach from terminal** | Kết nối terminal laptop vào tmux session managed đã có qua private socket. | Không | Không | Không bởi attach; OMP tiếp tục có thể ghi journal như thường | Không | Dùng lệnh CAW đưa ra cho đúng conversation. Thoát attach bằng `Ctrl-b`, rồi `d`; không gửi lệnh dừng. |
 | **Stop generating** | Gửi lệnh abort qua Collab để kết thúc **lượt đang chạy**. | Không | Không | Việc đã xảy ra có thể đã được OMP ghi vào journal; không xoá lịch sử | Không | Dùng khi chỉ muốn dừng lượt hiện tại; **tiến trình OMP vẫn sống** và có thể nhận prompt tiếp theo. |
@@ -118,7 +122,7 @@ Bảng mô tả ý nghĩa và tác động theo hành vi UI/API. “Slot” là 
 | **Create new conversation** | Tạo conversation mới trong project. | Có | Có | Tạo native session mới khi OMP khởi chạy | Không | Dùng cho công việc mới, không phải cách mở lịch sử cũ. |
 | **Fork (khi được hỗ trợ)** | Fork sẽ tạo nhánh session theo khả năng của OMP. | Chưa xác minh trong UI hiện tại | Chưa xác minh | Có thể tạo journal/nhánh riêng tùy OMP | Có theo ý nghĩa fork, nhưng không được CAW hứa hẹn | Không thấy thao tác Fork trong giao diện CAW đã đọc; dùng khả năng OMP trực tiếp chỉ khi đã hiểu tác động. |
 
-Không thử Resume nhiều lần để “mở lại” conversation; hãy mở conversation đã tracked. Khi writer live hoặc unknown, dừng lại và tìm host hiện có thay vì tạo writer mới.
+Không thử Resume nhiều lần để “mở lại” conversation; session đã tracked có nút **Open conversation** để mở thẳng conversation đã liên kết. Khi writer live hoặc unknown, dừng lại và tìm host hiện có thay vì tạo writer mới.
 
 **Hai hành động dừng khác nhau, đừng nhầm:** **Stop generating** chỉ kết thúc lượt đang chạy và để tiến trình OMP sống; **Stop OMP session** kết thúc tiến trình OMP do CAW quản lý và giải phóng slot. Không hành động nào xoá lịch sử. Cả hai chỉ áp dụng cho session **do CAW quản lý**; session external không dừng được từ CAW, phải dừng tại terminal của nó.
 
@@ -151,7 +155,7 @@ Thay `<session_id>` bằng ID mà CAW đưa ra; không đoán tên tmux. Để t
 
 1. Mở **History**, tìm session và kiểm tra trạng thái writer.
 2. Nếu `live` là false, thư mục còn tồn tại và project đã đăng ký, chọn **Resume**.
-3. CAW tạo conversation liên kết session native; từ thời điểm đó mục sẽ là **Tracked**. Tracked không khẳng định agent đang chạy. Trong danh sách project, chọn conversation đã liên kết. History toàn cục hiện có thể nhận diện session và xem transcript nhưng không có nút mở conversation; quay về **Projects**, mở project tương ứng rồi chọn conversation.
+3. CAW tạo conversation liên kết session native; từ thời điểm đó mục sẽ là **Tracked**, và mục đó hiển thị nút **Open conversation** để mở thẳng conversation vừa tạo — cả ở History toàn cục lẫn ở danh sách native session trong project. Tracked không khẳng định agent đang chạy.
 
 ### Khi đã có writer hoạt động
 
@@ -171,7 +175,7 @@ Khi OMP cần phản hồi UI, CAW hiển thị yêu cầu/approval cùng các l
 
 Giao diện có ô prompt, gợi ý một số slash command, trạng thái kết nối, nút **Latest** khi đã cuộn khỏi cuối transcript, lựa chọn model và transcript lịch sử đọc-only. Khu vực hành động của conversation gồm **Stop generating**, **Handoff context** và **Stop OMP session** (mỗi nút có thể bị vô hiệu kèm lý do khi không dùng được). Khi gõ một lệnh gốc của OMP như `/handoff`, CAW không gửi nó như prompt mà hiển thị hộp xác nhận; xem [chương 10](#10-lệnh-handoff--nén-ngữ-cảnh-tại-chỗ). Khi gửi prompt chưa được xác nhận, CAW có thể báo chưa rõ host đã nhận hay chưa; đừng gửi lại một cách mù quáng vì prompt có thể đã chạy.
 
-**Giới hạn khác:** History toàn cục hiện không cung cấp điều hướng trực tiếp từ mục tracked tới conversation trong project. Dùng History để nhận diện/đọc journal, rồi tự mở project và chọn conversation đã liên kết.
+**Giới hạn khác:** nếu mục tracked không hiển thị **Open conversation**, giao diện ghi “Tracked conversation ID is unavailable” (nút chỉ xuất hiện khi session có conversation ID). Khi đó dùng **Projects** để mở project và chọn conversation.
 
 **Hạn chế:** không thấy chức năng đính kèm tệp từ giao diện chat; chia sẻ đường dẫn trong prompt không phải upload tệp. Không thấy trình xem diff chuyên biệt; nếu agent trả diff dưới dạng văn bản thì nó chỉ hiện như nội dung transcript. Không hứa rằng mọi tool output, nội dung lịch sử cũ, trạng thái con hoặc sự kiện đều có mặt: OMP/Collab có thể không gửi, trang transcript có thể bị giới hạn hoặc một bản ghi quá lớn bị bỏ qua khi hiển thị. Chi tiết giao diện này có thể mở rộng khi các phần đang được cải thiện.
 
@@ -251,7 +255,7 @@ Các lệnh dưới đây chỉ kiểm tra/truy vấn, ngoại trừ `restart` �
 | Đăng nhập thất bại | Kiểm tra password/token đúng, token chưa quá 15 phút/chưa dùng, và giờ hệ thống. Đợi nếu có backoff sau nhiều lần sai. Không gửi credential qua chat/log. |
 | Quên mật khẩu | Làm theo [khôi phục chính thức](operations/recovery.md#i-lost-my-password). Cần dừng service, xóa credential record rồi khởi động lại để tạo setup token mới; không thực hiện khi chưa chắc quyền sở hữu service. Agent/journal không bị xóa bởi thao tác đó. |
 | Session không hiện | Kiểm tra thư mục làm việc có trong `allowedRoots` và đã thêm thành project nếu muốn Resume. Global History chỉ liệt kê native journal đọc được trong roots; journal ngoài roots bị loại. |
-| Tracked session không Resume được | Đây là hành vi có chủ ý: mở conversation CAW liên kết session đó, không tạo liên kết thứ hai. Nếu stopped, dùng Retry/Restart phù hợp từ conversation managed. |
+| Tracked session không Resume được | Hành vi có chủ ý: session đã có conversation liên kết nên không tạo liên kết thứ hai. Bấm **Open conversation** ngay trên mục đó (có ở cả History toàn cục và danh sách native session trong project) để mở conversation. Nếu stopped, dùng Retry/Restart phù hợp từ conversation managed. |
 | Session live không có Collab | Xem `tmux -S /home/heheboiz/.local/state/coding-agent-web/tmux.sock ls` và `omp collab list`. Nếu agent do terminal khởi chạy nhưng không có host Collab, CAW không thể mở live viewer; không khởi chạy writer khác. |
 | WebSocket reconnect | Kiểm tra `tailscale status`, `tailscale serve status` và trạng thái service. Có thể bấm Retry trong giao diện. Disconnected/Reconnecting chỉ nói về kết nối viewer; không chứng minh agent đã dừng. |
 | Sai thư mục project | Đối chiếu đường dẫn hiển thị và `allowedRoots` trong `caw.config.json`. Chọn đúng thư mục khi thêm project; không sửa journal để đổi project. |
@@ -291,7 +295,7 @@ Không. `Tracked` chỉ nói CAW biết conversation tương ứng. Kiểm tra r
 
 ### Làm sao mở lại conversation đã tracked?
 
-Từ **Projects**, mở project rồi chọn conversation trong danh sách. Nếu đang ở **History** (danh sách toàn cục) hoặc ở danh sách native session trong project, session **đã tracked** hiển thị nút **Open conversation**: bấm vào đó để đi thẳng tới đúng conversation CAW — không cần quay lại trang nào. Với session đã tracked, nút **Resume** không được đưa ra vì session đã có conversation liên kết; Resume sẽ tạo liên kết thứ hai cho cùng session, đúng thứ CAW tránh. Chỉ session **chưa tracked**, đã dừng (`live` là false), thư mục còn tồn tại và thư mục đã là project mới có **Resume**. Nếu nút **Open conversation** không thấy, giao diện ghi rõ “Tracked conversation ID is unavailable”; kiểm tra đúng project và session ID.
+Trong **History** (danh sách toàn cục) hoặc trong danh sách native session của project, session **đã tracked** hiển thị nút **Open conversation**: bấm vào đó để đi thẳng tới đúng conversation CAW — không cần quay lại trang nào. Với session đã tracked, nút **Resume** không được đưa ra vì session đã có conversation liên kết; Resume sẽ tạo liên kết thứ hai cho cùng session, đúng thứ CAW tránh. Chỉ session **chưa tracked**, đã dừng (`live` là false), thư mục còn tồn tại và thư mục đã là project mới có **Resume**. Nếu nút **Open conversation** không thấy, giao diện ghi rõ “Tracked conversation ID is unavailable”; kiểm tra đúng project và session ID.
 
 ### Đóng Safari có làm OMP dừng không?
 
