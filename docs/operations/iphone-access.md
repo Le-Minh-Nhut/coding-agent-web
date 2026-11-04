@@ -20,7 +20,7 @@ Access from an actual iPhone/Safari device has **not** been verified.
 
 Sign in to the same tailnet: Tailscale must be connected on both devices, with the phone signed into the same account. Open the URL above in Safari. The session cookie is `Secure`, so use HTTPS only; plain `http://` variants will not work. Do not add a port suffix.
 
-The owner password is already set. There is no first-run token while a valid password record exists. If the password is lost, follow [I lost my password](recovery.md#i-lost-my-password); do not use a setup token.
+If you have the password, log in with it. If not, follow [I lost my password](recovery.md#i-lost-my-password): remove the credential record and restart the service, then paste the one-time setup token printed by the app at the login screen to set a new password. The token is single-use and expires after a short time.
 
 For network setup details, see [iPhone setup and daily use](iphone-setup.md). See also [deployment](deployment.md).
 
