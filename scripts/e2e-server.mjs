@@ -85,7 +85,7 @@ mkdirSync(secondaryRootsDir, { recursive: true });
 // A deterministic tree the specs assert on. One directory per spec, so no spec
 // depends on another having run, plus a file to prove non-directories are refused.
 writeFileSync(join(rootsDir, "readme.txt"), "Deterministic E2E fixture file. Not a directory.\n");
-for (const name of ["p-alpha", "p-beta", "p-gamma", "p-delta", "m-touch", "seeded"]) {
+for (const name of ["p-alpha", "p-beta", "p-gamma", "p-delta", "m-touch", "seeded", "gh-alpha", "gh-beta"]) {
   mkdirSync(join(rootsDir, name), { recursive: true });
 }
 const pagedFixtureDir = join(rootsDir, "paged");
@@ -237,8 +237,10 @@ const cleanParentEnv = Object.fromEntries(Object.entries(process.env).filter(([k
 
 const env = {
   ...cleanParentEnv,
+  // Keep scratch listeners off the deployed app and relay ports; both remain independently overridable.
   CAW_HOST: "127.0.0.1",
   CAW_PORT: process.env.CAW_E2E_PORT ?? "4399",
+  CAW_RELAY_PORT: process.env.CAW_E2E_RELAY_PORT ?? "4398",
   CAW_STATE_DIR: stateDir,
   CAW_ALLOWED_ROOTS: `${rootsDir},${secondaryRootsDir}`,
   // See the block above: this single value pins every omp call the server makes,

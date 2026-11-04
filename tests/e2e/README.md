@@ -27,6 +27,7 @@ so no browser download is required. WebKit needs
 | Variable | Effect |
 | --- | --- |
 | `CAW_E2E_PORT` | Reuse a server already listening on this port |
+| `CAW_E2E_RELAY_PORT` | Relay port for the scratch server; defaults to `4398` to avoid the deployed relay on `8792` |
 | `CAW_E2E_BASE_URL` | Point the specs at another origin (e.g. a proxy fronting the SPA) |
 | `CAW_E2E_FIXTURE` | Fixture manifest path; defaults to `<tmp>/caw-e2e-fixture.json` |
 | `CAW_E2E_SKIP_WEBKIT` / `CAW_E2E_FORCE_WEBKIT` | Exclude / force the WebKit project |
