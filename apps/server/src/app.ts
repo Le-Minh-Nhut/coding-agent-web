@@ -1,8 +1,10 @@
 import type { Server as HttpServer } from "node:http";
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest, type RouteGenericInterface } from "fastify";
-import { browseQuerySchema, conversationActionSchema, conversationModelSchema, createConversationSchema, createDirectorySchema, createProjectSchema, epochOf, ERROR_CODES, fail, listEventsQuerySchema, loginSchema, observationSeqOf, ok, updateProjectSchema } from "@caw/contracts";
+import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { stat } from "node:fs/promises";
+import { browseQuerySchema, conversationActionSchema, conversationModelSchema, createConversationSchema, createDirectorySchema, createProjectSchema, epochOf, ERROR_CODES, fail, globalSessionsQuerySchema, listEventsQuerySchema, loginSchema, observationSeqOf, ok, updateProjectSchema } from "@caw/contracts";
 import { z } from "zod";
-import type { Capabilities, CollabLinkResponse, Conversation, ErrorCode, NativeSessionSummary, ProjectWithStats } from "@caw/contracts";
+import type { Capabilities, CollabLinkResponse, Conversation, ErrorCode, GlobalSessionPage, GlobalSessionSummary, NativeSessionSummary, ProjectWithStats } from "@caw/contracts";
 import type { CapabilityService, CollabHost, ModelCatalogService, NativeSessionHistory } from "@caw/omp-adapter";
 import type { Supervisor, RuntimeLaunchSpec } from "@caw/runtime";
 import { evaluateState } from "@caw/runtime";
@@ -36,6 +38,14 @@ export interface AppDependencies {
   listNativeSessions?: (conversation: { projectPath: string }) => Promise<Array<Omit<NativeSessionSummary, "hasCollabHost">>>;
   listCollabHosts?: () => Promise<CollabHost[]>;
   modelCatalog?: ModelCatalogService;
+  /** Bounded global native-session enumeration, composed without adapter knowledge. */
+  listGlobalSessions?: () => Promise<{ sessions: Array<Omit<NativeSessionSummary, "hasCollabHost"> & { startedAt?: string | null }>; filesScanned: number; filesSkippedNonJournal: number; truncated: boolean }>;
+  /** Reads saved transcript by journal identity; route supplies journal-derived cwd. */
+  readGlobalHistory?: (sessionId: string, before?: string) => Promise<NativeSessionHistory>;
+  /** Canonicalizes project and session working directories using composition-root reconciliation. */
+  canonicalProjectPath: (projectPath: string) => Promise<string>;
+  /** CWD stat seam for deterministic route tests. */
+  statPath?: typeof stat;
   /** Reads a bounded native journal window by session ID after matching canonical project path. */
   readNativeHistory?: (sessionId: string, expectedCwd: string, options?: { before?: string }) => Promise<NativeSessionHistory>;
   findLiveHost?: (sessionId: string) => Promise<CollabHost | null>;
@@ -57,6 +67,24 @@ function errorCode(error: unknown): string | undefined {
     return typeof value === "string" ? value : undefined;
   }
   return undefined;
+}
+const globalCursorKey = randomBytes(32);
+interface GlobalCursor { version: 1; query: string; updatedAt: string | null; sessionId: string }
+function encodeGlobalCursor(cursor: GlobalCursor): string {
+  const payload = Buffer.from(JSON.stringify(cursor)).toString("base64url");
+  return `${payload}.${createHmac("sha256", globalCursorKey).update(payload).digest("base64url")}`;
+}
+function decodeGlobalCursor(value: string, query: string): GlobalCursor {
+  const [payload, signature, extra] = value.split(".");
+  try {
+    if (!payload || !signature || extra !== undefined || Buffer.from(payload, "base64url").toString("base64url") !== payload) throw new Error();
+    const expected = createHmac("sha256", globalCursorKey).update(payload).digest();
+    const supplied = Buffer.from(signature, "base64url");
+    if (supplied.length !== expected.length || !timingSafeEqual(supplied, expected)) throw new Error();
+    const parsed = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as Partial<GlobalCursor>;
+    if (parsed.version !== 1 || parsed.query !== query || !(parsed.updatedAt === null || typeof parsed.updatedAt === "string") || typeof parsed.sessionId !== "string") throw new Error();
+    return parsed as GlobalCursor;
+  } catch { throw new PathPolicyError("path_forbidden", "Invalid global session cursor"); }
 }
 type HttpRequest = FastifyRequest<RouteGenericInterface, HttpServer>;
 type HttpReply = FastifyReply<RouteGenericInterface, HttpServer>;
@@ -365,6 +393,74 @@ export function buildApp(deps: AppDependencies): FastifyInstance<HttpServer> {
     try {
       return reply.code(201).send(ok({ path: await paths.createDirectory(parsed.data.path, parsed.data.name) }));
     } catch (error) { return pathError(reply, error); }
+  });
+  app.get("/api/sessions", { preHandler: protectedHook }, async (request, reply) => {
+    const query = globalSessionsQuerySchema.safeParse(request.query ?? {});
+    if (!query.success) return reply.code(400).send(fail("bad_request", "Invalid global session query"));
+    if (!deps.listGlobalSessions) return reply.code(501).send(fail("capability_missing", "Global native session listing is not configured."));
+    if (!deps.listCollabHosts) return reply.code(501).send(fail("capability_missing", "Collab registry is not configured."));
+    try {
+      const [scan, hosts, projects, conversations] = await Promise.all([deps.listGlobalSessions(), deps.listCollabHosts(), deps.store.listProjects(), deps.store.listAllConversations()]);
+      const allowed = scan.sessions.filter((session) => paths.isInsideConfiguredRoots(session.cwd));
+      const hostMap = new Map(hosts.map((host) => [host.sessionId, host]));
+      const excludedOutsideRoots = scan.sessions.length - allowed.length;
+      const projectIds = new Set(projects.map((project) => project.id));
+      const tracked = new Set(conversations.filter((conversation) => projectIds.has(conversation.projectId)).map((conversation) => conversation.nativeSessionId).filter((id): id is string => Boolean(id)));
+      // Canonical project paths are computed once per request, not once per session.
+      // Missing or unreadable registered projects cannot match and must not hide other rows.
+      const projectByPath = new Map<string, string>();
+      for (const project of projects) {
+        try { projectByPath.set(await deps.canonicalProjectPath(project.path), project.id); }
+        catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+      }
+      const q = (query.data.q ?? "").toLocaleLowerCase();
+      const mapped: GlobalSessionSummary[] = await Promise.all(allowed.map(async (session) => {
+        let cwdAvailable = true;
+        try { await (deps.statPath ?? stat)(session.cwd); }
+        catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") cwdAvailable = false; else throw error; }
+        let projectId: string | null = null;
+        // A session cwd may be gone: preserve its history-only row with no project match.
+        try { projectId = projectByPath.get(await deps.canonicalProjectPath(session.cwd)) ?? null; }
+        catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+        const host = hostMap.get(session.sessionId);
+        return { sessionId: session.sessionId, journalPath: session.path, cwd: session.cwd, cwdAvailable, projectId, title: session.title, updatedAt: session.updatedAt, startedAt: session.startedAt ?? null, live: session.live, tracked: tracked.has(session.sessionId), hasCollabHost: host?.relayConnected === true, relayConnected: host?.relayConnected ?? null };
+      }));
+      const filtered = mapped.filter((session) => !q || [session.title, session.cwd, session.sessionId, projects.find((project) => project.id === session.projectId)?.label].some((value) => value?.toLocaleLowerCase().includes(q)));
+      const order = (a: { updatedAt: string | null; sessionId: string }, b: { updatedAt: string | null; sessionId: string }) => (a.updatedAt === null || b.updatedAt === null ? a.updatedAt === b.updatedAt ? a.sessionId.localeCompare(b.sessionId) : a.updatedAt === null ? 1 : -1 : b.updatedAt.localeCompare(a.updatedAt) || a.sessionId.localeCompare(b.sessionId));
+      filtered.sort(order);
+      const cursor = query.data.cursor ? decodeGlobalCursor(query.data.cursor, q) : null;
+      const start = cursor ? filtered.findIndex((session) => order(session, cursor) > 0) : 0;
+      if (cursor && start < 0) throw new PathPolicyError("path_forbidden", "Invalid global session cursor");
+      const page = filtered.slice(cursor ? start : 0, (cursor ? start : 0) + query.data.limit);
+      const last = page.at(-1);
+      const nextCursor = last && filtered.some((session) => order(session, last) > 0) ? encodeGlobalCursor({ version: 1, query: q, updatedAt: last.updatedAt, sessionId: last.sessionId }) : null;
+      const result: GlobalSessionPage = { sessions: page, nextCursor, filesScanned: scan.filesScanned, truncated: scan.truncated, excludedOutsideRoots, skippedNonJournal: scan.filesSkippedNonJournal };
+      return ok(result);
+    } catch (error) {
+      if (errorCode(error) === "path_forbidden") return reply.code(403).send(fail("path_forbidden", "Invalid global session cursor or scope."));
+      if (errorCode(error) === "path_not_found") return reply.code(403).send(fail("path_forbidden", "Project is outside configured roots."));
+      app.log.error({ error: errorCode(error) }, "failed to list global native sessions");
+      return reply.code(500).send(fail("internal", "Unable to list global native sessions."));
+    }
+  });
+  app.get("/api/sessions/:sessionId/history", { preHandler: protectedHook }, async (request, reply) => {
+    const params = z.object({ sessionId: z.string().min(1).max(128) }).safeParse(request.params);
+    if (!params.success || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u.test(params.data.sessionId)) return reply.code(400).send(fail("bad_request", "Invalid native session ID"));
+    const query = historyQuerySchema.safeParse(request.query ?? {});
+    if (!query.success) return reply.code(400).send(fail("bad_request", "Invalid history cursor"));
+    if (!deps.readGlobalHistory) return reply.code(501).send(fail("capability_missing", "Native session history is not configured."));
+    try {
+      const history = await deps.readGlobalHistory(params.data.sessionId, query.data.before);
+      if (!paths.isInsideConfiguredRoots(history.header.cwd)) return reply.code(403).send(fail("path_forbidden", "Native session journal does not belong to configured roots."));
+      return ok(history);
+    } catch (error) {
+      const code = runtimeErrorCode(error);
+      if (code === "not_found") return reply.code(404).send(fail("not_found", "Native session journal was not found."));
+      if (code === "conflict_owner") return reply.code(409).send(fail("conflict_owner", "Native session is live or its writer status cannot be verified."));
+      if (code === "path_forbidden" || code === "path_not_found") return reply.code(403).send(fail("path_forbidden", "Native session journal does not belong to configured roots."));
+      app.log.error({ sessionId: params.data.sessionId }, "failed to read global native session history");
+      return reply.code(500).send(fail("internal", "Unable to read native session history."));
+    }
   });
   app.get("/api/conversations/:id/history", { preHandler: protectedHook }, async (request, reply) => {
     const params = idParams.safeParse(request.params);

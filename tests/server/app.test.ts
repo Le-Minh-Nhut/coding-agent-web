@@ -1,6 +1,6 @@
 import { mkdtemp, mkdir, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { RuntimeError, createSupervisor } from "@caw/runtime";
 import { afterEach, describe, expect, it } from "vitest";
 import { createAuthenticationService } from "../../apps/server/src/auth.js";
@@ -17,12 +17,12 @@ import type { MetadataStore } from "../../apps/server/src/store.js";
 
 const dirs: string[] = [];
 afterEach(async () => { await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true }))); });
-async function fixture(options: { capabilities?: CapabilityService; paths?: WorkspacePathPolicy; tmuxSocketPath?: string; tmuxServerIdentity?: () => Promise<string | null>; supervisor?: Supervisor; runtimeSpec?: (conversation: Conversation, input: { resumeSessionId?: string; model?: string }) => Promise<RuntimeLaunchSpec> | RuntimeLaunchSpec; modelCatalog?: { listModels(): Promise<string[]>; listModelsDetailed(): Promise<{ models: string[]; source: "omp" | "unavailable"; reason: string | null }> }; listNativeSessions?: (conversation: { projectPath: string }) => Promise<Array<Omit<NativeSessionSummary, "hasCollabHost">>>; listCollabHosts?: () => Promise<CollabHost[]>; findLiveHost?: (sessionId: string) => Promise<CollabHost | null>; readNativeHistory?: (sessionId: string, expectedCwd: string, options?: { before?: string }) => Promise<NativeSessionHistory> } = {}) {
+async function fixture(options: { capabilities?: CapabilityService; paths?: WorkspacePathPolicy; tmuxSocketPath?: string; tmuxServerIdentity?: () => Promise<string | null>; supervisor?: Supervisor; runtimeSpec?: (conversation: Conversation, input: { resumeSessionId?: string; model?: string }) => Promise<RuntimeLaunchSpec> | RuntimeLaunchSpec; modelCatalog?: { listModels(): Promise<string[]>; listModelsDetailed(): Promise<{ models: string[]; source: "omp" | "unavailable"; reason: string | null }> }; listNativeSessions?: (conversation: { projectPath: string }) => Promise<Array<Omit<NativeSessionSummary, "hasCollabHost">>>; listCollabHosts?: () => Promise<CollabHost[]>; findLiveHost?: (sessionId: string) => Promise<CollabHost | null>; readNativeHistory?: (sessionId: string, expectedCwd: string, options?: { before?: string }) => Promise<NativeSessionHistory>; listGlobalSessions?: () => Promise<{ sessions: Array<Omit<NativeSessionSummary, "hasCollabHost"> & { startedAt?: string | null }>; filesScanned: number; filesSkippedNonJournal: number; truncated: boolean }>; readGlobalHistory?: (sessionId: string, before?: string) => Promise<NativeSessionHistory>; canonicalProjectPath?: (value: string) => Promise<string>; statPath?: typeof stat; allowedRoots?: string[] } = {}) {
   const dir = await mkdtemp(join(tmpdir(), "caw-app-")); dirs.push(dir);
   const auth = createAuthenticationService({ stateDir: dir, setupOutput: () => undefined }); await auth.initAuth();
-  const config: ServerConfig = { host: "127.0.0.1", port: 8791, stateDir: dir, allowedRoots: [dir], relayPort: 8792, relayAllowedOrigins: [], maxActiveAgents: 3, authTokenTtlHours: 720, trustTailscaleOrigin: false, logLevel: "silent", insecureCookies: false };
+  const config: ServerConfig = { host: "127.0.0.1", port: 8791, stateDir: dir, allowedRoots: options.allowedRoots ?? [dir], relayPort: 8792, relayAllowedOrigins: [], maxActiveAgents: 3, authTokenTtlHours: 720, trustTailscaleOrigin: false, logLevel: "silent", insecureCookies: false };
   const store = createMetadataStore(dir);
-  const app = buildApp({ config, auth, store, originAllowlist: ["https://workspace.test"], ...options });
+  const app = buildApp({ config, auth, store, originAllowlist: ["https://workspace.test"], ...options, canonicalProjectPath: options.canonicalProjectPath ?? (async (value) => resolve(value)) });
   const session = auth.createSession();
   const headers = { cookie: `__Host-caw_session=${session.token}`, origin: "https://workspace.test", "x-caw-csrf": session.csrfToken };
   return { app, headers, dir, store, config, auth };
@@ -58,7 +58,58 @@ describe("Fastify API security", () => {
     for (const request of requests) expect((await app.inject(request)).statusCode, `${request.method} ${request.url}`).toBe(401);
     await app.close();
   });
+  it("filters and pages global sessions with query-bound signed cursors", async () => {
+    const { app, headers, dir } = await fixture({
+      listGlobalSessions: async () => ({ sessions: [
+        { sessionId: "global-a", path: join(dir, "a.jsonl"), cwd: dir, title: "Alpha", updatedAt: "2026-01-03", live: false, tracked: false },
+        { sessionId: "global-b", path: join(dir, "b.jsonl"), cwd: dir, title: "Beta", updatedAt: "2026-01-02", live: false, tracked: false },
+        { sessionId: "outside", path: join(dir, "c.jsonl"), cwd: `${dir}-other`, title: "Outside", updatedAt: "2026-01-01", live: false, tracked: false },
+      ], filesScanned: 4, filesSkippedNonJournal: 1, truncated: false }),
+      listCollabHosts: async () => [],
+      statPath: async (value) => { if (value.endsWith("-other")) throw Object.assign(new Error("missing"), { code: "ENOENT" }); return await stat(value); },
+    });
+    const first = await app.inject({ method: "GET", url: "/api/sessions?limit=1", headers });
+    expect(first.statusCode, JSON.stringify(first.json())).toBe(200);
+    expect(first.json().data).toMatchObject({ sessions: [{ sessionId: "global-a" }], excludedOutsideRoots: 1, skippedNonJournal: 1 });
+    const cursor = first.json().data.nextCursor as string;
+    const second = await app.inject({ method: "GET", url: `/api/sessions?limit=1&cursor=${encodeURIComponent(cursor)}`, headers });
+    expect(second.json().data.sessions.map((item: { sessionId: string }) => item.sessionId)).toEqual(["global-b"]);
+    expect((await app.inject({ method: "GET", url: `/api/sessions?q=Beta&limit=1&cursor=${encodeURIComponent(cursor)}`, headers })).statusCode).toBe(403);
+    await app.close();
+  });
 
+  it("keeps history-only and healthy rows when cwd canonicalization reports ENOENT", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "caw-app-global-cwd-")); dirs.push(dir);
+    const projectA = join(dir, "project-a");
+    const projectB = join(dir, "project-b");
+    const deletedCwd = join(dir, "deleted-session-cwd");
+    const unregisteredCwd = join(dir, "unregistered-cwd");
+    await Promise.all([mkdir(projectA), mkdir(projectB), mkdir(unregisteredCwd)]);
+    const canonicalProjectPath = async (value: string) => {
+      if (value === deletedCwd) throw Object.assign(new Error("missing cwd"), { code: "ENOENT" });
+      return resolve(value);
+    };
+    const { app, headers, store } = await fixture({
+      allowedRoots: [dir],
+      canonicalProjectPath,
+      listGlobalSessions: async () => ({ sessions: [
+        { sessionId: "deleted-session", path: join(dir, "deleted.jsonl"), cwd: deletedCwd, title: "Deleted", updatedAt: "2026-01-03", live: false, tracked: false },
+        { sessionId: "unregistered-session", path: join(dir, "unregistered.jsonl"), cwd: unregisteredCwd, title: "Unregistered", updatedAt: "2026-01-02", live: false, tracked: false },
+        { sessionId: "healthy-session", path: join(dir, "healthy.jsonl"), cwd: projectA, title: "Healthy", updatedAt: "2026-01-01", live: false, tracked: false },
+      ], filesScanned: 3, filesSkippedNonJournal: 0, truncated: false }),
+      listCollabHosts: async () => [],
+    });
+    await store.createProject({ path: projectA, label: "Project A" });
+    await store.createProject({ path: projectB, label: "Project B" });
+    const response = await app.inject({ method: "GET", url: "/api/sessions", headers });
+    expect(response.statusCode, JSON.stringify(response.json())).toBe(200);
+    expect(response.json().data.sessions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ sessionId: "deleted-session", cwdAvailable: false, projectId: null }),
+      expect.objectContaining({ sessionId: "unregistered-session", cwdAvailable: true, projectId: null }),
+      expect.objectContaining({ sessionId: "healthy-session", cwdAvailable: true, projectId: expect.any(String) }),
+    ]));
+    await app.close();
+  });
   it("accepts browser-style authenticated GET requests without Origin, content type, or CSRF", async () => {
     const { app, headers } = await fixture();
     const browserHeaders = { cookie: headers.cookie };

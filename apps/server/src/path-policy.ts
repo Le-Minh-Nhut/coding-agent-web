@@ -48,6 +48,10 @@ function decodeDirectoryCursor(value: string): DirectoryCursor {
 /** Listing validates canonical paths; any later open must use O_NOFOLLOW and fstat the handle to close remaining TOCTOU risk where supported. */
 export class WorkspacePathPolicy {
   constructor(private readonly configuredRoots: readonly string[], private readonly hasProject: (canonicalPath: string) => boolean | Promise<boolean> = () => false) {}
+  /** Display-only containment: unlike assertInsideRoots, this lexical check touches no filesystem; never use it before opening or launching a path. */
+  isInsideConfiguredRoots(path: string): boolean {
+    return !path.includes("\0") && isAbsolute(path) && this.inside(path, this.configuredRoots);
+  }
 
   private async roots(): Promise<string[]> {
     return Promise.all(this.configuredRoots.map(async (root) => {

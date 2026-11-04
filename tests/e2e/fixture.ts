@@ -254,6 +254,11 @@ export async function createProjectFromBrowser(page: Page, folderName: string, l
   await page.getByRole("button", { name: "Create", exact: true }).click();
   await expect(page.getByRole("heading", { name: label, exact: true })).toBeVisible();
 }
+/** Login then exercise global saved-session browsing against API-backed journals. */
+export async function loginForGlobalHistory(page: Page): Promise<void> {
+  await gotoApp(page);
+  await login(page);
+}
 
 /**
  * Open the conversation seeded by the launcher, through the real UI path

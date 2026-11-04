@@ -74,13 +74,20 @@ export interface NativeSessionCatalog {
   listForCwd(cwd: string): Promise<Array<Omit<NativeSessionSummary, "hasCollabHost">>>;
   /** Journalled sessions across the whole store, newest first. */
   listAll(limit?: number): Promise<Array<Omit<NativeSessionSummary, "hasCollabHost">>>;
-  /** Read one journal's header, or null when it is unreadable or not a session. */
+  /** Bounded global journal scan with explicit incompleteness accounting. */
+  listAllDetailed(options?: { limit?: number; cacheTtlMs?: number }): Promise<{
+    sessions: Array<Omit<NativeSessionSummary, "hasCollabHost">>;
+    filesScanned: number;
+    filesSkippedNonJournal: number;
+    truncated: boolean;
+  }>;
+  /** Read one journal's header, or null when its bytes are not a session. */
   readHeader(sessionPath: string): Promise<NativeSessionHeader | null>;
   /** Candidate journal paths for a session id (used only inside the adapter). */
   findBySessionId(sessionId: string): Promise<string | null>;
   /** Read one bounded journal page; before is an opaque cursor issued for this session and project. */
   readHistory(sessionId: string, expectedCwd: string, options?: number | { before?: string }): Promise<NativeSessionHistory>;
-}
+ }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Session ownership (the duplicate-writer guard)

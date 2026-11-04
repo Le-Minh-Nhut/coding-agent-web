@@ -726,3 +726,18 @@ details[open] summary {
     display: block;
   }
 }
+
+.history-heading, .history-reader-head, .history-actions, .history-badges { display: flex; align-items: center; gap: 8px; }
+.history-heading { justify-content: space-between; margin-bottom: 16px; }
+.history-heading button, .history-actions button, .history-reader button { min-height: var(--touch-min); }
+.history-search { display: grid; gap: 6px; margin-bottom: 16px; }
+.history-search input { width: 100%; min-height: var(--touch-min); }
+.history-group { display: grid; gap: 8px; margin-bottom: 16px; min-width: 0; }
+.history-row { min-width: 0; }
+.history-path { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--text-muted); font-size: 0.85rem; }
+.history-activity, .history-safety { color: var(--text-muted); font-size: 0.85rem; }
+.history-badges, .history-actions { flex-wrap: wrap; margin-top: 8px; }
+.history-truncated { border: 2px solid var(--warning); }
+.history-reader { position: fixed; inset: 0; z-index: 100; overflow-y: auto; background: var(--bg); padding: calc(var(--safe-top) + 16px) calc(var(--safe-right) + 16px) calc(var(--safe-bottom) + 16px) calc(var(--safe-left) + 16px); }
+.history-reader-head { justify-content: space-between; margin-bottom: 8px; }
+.history-reader .message-card { margin-top: 10px; }

@@ -14,7 +14,7 @@
  *     to the browser exactly once.
  */
 import { createServer } from "node:http";
-import { mkdir, stat, writeFile } from "node:fs/promises";
+import { mkdir, realpath, stat, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join, resolve } from "node:path";
@@ -499,6 +499,24 @@ const listNativeSessions = async (input: { projectPath: string }): Promise<Array
     tracked: tracked.has(session.sessionId),
   }));
 };
+const listGlobalSessions = async () => {
+  const scan = await catalog.listAllDetailed();
+  const projectIds = new Set((await store.listProjects()).map((project) => project.id));
+  const tracked = new Set((await store.listAllConversations()).filter((conversation) => projectIds.has(conversation.projectId)).map((conversation) => conversation.nativeSessionId).filter((id): id is string => Boolean(id)));
+  return { ...scan, sessions: scan.sessions.map((session) => ({ ...session, tracked: tracked.has(session.sessionId) })) };
+};
+const readGlobalHistory = async (sessionId: string, before?: string) => {
+  const journal = await catalog.findBySessionId(sessionId);
+  if (!journal) throw Object.assign(new Error("Native session journal was not found"), { code: "not_found" });
+  const header = await catalog.readHeader(journal);
+  if (!header || header.sessionId !== sessionId) throw Object.assign(new Error("Native session journal was not found"), { code: "not_found" });
+  if (!paths.isInsideConfiguredRoots(header.cwd)) throw Object.assign(new Error("Native session journal does not belong to configured roots"), { code: "path_forbidden" });
+  return catalog.readHistory(sessionId, header.cwd, { before });
+};
+const canonicalProjectPath = async (projectPath: string) => {
+  try { return await realpath(projectPath); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return resolve(projectPath); throw error; }
+};
 
 // ── Application ─────────────────────────────────────────────────────────────
 const app = buildApp({
@@ -512,6 +530,9 @@ const app = buildApp({
   mintLink,
   listNativeSessions,
   modelCatalog,
+  listGlobalSessions,
+  readGlobalHistory,
+  canonicalProjectPath,
   readNativeHistory: (sessionId, expectedCwd, options) => catalog.readHistory(sessionId, expectedCwd, options),
   listCollabHosts: () => registry.list(),
   findLiveHost: (sessionId) => registry.findBySessionId(sessionId),

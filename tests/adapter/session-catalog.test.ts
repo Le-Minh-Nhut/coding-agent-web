@@ -117,6 +117,24 @@ describe("session-catalog", () => {
       expect(found).toBe(sessionFile);
     });
   });
+  it("globally scans bounded journals, counts bad files, and preserves deleted-cwd history checks", async () => {
+    const sessionsRoot = path.join(testRoot, "global-detailed-sessions");
+    const cwd = path.join(testRoot, "global-deleted-cwd");
+    const bucket = path.join(sessionsRoot, "bucket");
+    await mkdir(bucket, { recursive: true });
+    const journal = path.join(bucket, "2026-01-04_session-global.jsonl");
+    await writeFile(journal, `${JSON.stringify({ type: "session", id: "session-global", cwd, timestamp: "2026-01-01T00:00:00.000Z" })}\n${JSON.stringify({ type: "message", text: "saved" })}\n`);
+    await writeFile(path.join(bucket, "2026-01-03_bad.jsonl"), "{invalid header\n");
+    await writeFile(path.join(bucket, "2026-01-02_plain.jsonl"), "not a journal\n");
+    const catalog = new DefaultNativeSessionCatalog({ sessionsRoot, maxGlobalFiles: 2, disableGlobalCache: true, leaseProbe: { isLive: async () => false, liveSet: async () => new Map(), leaseName: (id) => id } });
+    const result = await catalog.listAllDetailed();
+    expect(result.truncated).toBe(true);
+    expect(result.filesScanned).toBe(2);
+    expect(result.filesSkippedNonJournal).toBe(1);
+    expect(result.sessions.map((session) => session.sessionId)).toEqual(["session-global"]);
+    await expect(catalog.readHistory("session-global", cwd)).resolves.toMatchObject({ entries: [{ type: "message", text: "saved" }] });
+    await expect(catalog.readHistory("session-global", path.join(testRoot, "other-missing-cwd"))).rejects.toMatchObject({ code: "path_forbidden" });
+  });
 
   describe("failed discovery is not an empty result", () => {
     it("reports an absent bucket as no sessions, but an unreadable one as a failure", async () => {

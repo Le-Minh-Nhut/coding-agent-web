@@ -11,6 +11,7 @@ import type {
   Conversation,
   ConversationEventsResponse,
   DirectoryListing,
+  GlobalSessionPage,
   NativeSessionSummary,
   ProjectWithStats,
   RuntimeSnapshot,
@@ -202,6 +203,20 @@ export const api = {
   async getConversationHistory(id: string, before?: string): Promise<ApiResult<SavedConversationHistory>> {
     const cursor = before ? `?${new URLSearchParams({ before }).toString()}` : "";
     return request<SavedConversationHistory>(`/api/conversations/${encodeURIComponent(id)}/history${cursor}`);
+  },
+
+  async listGlobalSessions(options?: { limit?: number; cursor?: string; q?: string }): Promise<ApiResultWithStatus<GlobalSessionPage>> {
+    const params = new URLSearchParams();
+    if (options?.limit !== undefined) params.set("limit", String(options.limit));
+    if (options?.cursor) params.set("cursor", options.cursor);
+    if (options?.q) params.set("q", options.q);
+    const query = params.toString();
+    return request<GlobalSessionPage>(`/api/sessions${query ? `?${query}` : ""}`);
+  },
+
+  async getSavedSessionHistory(sessionId: string, before?: string): Promise<ApiResultWithStatus<SavedConversationHistory>> {
+    const cursor = before ? `?${new URLSearchParams({ before }).toString()}` : "";
+    return request<SavedConversationHistory>(`/api/sessions/${encodeURIComponent(sessionId)}/history${cursor}`);
   },
 
   async getConversationEvents(id: string, options?: { after?: number; before?: number; limit?: number }): Promise<ApiResult<ConversationEventsResponse>> {

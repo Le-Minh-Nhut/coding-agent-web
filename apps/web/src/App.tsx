@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { HistoryView } from "./components/HistoryView.js";
 import { api, setCsrfToken } from "./api.js";
 import { LoginView } from "./components/LoginView.js";
 import { ProjectsView } from "./components/ProjectsView.js";
@@ -8,7 +9,7 @@ import { SettingsView } from "./components/SettingsView.js";
 import { resetMutationQueues } from "./mutation-order.js";
 import { resetProjectMutationState } from "./components/ProjectsView.js";
 
-type View = "projects" | "project-detail" | "conversation" | "settings";
+type View = "projects" | "project-detail" | "conversation" | "settings" | "history";
 
 /**
  * Every place the app transitions to unauthenticated goes through here: the
@@ -141,6 +142,7 @@ export function App() {
             setCurrentView("project-detail");
           }}
           onOpenSettings={() => setCurrentView("settings")}
+          onOpenHistory={() => setCurrentView("history")}
         />
       )}
 
@@ -182,6 +184,15 @@ export function App() {
           onLogout={() => {
             clearSessionScopedMutations();
             setIsAuthenticated(false);
+          }}
+        />
+      )}
+      {currentView === "history" && (
+        <HistoryView
+          onBack={() => setCurrentView("projects")}
+          onSelectConversation={(id) => {
+            setSelectedConversationId(id);
+            setCurrentView("conversation");
           }}
         />
       )}

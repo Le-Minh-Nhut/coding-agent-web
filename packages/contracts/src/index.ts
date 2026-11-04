@@ -260,6 +260,40 @@ export interface NativeSessionSummary {
   /** True when a known conversation already owns it. */
   tracked: boolean;
 }
+export interface GlobalSessionSummary {
+  sessionId: string;
+  /** Absolute path of the journal on disk. */
+  journalPath: string;
+  /** The session's own working directory, from its journal header. */
+  cwd: string;
+  /** False when that directory no longer exists; the session is then history-only. */
+  cwdAvailable: boolean;
+  /** True when `cwd` is a registered CAW project. */
+  projectId: string | null;
+  title: string | null;
+  /** Last activity: the title slot's `updatedAt`, else the header timestamp, else the journal mtime. */
+  updatedAt: string | null;
+  /** The session's start time, from its header. */
+  startedAt: string | null;
+  live: boolean | "unknown";
+  tracked: boolean;
+  hasCollabHost: boolean;
+  relayConnected: boolean | null;
+}
+
+export interface GlobalSessionPage {
+  sessions: GlobalSessionSummary[];
+  nextCursor: string | null;
+  /** Journals examined to build this page. */
+  filesScanned: number;
+  /** True when the enumeration hit its cap: the list is a truthful prefix, not the whole store. */
+  truncated: boolean;
+  /** Journals in the store whose cwd is outside every configured allowed root. Never listed, always counted. */
+  excludedOutsideRoots: number;
+  /** Journals skipped because the bytes are present but are not an OMP session journal. */
+  skippedNonJournal: number;
+}
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Runtime facts as reported by the server
@@ -365,6 +399,12 @@ export const browseQuerySchema = z.object({
   path: z.string().min(1).max(4096).optional(),
   limit: z.coerce.number().int().min(1).max(500).optional(),
   cursor: z.string().min(1).max(2048).optional(),
+}).strict();
+
+export const globalSessionsQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(200).default(50),
+  cursor: z.string().min(1).max(2048).optional(),
+  q: z.string().min(1).max(200).optional(),
 }).strict();
 
 export const createDirectorySchema = z.object({

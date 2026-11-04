@@ -8,6 +8,7 @@ import type { ProjectWithStats } from "@caw/contracts";
 interface ProjectsViewProps {
   onSelectProject: (projectId: string) => void;
   onOpenSettings: () => void;
+  onOpenHistory: () => void;
 }
 
 /**
@@ -112,7 +113,7 @@ interface LiveProjectsFeedback {
 
 const liveProjectsFeedback: { current: LiveProjectsFeedback | null } = { current: null };
 
-export function ProjectsView({ onSelectProject, onOpenSettings }: ProjectsViewProps) {
+export function ProjectsView({ onSelectProject, onOpenSettings, onOpenHistory }: ProjectsViewProps) {
   const [projects, setProjects] = useState<ProjectWithStats[]>([]);
   const [loading, setLoading] = useState(true);
   const [showBrowser, setShowBrowser] = useState(false);
@@ -520,6 +521,7 @@ export function ProjectsView({ onSelectProject, onOpenSettings }: ProjectsViewPr
           <button type="button" onClick={() => setShowBrowser(true)} className="primary">
             + New Project
           </button>
+          <button type="button" onClick={onOpenHistory} title="Session history">History</button>
           <button type="button" onClick={onOpenSettings} title="Settings">
             ⚙️
           </button>

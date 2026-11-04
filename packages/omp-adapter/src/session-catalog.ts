@@ -18,6 +18,16 @@ export interface SessionCatalogOptions {
   isTracked?: (sessionId: string) => boolean;
   stat?: typeof stat;
   realpath?: typeof realpathSync;
+  maxGlobalFiles?: number;
+  globalCacheTtlMs?: number;
+  disableGlobalCache?: boolean;
+}
+
+interface DetailedSessionScan {
+  sessions: Array<Omit<NativeSessionSummary, "hasCollabHost"> & { startedAt: string | null }>;
+  filesScanned: number;
+  filesSkippedNonJournal: number;
+  truncated: boolean;
 }
 
 function resolveCanonical(inputPath: string, realpath: typeof realpathSync): string {
@@ -112,11 +122,18 @@ export class DefaultNativeSessionCatalog implements NativeSessionCatalog {
   readonly #leaseProbe: SessionLeaseProbe;
   readonly #isTracked: (sessionId: string) => boolean;
   readonly #stat: typeof stat;
+  readonly #maxGlobalFiles: number;
+  readonly #globalCacheTtlMs: number;
+  readonly #disableGlobalCache: boolean;
+  #globalCache: { signature: string; expiresAt: number; result: DetailedSessionScan } | null = null;
   constructor(options: SessionCatalogOptions = {}) {
     this.#sessionsRoot = options.sessionsRoot ?? resolveOmpDirs({ agentDirOverride: process.env.PI_CODING_AGENT_DIR }).sessionsDir;
     this.#leaseProbe = options.leaseProbe ?? new DefaultSessionLeaseProbe();
     this.#isTracked = options.isTracked ?? (() => false);
     this.#stat = options.stat ?? stat;
+    this.#maxGlobalFiles = options.maxGlobalFiles ?? 5000;
+    this.#globalCacheTtlMs = options.globalCacheTtlMs ?? 30_000;
+    this.#disableGlobalCache = options.disableGlobalCache ?? false;
   }
 
   async readHeader(sessionPath: string): Promise<NativeSessionHeader | null> {
@@ -317,6 +334,56 @@ export class DefaultNativeSessionCatalog implements NativeSessionCatalog {
 
     return summaries;
   }
+  async listAllDetailed(options: { limit?: number; cacheTtlMs?: number } = {}): Promise<DetailedSessionScan> {
+    const limit = Math.max(0, Math.trunc(options.limit ?? this.#maxGlobalFiles));
+    const ttl = options.cacheTtlMs ?? this.#globalCacheTtlMs;
+    let names: string[];
+    try { names = await readdir(this.#sessionsRoot); }
+    catch (error) {
+      if (isMissingDirectory(error)) return { sessions: [], filesScanned: 0, filesSkippedNonJournal: 0, truncated: false };
+      throw error;
+    }
+    const buckets: Array<{ dir: string; mtime: number }> = [];
+    const files: string[] = [];
+    for (const name of names) {
+      const filePath = path.join(this.#sessionsRoot, name);
+      if (name.endsWith(".jsonl")) { files.push(filePath); continue; }
+      try {
+        const info = await this.#stat(filePath);
+        if (info.isDirectory()) {
+          buckets.push({ dir: filePath, mtime: info.mtimeMs });
+          for (const file of await readdir(filePath)) if (file.endsWith(".jsonl")) files.push(path.join(filePath, file));
+        }
+      } catch (error) { if (!isMissingDirectory(error)) throw error; }
+    }
+    const rootMtime = (await this.#stat(this.#sessionsRoot)).mtimeMs;
+    const signature = JSON.stringify([rootMtime, buckets.sort((a, b) => a.dir.localeCompare(b.dir))]);
+    if (!this.#disableGlobalCache && ttl > 0 && this.#globalCache?.signature === signature && Date.now() < this.#globalCache.expiresAt) return this.#globalCache.result;
+    files.sort((a, b) => b.localeCompare(a));
+    const target = files.slice(0, limit);
+    const sessions: DetailedSessionScan["sessions"] = [];
+    let filesScanned = 0;
+    let filesSkippedNonJournal = 0;
+    let cursor = 0;
+    const worker = async () => {
+      while (true) {
+        const index = cursor++;
+        if (index >= target.length) return;
+        try {
+          const parsed = await this.#readHeaderAndMeta(target[index]!);
+          filesScanned++;
+          if (!parsed) { filesSkippedNonJournal++; continue; }
+          sessions.push({ ...(await this.#summaryFor(target[index]!, parsed)), startedAt: parsed.header.timestamp });
+        } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(16, target.length) }, worker));
+    sessions.sort((a, b) => (b.updatedAt ?? "").localeCompare(a.updatedAt ?? "") || a.sessionId.localeCompare(b.sessionId));
+    const result = { sessions, filesScanned, filesSkippedNonJournal, truncated: files.length > target.length };
+    // ponytail: process-local TTL cache has no cross-process invalidation; use a filesystem watcher only if staleness is observed.
+    if (!this.#disableGlobalCache && ttl > 0) this.#globalCache = { signature, expiresAt: Date.now() + ttl, result };
+    return result;
+  }
 
   async findBySessionId(sessionId: string): Promise<string | null> {
     let bucketDirs: string[];
@@ -378,7 +445,6 @@ export class DefaultNativeSessionCatalog implements NativeSessionCatalog {
       try { openedPath = await realpath(`/proc/self/fd/${handle.fd}`); }
       catch { throw Object.assign(new Error("Cannot verify native session journal location"), { code: "path_forbidden" }); }
       if (!isRelativeWithin(path.relative(root, openedPath))) throw Object.assign(new Error("Native session journal is outside the OMP session store"), { code: "path_forbidden" });
-      const expected = await realpath(expectedCwd);
       const prefix = Buffer.alloc(SESSION_HEADER_PREFIX_BYTES);
       const prefixRead = await handle.read(prefix, 0, prefix.length, 0);
       const prefixText = prefix.toString("utf8", 0, prefixRead.bytesRead);
@@ -406,11 +472,16 @@ export class DefaultNativeSessionCatalog implements NativeSessionCatalog {
         version: typeof rawHeader.version === "number" ? rawHeader.version : null,
         title: title ?? (typeof rawHeader.title === "string" ? rawHeader.title : null),
       };
-      let actual: string;
-      try { actual = await realpath(header.cwd); }
-      catch { throw Object.assign(new Error("Native session journal does not belong to this project"), { code: "path_forbidden" }); }
-      const cwdHash = createHash("sha256").update(expected).digest("base64url");
-      if (expected !== actual || (cursor && cursor.cwdHash !== cwdHash)) throw Object.assign(new Error("Native session journal does not belong to this project"), { code: "path_forbidden" });
+      let expectedReal: string | null = null;
+      let actualReal: string | null = null;
+      try { expectedReal = await realpath(expectedCwd); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+      try { actualReal = await realpath(header.cwd); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+      // A missing directory cannot be a symlink, so lexical equality is strongest evidence available only when either realpath is absent.
+      const cwdMatches = expectedReal !== null && actualReal !== null ? expectedReal === actualReal : path.resolve(expectedCwd) === path.resolve(header.cwd);
+      const cwdHash = createHash("sha256").update(actualReal ?? path.resolve(header.cwd)).digest("base64url");
+      if (!cwdMatches || (cursor && cursor.cwdHash !== cwdHash)) throw Object.assign(new Error("Native session journal does not belong to this project"), { code: "path_forbidden" });
       if (cursor && (cursor.dev !== metadata.dev || cursor.ino !== metadata.ino || metadata.size < cursor.size || cursor.end < headerEnd || cursor.end > cursor.size)) {
         throw Object.assign(new Error("History cursor no longer matches this journal"), { code: "path_forbidden" });
       }

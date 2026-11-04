@@ -117,16 +117,16 @@ export function shouldSubmitOnEnter(
   return !coarsePointer && event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing && !composing;
 }
 
-const MessageRow = memo(function MessageRow({ message }: { message: DisplayMessage }) {
+export const MessageRow = memo(function MessageRow({ message }: { message: DisplayMessage | TranscriptMessage }) {
   return (
     <div className={`message-card ${message.role}${message.isError ? " error" : ""}`}>
       <div style={{ fontSize: "0.75rem", color: message.isError ? "var(--danger-text)" : "var(--text-muted)", marginBottom: "4px", textTransform: "capitalize" }}>
         {message.role} {message.toolName ? `(${message.toolName})` : ""}{message.isError ? " · error" : ""}
-        {message.awaitingHost ? " · sent while active; awaiting host" : ""}
+        {"awaitingHost" in message && message.awaitingHost ? " · sent while active; awaiting host" : ""}
       </div>
       {message.role === "tool" ? (
-        <details open={message.isRunning}>
-          <summary>{message.toolName ?? "Tool Result"} {message.isRunning ? "(Running…)" : message.isError ? "(Error)" : ""}</summary>
+        <details open={"isRunning" in message && message.isRunning}>
+          <summary>{message.toolName ?? "Tool Result"} {"isRunning" in message && message.isRunning ? "(Running…)" : message.isError ? "(Error)" : ""}</summary>
           <div className="message-content"><MarkdownCodeBlock code={message.text} language="" /></div>
         </details>
       ) : (
