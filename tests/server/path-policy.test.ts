@@ -66,6 +66,17 @@ describe("WorkspacePathPolicy", () => {
     expect((error as PathPolicyError).code).toBe("path_forbidden");
   });
 
+  it("revalidates read scope through realpath but permits a genuinely missing cwd lexically", async () => {
+    const parent = await tempDir();
+    const root = join(parent, "root");
+    const outside = join(parent, "outside");
+    const deleted = join(root, "deleted");
+    await mkdir(root); await mkdir(outside);
+    await symlink(outside, join(root, "escape"));
+    const policy = new WorkspacePathPolicy([root]);
+    expect(await policy.isInsideConfiguredRootsForRead(join(root, "escape"))).toBe(false);
+    expect(await policy.isInsideConfiguredRootsForRead(deleted)).toBe(true);
+  });
   it("creates directory inside allowed root and returns the created absolute path", async () => {
     const root = await tempDir();
     const parent = join(root, "parent");

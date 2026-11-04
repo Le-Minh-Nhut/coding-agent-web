@@ -1,18 +1,34 @@
 export type CommandAvailability = "app_action" | "terminal_only" | "not_a_command";
 
+/**
+ * Which app control an `app_action` command routes to. `/model` opens the model
+ * disclosure; `/handoff` asks the server to deliver OMP's native builtin.
+ */
+export type CommandAction = "model" | "handoff";
+
 export interface SlashCommand {
   name: string;
   description: string;
   availability: CommandAvailability;
   mechanism: string;
   explanation: string;
+  action?: CommandAction;
 }
 
 export const slashCommands: SlashCommand[] = [
   {
+    name: "/handoff",
+    description: "Compact this session's context in place (OMP native)",
+    availability: "app_action",
+    action: "handoff",
+    mechanism: "Server types OMP's native /handoff into this conversation's managed pane",
+    explanation: "OMP's native /handoff compacts the context in place on the same session id: no new session, no new process, no lost history. Confirm to paste /handoff into this session's managed terminal. It takes no operand, so a focus argument is refused.",
+  },
+  {
     name: "/model",
     description: "Set model preference or save and restart agent",
     availability: "app_action",
+    action: "model",
     mechanism: "App model preference and managed restart",
     explanation: "Collab does not dispatch slash commands. Use model controls to save a preference for the next launch; restarting is explicit and is not a live model switch.",
   },

@@ -6,7 +6,7 @@ Run service as normal Ubuntu account. Installer never uses sudo and refuses root
 
 Install Node.js 20.19+, pnpm, OMP (`omp`), and tmux. Installer resolves their executable paths and sets service `PATH` to those four directories plus `/usr/bin:/bin`. This lets the service resolve `omp` and `tmux`; agents launched in tmux inherit the same PATH. To expose another tool, place or link it in one of those PATH directories; installer provides no separate PATH extension setting.
 
-Create valid repo-root `caw.config.json` or set `CAW_CONFIG` to its absolute path. Keep `host` loopback (`127.0.0.1`), set `publicOrigin` to an absolute HTTP(S) origin without path/query/fragment, and list existing absolute `allowedRoots`. Installer backs up and changes only `maxActiveAgents` to `3` if necessary. Do not put secrets in config. Keep the state directory owner-private: it contains the first-run setup token.
+Create valid repo-root `caw.config.json` or set `CAW_CONFIG` to its absolute path. Keep `host` loopback (`127.0.0.1`), set `publicOrigin` to an absolute HTTP(S) origin without path/query/fragment, and list existing absolute `allowedRoots`. Installer backs up and changes only `maxActiveAgents` to `3` if necessary. Do not put secrets in config. Keep the state directory owner-private: it contains the first-run setup token file.
 
 ## Initial install and auto-start
 
@@ -19,7 +19,7 @@ From repository:
 Installer checks config and dependencies, builds missing guest/web assets (or always with `./deploy/install.sh --build`), installs the user unit, and enables it. `INSTALLED: <unit>` means unit file installed; `ENABLED: yes` means enabled for user-manager startup. `STARTED: yes` means installer started service; `STARTED: no (already active)` means service was already active; `STARTED: no (existing service left running)` means existing active service was preserved after a unit change. `HEALTHY: yes` is printed only after `/api/auth/me` returns HTTP 401, confirming app identity rather than merely an HTTP responder. `PENDING_RESTART: yes` means changed unit could not take effect on the running service; apply it with `systemctl --user restart coding-agent-web`. An inactive unit with a server already answering on its port is refused: installer will not start a second server.
 ## First-run setup
 
-On first boot, read the one-time token before setup:
+On first boot the server prints the **path** of the one-time token (`Coding Agent Web first-run setup token written to <path>; read it with: cat <path>`), never the token itself. Read the file before setup:
 
 ```bash
 cat "$HOME/.local/state/coding-agent-web/setup-token"

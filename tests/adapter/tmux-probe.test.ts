@@ -19,6 +19,7 @@ describe("tmux probe tri-state", () => {
   afterAll(async () => {
     if (tmuxAvailable) {
       await execFileAsync("tmux", ["-L", socketName, "kill-server"]).catch(() => {});
+      await rm(path.join(tmpdir(), `tmux-${process.getuid?.() ?? 0}`, socketName), { force: true }).catch(() => {});
     }
   });
 

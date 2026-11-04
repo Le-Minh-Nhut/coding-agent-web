@@ -281,17 +281,17 @@ describe("mobile reading behavior", () => {
     expect(getByText("Approve action?")).toBeTruthy();
     expect(getByText("Read-only link — this request cannot be answered here.")).toBeTruthy();
     expect(queryByRole("button", { name: /Approve/ })).toBeNull();
-    expect(queryByRole("button", { name: "Stop" })).toBeNull();
+    expect(queryByRole("button", { name: "Stop generating" })).toBeNull();
     expect(sent.some((frame) => frame.t === "prompt" || frame.t === "ui-response" || frame.t === "abort")).toBe(false);
     await act(async () => { socket?.onFrame?.(welcome(true)); });
     expect(queryByRole("status", { name: /Read-only/ })).toBeNull();
     fireEvent.change(composer, { target: { value: "allowed after write" } });
     expect(composer.disabled).toBe(false);
     expect((getByRole("button", { name: "Send" }) as HTMLButtonElement).disabled).toBe(false);
-    expect(getByRole("button", { name: "Stop" })).toBeTruthy();
+    expect(getByRole("button", { name: "Stop generating" })).toBeTruthy();
     await act(async () => { socket?.onFrame?.({ t: "ui-request", request: { reqId: 92, kind: "select", title: "Approve again?", options: ["Approve"] } }); });
     fireEvent.click(getByRole("button", { name: /Approve/ }));
-    fireEvent.click(getByRole("button", { name: "Stop" }));
+    fireEvent.click(getByRole("button", { name: "Stop generating" }));
     fireEvent.click(getByRole("button", { name: "Send" }));
     expect(sent.some((frame) => frame.t === "prompt")).toBe(true);
     expect(sent.some((frame) => frame.t === "ui-response")).toBe(true);
@@ -426,7 +426,7 @@ describe("mobile reading behavior", () => {
     expect(container.querySelector("textarea.composer-input")).not.toBeNull();
     expect((container.querySelector("textarea.composer-input") as HTMLTextAreaElement).disabled).toBe(true);
     expect((getByRole("button", { name: "Send" }) as HTMLButtonElement).disabled).toBe(true);
-    expect(container.querySelector('[aria-label="Stop"]')).toBeNull();
+    expect(container.querySelector('[aria-label="Stop generating"]')).toBeNull();
   });
   it("refetches replacement transcript from byte zero after empty EOF shrink", async () => {
     const { container, getByRole } = await mountConversation();

@@ -86,12 +86,12 @@ export function ProjectDetailView({
   };
 
   const handleResume = async (session: NativeSessionSummary) => {
-    if (resumingSessionId || session.tracked) return;
+    if (resumingSessionId || session.tracked || session.live !== false || session.cwdAvailable === false) return;
     const generation = viewGenerationRef.current;
     setResumingSessionId(session.sessionId);
     setError(null);
     const result = await api.createConversation(projectId, session.title ?? "Resumed session", session.sessionId);
-    if (generation !== viewGenerationRef.current) { setResumingSessionId(null); return; }
+    if (!viewActiveRef.current || generation !== viewGenerationRef.current) { setResumingSessionId(null); return; }
     setResumingSessionId(null);
     if (result.ok) onSelectConversation(result.data.id);
     else if (result.error.code === "conflict_owner") {
@@ -117,7 +117,7 @@ export function ProjectDetailView({
     setAttachingSessionId(session.sessionId);
     setError(null);
     const result = await api.attachLiveSession(projectId, session.sessionId);
-    if (generation !== viewGenerationRef.current) { setAttachingSessionId(null); return; }
+    if (!viewActiveRef.current || generation !== viewGenerationRef.current) { setAttachingSessionId(null); return; }
     setAttachingSessionId(null);
     if (result.ok) onSelectConversation(result.data.id);
     else setError(result.error.message);
@@ -231,25 +231,23 @@ export function ProjectDetailView({
                 <p className="path-text" style={{ fontSize: "0.75rem", color: "var(--text-muted)" }} title={sess.path}>
                   {sess.path}
                 </p>
-                {!sess.tracked && sess.live === true && !hasLiveCollabHost(sess) && (
-                  <p style={{ fontSize: "0.8rem", color: "var(--text-muted)" }}>This session is live but has no verified Collab host. Attach in the terminal instead.</p>
+                {sess.tracked && sess.conversationId && <button type="button" className="primary" onClick={() => onSelectConversation(sess.conversationId!)}>Open conversation</button>}
+                {sess.live === true && !hasLiveCollabHost(sess) && (
+                  <p style={{ fontSize: "0.8rem", color: "var(--text-muted)" }}>Open live unavailable: no verified Collab host for this session.</p>
                 )}
-                {!sess.tracked && sess.live === "unknown" && <p style={{ fontSize: "0.8rem", color: "var(--text-muted)" }}>Writer lease could not be verified. Resume is disabled to prevent a second writer.</p>}
+                {!sess.tracked && sess.live === "unknown" && <p style={{ fontSize: "0.8rem", color: "var(--text-muted)" }}>Writer status could not be verified; Resume disabled for safety.</p>}
                 {!sess.tracked && sess.live === true && hasLiveCollabHost(sess) && (
                   <button type="button" className="primary" disabled={attachingSessionId !== null} onClick={() => handleAttachLive(sess)}>
                     {attachingSessionId === sess.sessionId ? "Opening…" : "Open live session"}
                   </button>
                 )}
-                {!sess.tracked && sess.live === false && (
-                  <button
-                    type="button"
-                    className="primary"
-                    disabled={resumingSessionId !== null}
-                    onClick={() => handleResume(sess)}
-                  >
+                {sess.tracked && !sess.conversationId && <p style={{ fontSize: "0.8rem", color: "var(--text-muted)" }}>Tracked conversation ID is unavailable.</p>}
+                {!sess.tracked && sess.live === false && sess.cwdAvailable !== false && (
+                  <button type="button" className="primary" disabled={resumingSessionId !== null} onClick={() => handleResume(sess)}>
                     {resumingSessionId === sess.sessionId ? "Resuming…" : "Resume in app"}
                   </button>
                 )}
+                {!sess.tracked && sess.live === false && sess.cwdAvailable === false && <p style={{ fontSize: "0.8rem", color: "var(--text-muted)" }}>Resume unavailable: working directory no longer exists.</p>}
                 {sess.tracked && sess.live === false && conversations.some((item) => item.nativeSessionId === sess.sessionId && retryableNativeConversation(item)) && (
                   <button type="button" className="primary" disabled={resumingSessionId !== null} onClick={(event) => { event.stopPropagation(); const conversation = conversations.find((item) => item.nativeSessionId === sess.sessionId && retryableNativeConversation(item)); if (conversation) void handleRetryConversation(conversation); }}>
                     {resumingSessionId !== null ? "Retrying…" : "Retry"}

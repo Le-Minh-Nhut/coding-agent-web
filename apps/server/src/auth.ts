@@ -150,26 +150,18 @@ export function createAuthenticationService(options: { stateDir: string; ttlHour
     const salt = randomBytes(16);
     await mkdir(options.stateDir, { recursive: true, mode: 0o700 });
     await chmod(options.stateDir, 0o700);
+    await persistRecord({
+      kind: "pending",
+      salt: salt.toString("hex"),
+      hash: (await derive(setupToken, salt)).toString("hex"),
+      expiresAt: now() + PENDING_TOKEN_TTL_MS,
+    });
     await unlink(setupTokenFile).catch((error: NodeJS.ErrnoException) => { if (error.code !== "ENOENT") throw error; });
-    const tokenHandle = await open(setupTokenFile, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, 0o600);
-    try {
-      await tokenHandle.writeFile(setupToken);
-      await tokenHandle.chmod(0o600);
-      await tokenHandle.sync();
-    } finally {
-      await tokenHandle.close();
-    }
-    try {
-      await persistRecord({
-        kind: "pending",
-        salt: salt.toString("hex"),
-        hash: (await derive(setupToken, salt)).toString("hex"),
-        expiresAt: now() + PENDING_TOKEN_TTL_MS,
-      });
-    } catch (error) {
-      await unlink(setupTokenFile).catch(() => undefined);
-      throw error;
-    }
+    const tempTokenFile = `${setupTokenFile}.${randomBytes(8).toString("hex")}.tmp`;
+    const tokenHandle = await open(tempTokenFile, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, 0o600);
+    try { await tokenHandle.writeFile(setupToken); await tokenHandle.chmod(0o600); await tokenHandle.sync(); }
+    finally { await tokenHandle.close(); }
+    await rename(tempTokenFile, setupTokenFile);
     sessions.clear();
     (options.setupOutput ?? ((path) => process.stdout.write(`Coding Agent Web first-run setup token written to ${path}; read it with: cat ${path}\n`)))(setupTokenFile);
     return setupToken;
@@ -242,7 +234,8 @@ export function createAuthenticationService(options: { stateDir: string; ttlHour
         } finally {
           await tokenHandle?.close().catch((error: unknown) => { throw new Error(`Cannot close setup token file ${setupTokenFile}: ${error instanceof Error ? error.message : String(error)}`); });
         }
-        if (!/^[A-Za-z0-9_-]{43}$/.test(token)) {
+        const tokenHash = (await derive(token, Buffer.from(authRecord.salt, "hex"))).toString("hex");
+        if (!/^[A-Za-z0-9_-]{43}$/.test(token) || !safeEqual(tokenHash, authRecord.hash)) {
           const setupToken = await mintPendingToken();
           return { setupRequired: true, setupToken };
         }

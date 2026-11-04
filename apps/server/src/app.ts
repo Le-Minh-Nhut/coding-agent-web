@@ -4,8 +4,8 @@ import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { stat } from "node:fs/promises";
 import { browseQuerySchema, conversationActionSchema, conversationModelSchema, createConversationSchema, createDirectorySchema, createProjectSchema, epochOf, ERROR_CODES, fail, globalSessionsQuerySchema, listEventsQuerySchema, loginSchema, observationSeqOf, ok, updateProjectSchema } from "@caw/contracts";
 import { z } from "zod";
-import type { Capabilities, CollabLinkResponse, Conversation, ErrorCode, GlobalSessionPage, GlobalSessionSummary, NativeSessionSummary, ProjectWithStats } from "@caw/contracts";
-import type { CapabilityService, CollabHost, ModelCatalogService, NativeSessionHistory } from "@caw/omp-adapter";
+import type { Capabilities, CollabLinkResponse, Conversation, ErrorCode, GlobalSessionPage, GlobalSessionSummary, HandoffResponse, NativeSessionSummary, ProjectWithStats } from "@caw/contracts";
+import type { CapabilityService, CollabHost, HandoffResult, ModelCatalogService, NativeSessionHistory } from "@caw/omp-adapter";
 import type { Supervisor, RuntimeLaunchSpec } from "@caw/runtime";
 import { evaluateState } from "@caw/runtime";
 import type { AuthenticationService } from "./auth.js";
@@ -39,7 +39,7 @@ export interface AppDependencies {
   listCollabHosts?: () => Promise<CollabHost[]>;
   modelCatalog?: ModelCatalogService;
   /** Bounded global native-session enumeration, composed without adapter knowledge. */
-  listGlobalSessions?: () => Promise<{ sessions: Array<Omit<NativeSessionSummary, "hasCollabHost"> & { startedAt?: string | null }>; filesScanned: number; filesSkippedNonJournal: number; truncated: boolean }>;
+  listGlobalSessions?: () => Promise<{ sessions: Array<Omit<NativeSessionSummary, "hasCollabHost"> & { startedAt?: string | null }>; filesScanned: number; filesSkippedNonJournal: number; filesUnreadable: number; truncated: boolean }>;
   /** Reads saved transcript by journal identity; route supplies journal-derived cwd. */
   readGlobalHistory?: (sessionId: string, before?: string) => Promise<NativeSessionHistory>;
   /** Canonicalizes project and session working directories using composition-root reconciliation. */
@@ -49,6 +49,12 @@ export interface AppDependencies {
   /** Reads a bounded native journal window by session ID after matching canonical project path. */
   readNativeHistory?: (sessionId: string, expectedCwd: string, options?: { before?: string }) => Promise<NativeSessionHistory>;
   findLiveHost?: (sessionId: string) => Promise<CollabHost | null>;
+  /**
+   * Types OMP's builtin `/handoff` into a live pane. Supplied by the composition
+   * root because only it holds the private tmux service; the route owns the
+   * preconditions (ownership, identity, idleness) and passes them down.
+   */
+  sendHandoff?: (input: { sessionId: string; expectedIdentity: string; expectedPanePid: number; assertIdle: () => Promise<boolean> }) => Promise<HandoffResult>;
 }
 
 const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
@@ -423,7 +429,7 @@ export function buildApp(deps: AppDependencies): FastifyInstance<HttpServer> {
         try { projectId = projectByPath.get(await deps.canonicalProjectPath(session.cwd)) ?? null; }
         catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
         const host = hostMap.get(session.sessionId);
-        return { sessionId: session.sessionId, journalPath: session.path, cwd: session.cwd, cwdAvailable, projectId, title: session.title, updatedAt: session.updatedAt, startedAt: session.startedAt ?? null, live: session.live, tracked: tracked.has(session.sessionId), hasCollabHost: host?.relayConnected === true, relayConnected: host?.relayConnected ?? null };
+        return { sessionId: session.sessionId, journalPath: session.path, cwd: session.cwd, cwdAvailable, projectId, conversationId: session.conversationId ?? null, title: session.title, updatedAt: session.updatedAt, startedAt: session.startedAt ?? null, live: session.live, tracked: tracked.has(session.sessionId), hasCollabHost: host?.relayConnected === true, relayConnected: host?.relayConnected ?? null };
       }));
       const filtered = mapped.filter((session) => !q || [session.title, session.cwd, session.sessionId, projects.find((project) => project.id === session.projectId)?.label].some((value) => value?.toLocaleLowerCase().includes(q)));
       const order = (a: { updatedAt: string | null; sessionId: string }, b: { updatedAt: string | null; sessionId: string }) => (a.updatedAt === null || b.updatedAt === null ? a.updatedAt === b.updatedAt ? a.sessionId.localeCompare(b.sessionId) : a.updatedAt === null ? 1 : -1 : b.updatedAt.localeCompare(a.updatedAt) || a.sessionId.localeCompare(b.sessionId));
@@ -434,7 +440,7 @@ export function buildApp(deps: AppDependencies): FastifyInstance<HttpServer> {
       const page = filtered.slice(cursor ? start : 0, (cursor ? start : 0) + query.data.limit);
       const last = page.at(-1);
       const nextCursor = last && filtered.some((session) => order(session, last) > 0) ? encodeGlobalCursor({ version: 1, query: q, updatedAt: last.updatedAt, sessionId: last.sessionId }) : null;
-      const result: GlobalSessionPage = { sessions: page, nextCursor, filesScanned: scan.filesScanned, truncated: scan.truncated, excludedOutsideRoots, skippedNonJournal: scan.filesSkippedNonJournal };
+      const result: GlobalSessionPage = { sessions: page, nextCursor, filesScanned: scan.filesScanned, truncated: scan.truncated, excludedOutsideRoots, skippedNonJournal: scan.filesSkippedNonJournal, unreadableJournals: scan.filesUnreadable };
       return ok(result);
     } catch (error) {
       if (errorCode(error) === "path_forbidden") return reply.code(403).send(fail("path_forbidden", "Invalid global session cursor or scope."));
@@ -640,6 +646,98 @@ export function buildApp(deps: AppDependencies): FastifyInstance<HttpServer> {
       // Never surface an internal message here: it can contain a room URL.
       app.log.error({ conversationId: conversation.id }, "failed to mint a live session link");
       return reply.code(500).send(fail("internal", "Could not obtain a live session link."));
+    }
+  });
+  /**
+   * Deliver OMP's builtin `/handoff` to this conversation's live agent.
+   *
+   * The route owns every precondition; the adapter only proves the pane. Handoff
+   * is a *keystroke* into a running TUI, so the two facts that make it safe are
+   * checked here rather than assumed: the conversation must still own the tmux
+   * server we recorded, and the registry must positively report the session idle.
+   *
+   * Absence of evidence is a refusal, never a pass: `null`/`unknown` for
+   * `busy`/`inputRequired` refuses, because a paste into a session mid-turn is a
+   * second writer by keystroke instead of by lease.
+   */
+  const handoffInFlight = new Set<string>();
+  app.post("/api/conversations/:id/handoff", { preHandler: protectedHook }, async (request, reply) => {
+    const params = idParams.safeParse(request.params);
+    if (!params.success) return reply.code(400).send(fail("bad_request", "Invalid conversation ID"));
+    // `/handoff` takes no operand. A caller asking to focus something is asking
+    // for keystrokes we deliberately cannot send, so it is refused by name rather
+    // than silently dropped.
+    const body = (request.body ?? {}) as { focus?: unknown };
+    if (body.focus !== undefined && body.focus !== null && body.focus !== "") {
+      return reply.code(409).send(fail("capability_missing", "Only the bare /handoff command is supported; focus instructions are not."));
+    }
+    const conversation = await deps.store.getConversation(params.data.id);
+    if (!conversation) return reply.code(404).send(fail("not_found", "Conversation not found"));
+    if (conversation.ownership !== "managed") {
+      return reply.code(409).send(fail("conflict_owner", "This session is externally managed; hand it off in its own terminal."));
+    }
+    if (!conversation.tmuxSessionId || !conversation.tmuxServerIdentity || conversation.tmuxPanePid === null) {
+      return reply.code(409).send(fail("conflict_owner", "No verified managed tmux session is recorded for this conversation."));
+    }
+    if (!deps.sendHandoff) return reply.code(501).send(fail("capability_missing", "Handoff is not configured on this server."));
+    if (!conversation.nativeSessionId) {
+      return reply.code(409).send(fail("conflict_owner", "This conversation has no native session to hand off."));
+    }
+    if (handoffInFlight.has(conversation.id)) {
+      return reply.code(409).send(fail("handoff_in_flight", "A handoff is already in progress for this conversation."));
+    }
+
+    const recordedIdentity = conversation.tmuxServerIdentity;
+    const sessionId = conversation.tmuxSessionId;
+    const panePid = conversation.tmuxPanePid;
+    const nativeSessionId = conversation.nativeSessionId;
+    handoffInFlight.add(conversation.id);
+    try {
+      if (!deps.tmuxServerIdentity) return reply.code(501).send(fail("capability_missing", "Handoff is not configured on this server."));
+      let liveIdentity: string | null;
+      try {
+        liveIdentity = await deps.tmuxServerIdentity();
+      } catch {
+        return reply.code(409).send(fail("conflict_owner", "The live tmux server identity cannot be verified."));
+      }
+      if (liveIdentity !== recordedIdentity) {
+        return reply.code(409).send(fail("conflict_owner", "The recorded tmux server identity is not the live one."));
+      }
+      const result = await deps.sendHandoff({
+        sessionId,
+        expectedIdentity: recordedIdentity,
+        expectedPanePid: panePid,
+        assertIdle: async () => {
+          if (!deps.findLiveHost) return false;
+          let host: CollabHost | null;
+          try {
+            host = await deps.findLiveHost(nativeSessionId);
+          } catch {
+            return false;
+          }
+          // Read-only rooms and unreported flags are not idle evidence.
+          return host !== null && host.sessionId === nativeSessionId && host.access === "control" &&
+            host.relayConnected === true && host.busy === false && host.inputRequired === false;
+        },
+      });
+      if (result.delivered) {
+        app.log.info({ conversationId: conversation.id }, "handoff delivered");
+        const delivered: HandoffResponse = { delivered: true, paneId: result.paneId };
+        return ok(delivered);
+      }
+      if (result.refusal === "terminal_attached") {
+        return reply.code(409).send(fail("terminal_attached", result.reason));
+      }
+      // Every other refusal says the recorded process is not the one we could
+      // safely type into, so the client's move is to refresh, not to retry.
+      return reply.code(409).send(fail("conflict_owner", result.reason));
+    } catch (error) {
+      const code = errorCode(error);
+      if (code === "bad_request") return reply.code(400).send(fail("bad_request", String(redactLogValue(error instanceof Error ? error.message : "Invalid handoff request"))));
+      app.log.error({ conversationId: conversation.id }, "handoff failed");
+      return reply.code(500).send(fail("internal", "Could not deliver the handoff."));
+    } finally {
+      handoffInFlight.delete(conversation.id);
     }
   });
   async function attachInstructions(conversation: Conversation) {

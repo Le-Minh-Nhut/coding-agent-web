@@ -12,7 +12,7 @@ import {
   type HostFrame,
   type SessionEntry,
 } from "@caw/collab-protocol";
-import { clearTranscriptRequests, createTranscriptState, forgetTranscriptRequest, reduceHostFrame, setConnectionStatus, textFromContent, trackTranscriptRequest, transcriptMessagesFromEntries, type TranscriptMessage, type TranscriptReply, type TranscriptState } from "../transcript.js";
+import { clearTranscriptRequests, createTranscriptState, forgetTranscriptRequest, reduceHostFrame, setConnectionStatus, textFromContent, trackTranscriptRequest, transcriptMessagesFromEntries, type TranscriptBlock, type TranscriptMessage, type TranscriptReply, type TranscriptState } from "../transcript.js";
 import { findSlashCommand, slashCommands, type SlashCommand } from "../commands.js";
 import type { AttachInstructions, Conversation } from "@caw/contracts";
 /** A settled prompt record kept until explicit dismissal. */
@@ -37,6 +37,7 @@ interface DisplayMessage {
   id: string;
   role: "user" | "assistant" | "tool" | "notice";
   text: string;
+  blocks?: TranscriptBlock[];
   toolName?: string;
   isError?: boolean;
   isRunning?: boolean;
@@ -118,25 +119,51 @@ export function shouldSubmitOnEnter(
 }
 
 export const MessageRow = memo(function MessageRow({ message }: { message: DisplayMessage | TranscriptMessage }) {
+  const [expanded, setExpanded] = useState(false);
+  const blocks = "blocks" in message ? message.blocks : undefined;
+  const copy = async (text: string) => { try { await navigator.clipboard.writeText(text); } catch { /* Clipboard permission is optional; content remains selectable. */ } };
   return (
     <div className={`message-card ${message.role}${message.isError ? " error" : ""}`}>
       <div style={{ fontSize: "0.75rem", color: message.isError ? "var(--danger-text)" : "var(--text-muted)", marginBottom: "4px", textTransform: "capitalize" }}>
         {message.role} {message.toolName ? `(${message.toolName})` : ""}{message.isError ? " · error" : ""}
         {"awaitingHost" in message && message.awaitingHost ? " · sent while active; awaiting host" : ""}
       </div>
-      {message.role === "tool" ? (
-        <details open={"isRunning" in message && message.isRunning}>
-          <summary>{message.toolName ?? "Tool Result"} {"isRunning" in message && message.isRunning ? "(Running…)" : message.isError ? "(Error)" : ""}</summary>
-          <div className="message-content"><MarkdownCodeBlock code={message.text} language="" /></div>
-        </details>
-      ) : (
+      {message.role === "tool" ? <details open={expanded} onToggle={(event) => setExpanded(event.currentTarget.open)}>
+        <summary>{message.toolName ?? "Tool Result"} {"isRunning" in message && message.isRunning ? "(Running…)" : message.isError ? "(Error)" : "(Completed)"}</summary>
+        <p className="tool-output-preview">{message.text.slice(0, 240)}{message.text.length > 240 ? "…" : ""}</p>
+        <div className="history-actions"><button type="button" onClick={() => setExpanded((value) => !value)}>{expanded ? "Collapse output" : "Expand output"}</button><button type="button" onClick={() => void copy(message.text)}>Copy output</button></div>
+        <pre className="message-content" style={{ overflowX: "auto", whiteSpace: "pre" }}><code>{message.text}</code></pre>
+      </details> : blocks && message.role !== "notice" ? <div className="message-content">{blocks.map((block, index) => renderTranscriptBlock(block, index))}</div> : (
         <div className="message-content">{message.role === "notice" ? <p>{message.text}</p> : renderMarkdown(message.text)}</div>
       )}
     </div>
   );
 });
 
+function renderTranscriptBlock(block: TranscriptBlock, index: number): React.ReactNode {
+  if (block.type === "toolCall") return <details key={index}><summary>{`[Tool call: ${block.name}${block.intent ? ` — ${block.intent}` : ""}]`}</summary><pre style={{ overflowX: "auto" }}><code>{JSON.stringify(block.arguments, null, 2)}</code></pre></details>;
+  if (block.type === "image") return block.dataUrl ? <img key={index} src={block.dataUrl} alt="Attachment" style={{ maxWidth: "100%" }} /> : <p key={index}>{block.label}</p>;
+  if (block.type === "notice") return <p key={index}>{block.text}</p>;
+  return <React.Fragment key={index}>{renderMarkdown(block.text)}</React.Fragment>;
+}
+
 export type ConnectionStatus = "connecting" | "idle" | "running" | "reconnecting" | "disconnected" | "unknown";
+
+/**
+ * Render a handoff refusal in the user's terms.
+ *
+ * `terminal_attached` is the one refusal the user can act on locally, and the
+ * reason matters: the keystrokes would land in their terminal's draft, not in
+ * the agent's input. The other codes already carry a precise server message
+ * (which process could not be verified), so they are shown verbatim rather than
+ * replaced with a guess.
+ */
+export function handoffRefusalText(code: string, message: string): string {
+  if (code === "terminal_attached") return "A terminal is attached to this session. Run /handoff there instead.";
+  if (code === "handoff_in_flight") return message || "A handoff is already in progress for this conversation.";
+  return message;
+}
+
 
 export function ConversationView({ conversationId, draft = "", onDraftChange, onBack, refusedRecoveries: refusedRecoveriesProp, onRefusedRecoveriesChange }: ConversationViewProps) {
 
@@ -152,6 +179,15 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
   const [attachInfo, setAttachInfo] = useState<AttachInstructions | null>(null);
   const [linkUnavailable, setLinkUnavailable] = useState(false);
   const [interceptedCommand, setInterceptedCommand] = useState<SlashCommand | null>(null);
+  const [handoffBusy, setHandoffBusy] = useState(false);
+  const [handoffNotice, setHandoffNotice] = useState<string | null>(null);
+  const [handoffRefusal, setHandoffRefusal] = useState<string | null>(null);
+  const [handoffConfirming, setHandoffConfirming] = useState(false);
+  const [stopSessionConfirming, setStopSessionConfirming] = useState(false);
+  const [stopSessionBusy, setStopSessionBusy] = useState(false);
+  const [stopSessionNotice, setStopSessionNotice] = useState<string | null>(null);
+  const [stopSessionRefusal, setStopSessionRefusal] = useState<string | null>(null);
+  const [restartBusy, setRestartBusy] = useState(false);
   const [modelCatalogState, setModelCatalogState] = useState<{ status: "loading" } | { status: "loaded"; models: string[] } | { status: "empty" } | { status: "unavailable"; reason: string } | { status: "error"; message: string }>({ status: "loading" });
   const [modelDraft, setModelDraft] = useState("");
   const [modelMessage, setModelMessage] = useState("");
@@ -266,6 +302,16 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
   const pendingPromptRef = useRef<PendingPrompt[]>([]);
   const localIdRef = useRef(0);
   const sendGuardRef = useRef<{ id: number; text: string } | null>(null);
+  /**
+   * Handoff double-submit guard. `handoffBusy` state lags a tick behind the click,
+   * so two clicks in the same tick would both issue a request; this ref is set
+   * synchronously before the await.
+   */
+  const handoffInFlightRef = useRef(false);
+  /** Same synchronous double-submit guard for "Stop OMP session". */
+  const stopSessionInFlightRef = useRef(false);
+  /** And for the restart offered beside a stopped session. */
+  const restartInFlightRef = useRef(false);
   const sendVersionRef = useRef(0);
   const sendIdRef = useRef(0);
   const operationGenerationRef = useRef(0);
@@ -370,6 +416,21 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
   useLayoutEffect(() => {
     viewActiveRef.current = true;
     operationGenerationRef.current++;
+    // Handoff state belongs to one conversation: a notice or refusal from the
+    // previous session must not appear beside a different transcript, and an
+    // in-flight request must not block the new session's control.
+    handoffInFlightRef.current = false;
+    stopSessionInFlightRef.current = false;
+    restartInFlightRef.current = false;
+    setHandoffBusy(false);
+    setHandoffNotice(null);
+    setHandoffRefusal(null);
+    setHandoffConfirming(false);
+    setStopSessionBusy(false);
+    setStopSessionNotice(null);
+    setStopSessionRefusal(null);
+    setStopSessionConfirming(false);
+    setRestartBusy(false);
     return () => {
       viewActiveRef.current = false;
       operationGenerationRef.current++;
@@ -1072,11 +1133,151 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     }
   };
 
+  /**
+   * A conversation that is not this app's managed pane has nothing to hand off, so
+   * the control is rendered disabled (never hidden) with `handoffReason` beside it:
+   * the user learns why, instead of finding a missing action.
+   */
+  const handoffOffered = conversation !== null && conversation.id === conversationId;
   const openCommandAction = (): void => {
     setInterceptedCommand(null);
     if (modelControlsRef.current) modelControlsRef.current.open = true;
     modelInputRef.current?.focus();
     modelInputRef.current?.scrollIntoView?.({ block: "nearest" });
+  };
+
+  /**
+   * Why `/handoff` cannot be offered right now, or `null` when it can.
+   *
+   * The server refuses on its own preconditions (ownership, verified pane,
+   * idleness); these are the ones the client already knows, so the affordance is
+   * disabled with the reason instead of being offered and then failing.
+   */
+  const handoffReason = conversation === null || conversation.id !== conversationId
+    ? "Conversation details are still loading."
+    : conversation.ownership !== "managed"
+      ? "Handoff requires a session this app manages."
+      : linkUnavailable
+        ? "No live host is sharing this conversation."
+        : transcript.readOnly || linkAccess === "view"
+          ? "Handoff needs a writable link; this connection is view-only."
+          : !canWriteToHost
+            ? "Waiting for write access to the live session."
+            : null;
+
+  /**
+   * What a "Stop OMP session" would interrupt right now, or `null` when nothing is
+   * in flight. The list is the confirmation's substance — the user must be told
+   * exactly which work is being cut short, not merely asked "are you sure?".
+   */
+  const interruptedWork = [
+    status === "running" ? "the turn that is generating now" : null,
+    activeUiRequest !== undefined && activeUiRequest !== null ? "an approval request waiting on you" : null,
+    agents.filter((agent) => agent.kind === "sub" && agent.status === "running").length > 0
+      ? `running subagents (${agents.filter((agent) => agent.kind === "sub" && agent.status === "running").length})`
+      : null,
+  ].filter((entry): entry is string => entry !== null);
+
+  /**
+   * Why "Stop OMP session" cannot be offered, or `null` when it can.
+   *
+   * An external session is never stoppable: it is not this app's process to end,
+   * so the action is disabled rather than offered and refused (the server refuses
+   * too, but the UI must not pretend the choice exists).
+   */
+  const stopSessionReason = conversation === null || conversation.id !== conversationId
+    ? "Conversation details are still loading."
+    : conversation.ownership !== "managed"
+      ? "This session is externally managed, so this app cannot stop it; stop it in its own terminal."
+      : !conversation.tmuxSessionId || !conversation.tmuxServerIdentity
+        ? "No verified managed tmux session is recorded for this conversation."
+        : conversation.state === "stopping"
+          ? "A stop is already in progress for this conversation."
+          : conversation.state === "stopped"
+            ? "This session's process is already stopped; restart it to bring it back."
+            : null;
+
+  /**
+   * An externally managed session is not this app's process to end, so the control
+   * is not offered at all: the server would refuse, and offering a dead choice is
+   * worse than naming the absence.
+   */
+  const stopSessionOffered = conversation !== null && conversation.id === conversationId && conversation.ownership === "managed";
+  const runStopSession = async (): Promise<void> => {
+    if (stopSessionInFlightRef.current || stopSessionReason !== null) return;
+    stopSessionInFlightRef.current = true;
+    const operationGeneration = operationGenerationRef.current;
+    const conversationAtStop = conversationIdRef.current;
+    setStopSessionBusy(true);
+    setStopSessionNotice(null);
+    setStopSessionRefusal(null);
+    const result = await api.stopConversation(conversationAtStop).finally(() => { stopSessionInFlightRef.current = false; });
+    if (!viewActiveRef.current || operationGenerationRef.current !== operationGeneration || conversationIdRef.current !== conversationAtStop) return;
+    setStopSessionBusy(false);
+    if (result.ok) {
+      metadataGenerationRef.current += 1;
+      setConversation(result.data);
+      setStopSessionConfirming(false);
+      // The supervisor reports `stopping` while it waits for the process to exit;
+      // claiming "stopped" there would be a promise the machine has not made yet.
+      setStopSessionNotice(result.data.state === "stopping"
+        ? "Stop requested. The process has not exited yet; history and the native session are preserved."
+        : "Session stopped. History and the native session are preserved.");
+      return;
+    }
+    // The server distinguishes an ownership refusal from a plain failure; both
+    // carry a precise message, so it is shown as-is rather than summarized.
+    setStopSessionRefusal(result.error.code === "agent_not_running"
+      ? `Not safe to stop: ${result.error.message}`
+      : result.error.message);
+  };
+
+  /**
+   * Bring the stopped session back. Deliberately the same call the project's
+   * session list makes, so the guards (ownership, verified identity, recorded
+   * journal) are the server's, not a second set invented here.
+   */
+  const runRestartAfterStop = async (): Promise<void> => {
+    if (restartInFlightRef.current) return;
+    restartInFlightRef.current = true;
+    const operationGeneration = operationGenerationRef.current;
+    const conversationAtRestart = conversationIdRef.current;
+    setRestartBusy(true);
+    const result = await api.restartConversation(conversationAtRestart).finally(() => { restartInFlightRef.current = false; });
+    if (!viewActiveRef.current || operationGenerationRef.current !== operationGeneration || conversationIdRef.current !== conversationAtRestart) return;
+    setRestartBusy(false);
+    if (result.ok) {
+      metadataGenerationRef.current += 1;
+      setConversation(result.data);
+      setStopSessionNotice("Session restarted with its recorded history.");
+      return;
+    }
+    setStopSessionRefusal(result.error.code === "conflict_owner"
+      ? `Could not restart: ${result.error.message}`
+      : result.error.message);
+  };
+
+  const runHandoff = async (): Promise<void> => {
+    // One request at a time, and never from a state the server would refuse. The
+    // ref is the real guard: two clicks in the same tick both see `handoffBusy`
+    // false, because the state update has not been committed yet.
+    if (handoffInFlightRef.current || handoffReason !== null) return;
+    handoffInFlightRef.current = true;
+    const operationGeneration = operationGenerationRef.current;
+    const conversationAtHandoff = conversationIdRef.current;
+    setHandoffBusy(true);
+    setHandoffNotice(null);
+    setHandoffRefusal(null);
+    // The unsent draft is deliberately untouched by this action: it is not a send.
+    const result = await api.requestHandoff(conversationAtHandoff).finally(() => { handoffInFlightRef.current = false; });
+    if (!viewActiveRef.current || operationGenerationRef.current !== operationGeneration || conversationIdRef.current !== conversationAtHandoff) return;
+    setHandoffBusy(false);
+    if (result.ok) {
+      setInterceptedCommand(null);
+      setHandoffNotice("Handoff committed — context compacted in place; session unchanged.");
+      return;
+    }
+    setHandoffRefusal(handoffRefusalText(result.error.code, result.error.message));
   };
 
   const handleUiResponse = (value: string | undefined, reqId?: number): void => {
@@ -1322,13 +1523,129 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
             </button>
           )}
           {status === "running" && canManageConversation && canWriteToHost && !transcript.readOnly && (
-            <button type="button" className="danger" aria-label="Stop" title="Stop" onClick={handleStop} style={{ padding: "4px 10px", fontSize: "0.85rem" }}>
+            <button
+              type="button"
+              className="danger"
+              aria-label="Stop generating"
+              title="Stop generating — ends the current turn; the OMP process stays alive"
+              onClick={handleStop}
+              style={{ padding: "4px 10px", fontSize: "0.85rem" }}
+            >
               <span className="header-action-icon" aria-hidden="true">■</span>
-              <span className="header-action-label">Stop</span>
+              <span className="header-action-label">Stop generating</span>
+            </button>
+          )}
+          {/* Handoff is offered only where it can actually run. A conversation this
+              app does not own gets the control disabled with the reason printed
+              below, never an enabled action that fails. */}
+          {handoffOffered && (
+            <button
+              type="button"
+              className="ghost"
+              style={{ fontSize: "0.85rem" }}
+              aria-label="Handoff context"
+              title={handoffReason ?? "Compact this session's context in place"}
+              disabled={handoffBusy || handoffReason !== null}
+              onClick={() => setHandoffConfirming((value) => !value)}
+            >
+              <span className="header-action-icon" aria-hidden="true">⇄</span>
+              <span className="header-action-label">{handoffBusy ? "Generating handoff…" : "Handoff context"}</span>
+            </button>
+          )}
+          {/* Two different things, deliberately distinguishable. `Stop generating`
+              aborts the current turn and leaves the process alive; this one ends
+              the app-managed OMP process and releases its agent slot. Neither
+              touches the native journal, and neither is offered where it cannot
+              work. */}
+          {stopSessionOffered && (
+            <button
+              type="button"
+              className="ghost"
+              style={{ fontSize: "0.85rem" }}
+              aria-label="Stop OMP session"
+              title={stopSessionReason ?? "Terminate the app-managed OMP process; history and the native session are preserved"}
+              disabled={stopSessionBusy || stopSessionReason !== null}
+              onClick={() => setStopSessionConfirming((value) => !value)}
+            >
+              <span className="header-action-icon" aria-hidden="true">⏹</span>
+              <span className="header-action-label">{stopSessionBusy ? "Stopping session…" : "Stop OMP session"}</span>
             </button>
           )}
         </div>
       </div>
+      {conversation !== null && handoffReason && !handoffConfirming && <p className="handoff-reason">Handoff unavailable: {handoffReason}</p>}
+      {/* The reason is printed even when the control is not rendered (an external
+          session): a missing action with no explanation reads as a bug. */}
+      {conversation !== null && stopSessionReason && !stopSessionConfirming && <p className="handoff-reason">Stop session unavailable: {stopSessionReason}</p>}
+      {stopSessionConfirming && (
+        <div className="card handoff-confirm" role="group" aria-label="Stop OMP session">
+          <strong>Stop OMP session</strong>
+          <p>
+            Terminates the OMP process this app manages and releases its agent slot. The native
+            session journal and this tracked conversation are preserved; nothing is deleted.
+          </p>
+          {interruptedWork.length > 0 ? (
+            <p className="handoff-refusal">
+              This will interrupt {interruptedWork.join(", ")}. The transcript so far stays on screen.
+            </p>
+          ) : (
+            <p>No turn is in flight, so nothing is being interrupted.</p>
+          )}
+          {stopSessionReason && <p>{stopSessionReason}</p>}
+          <div className="history-actions">
+            <button
+              type="button"
+              className="danger"
+              disabled={stopSessionBusy || stopSessionReason !== null}
+              onClick={() => void runStopSession()}
+            >
+              {stopSessionBusy ? "Stopping session…" : interruptedWork.length > 0 ? "Stop session anyway" : "Confirm stop session"}
+            </button>
+            <button type="button" className="ghost" onClick={() => setStopSessionConfirming(false)}>Cancel</button>
+          </div>
+          {stopSessionNotice && <p role="status">{stopSessionNotice}</p>}
+          {stopSessionRefusal && <p className="handoff-refusal" role="alert">{stopSessionRefusal}</p>}
+        </div>
+      )}
+      {!stopSessionConfirming && stopSessionNotice && (
+        <div className="banner running" role="status">
+          <span>{stopSessionNotice}</span>
+          {/* A stopped session is resumable: the same restart action the project's
+              session list offers, so the user does not have to leave to get it back. */}
+          {conversation?.state === "stopped" && (
+            <button
+              type="button"
+              className="ghost"
+              disabled={restartBusy}
+              onClick={() => void runRestartAfterStop()}
+              style={{ minHeight: "44px" }}
+            >
+              {restartBusy ? "Restarting…" : "Restart"}
+            </button>
+          )}
+        </div>
+      )}
+      {!stopSessionConfirming && stopSessionRefusal && <div className="banner error" role="alert">{stopSessionRefusal}</div>}
+      {handoffConfirming && (
+        <div className="card handoff-confirm" role="group" aria-label="Handoff context">
+          <strong>Handoff context</strong>
+          <p>
+            Runs OMP's native <code>/handoff</code> on this session. It compacts the context in
+            place, keeps the same session id, does not start a new agent, and keeps the history.
+          </p>
+          {handoffReason && <p>{handoffReason}</p>}
+          <div className="history-actions">
+            <button type="button" className="primary" disabled={handoffBusy || handoffReason !== null} onClick={() => void runHandoff()}>
+              {handoffBusy ? "Generating handoff…" : "Run handoff"}
+            </button>
+            <button type="button" className="ghost" onClick={() => setHandoffConfirming(false)}>Cancel</button>
+          </div>
+          {handoffNotice && <p role="status">{handoffNotice}</p>}
+          {handoffRefusal && <p className="handoff-refusal" role="alert">{handoffRefusal}</p>}
+        </div>
+      )}
+      {!handoffConfirming && handoffNotice && <div className="banner running" role="status">{handoffNotice}</div>}
+      {!handoffConfirming && handoffRefusal && <div className="banner error" role="alert">{handoffRefusal}</div>}
       <details className="model-controls-disclosure" ref={modelControlsRef}>
         <summary>Conversation model settings</summary>
         <section className="model-controls" aria-label="Conversation model">
@@ -1449,7 +1766,7 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
             {olderHistoryError && <p role="alert">{olderHistoryError}</p>}
             {!savedHistory.hasOlder && !savedHistory.skippedOversized && <p role="status">Beginning of history.</p>}
             {savedHistory.messages.map((message) => (
-              <MessageRow key={message.id} message={{ id: message.id, role: message.role, text: message.text, ...(message.toolName ? { toolName: message.toolName } : {}), ...(message.isError ? { isError: true } : {}) }} />
+              <MessageRow key={message.id} message={{ id: message.id, role: message.role, text: message.text, ...(message.blocks ? { blocks: message.blocks } : {}), ...(message.toolName ? { toolName: message.toolName } : {}), ...(message.isError ? { isError: true } : {}) }} />
             ))}
             {savedModeOptimistic.map((message) => <MessageRow key={message.id} message={message} />)}
           </>
@@ -1463,15 +1780,16 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
               {historyVerdict === "live" ? "Writer status could not be verified — this session may be live. Open the live view to read it." : historyLoading ? "Checking for a saved transcript…" : historyError ?? "Host presence is not yet verified. No saved transcript is available; retry to check for a live host."}
             </p>
             {(historyVerdict === "live" || !historyLoading) && <button type="button" className="primary" onClick={() => void retryUnavailableConversation()}>{historyVerdict === "live" ? "Open live view" : "Retry"}</button>}
-            {attachInfo?.command ? (
+            {attachInfo?.available && attachInfo.command ? (
               <div>
                 <span style={{ fontSize: "0.8rem", color: "var(--text-muted)" }}>How to attach in terminal:</span>
                 <pre><code>{attachInfo.command}</code></pre>
               </div>
             ) : (
-              <p style={{ fontSize: "0.85rem", color: "var(--text-muted)" }}>
-                Run <code>omp session list</code> on host machine to view active sessions.
-              </p>
+              <>
+                <p style={{ fontSize: "0.85rem", color: "var(--text-muted)" }}>{attachInfo?.reason ?? "Attach command unavailable: process identity could not be verified."}</p>
+                <p style={{ fontSize: "0.85rem", color: "var(--text-muted)" }}>Run <code>omp session list</code> on the host machine to find the managed session, then <code>tmux attach -t &lt;name&gt;</code>.</p>
+              </>
             )}
           </div>
         ) : null}
@@ -1593,10 +1911,24 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
           <strong>{interceptedCommand.name}</strong>
           <p>{interceptedCommand.explanation}</p>
           {interceptedCommand.availability === "terminal_only" && <p>Terminal only — not sent to the live session.</p>}
-          {interceptedCommand.availability === "app_action" && (
+          {interceptedCommand.availability === "app_action" && interceptedCommand.action === "model" && (
             <button type="button" onClick={openCommandAction}>Open model controls</button>
           )}
-          <button type="button" className="primary" disabled={transcript.readOnly} onClick={sendSlashAsText}>Send as plain text anyway</button>
+          {interceptedCommand.availability === "app_action" && interceptedCommand.action === "handoff" && (
+            <>
+              <p>It runs OMP's native /handoff on this session, compacts the context in place, keeps the same session id, and does not start a new agent.</p>
+              <button type="button" className="primary" onClick={() => void runHandoff()} disabled={handoffBusy || handoffReason !== null}>
+                {handoffBusy ? "Generating handoff…" : "Run handoff"}
+              </button>
+              {handoffReason && <p>{handoffReason}</p>}
+            </>
+          )}
+          {/* `/handoff` is delivered as keystrokes into the managed pane by the
+              server. Sending it as a Collab prompt would be a second delivery path
+              with different semantics, so the escape hatch is not offered here. */}
+          {interceptedCommand.action !== "handoff" && (
+            <button type="button" className="primary" disabled={transcript.readOnly} onClick={sendSlashAsText}>Send as plain text anyway</button>
+          )}
           <button type="button" className="ghost" onClick={() => setInterceptedCommand(null)}>Cancel</button>
         </div>
       )}

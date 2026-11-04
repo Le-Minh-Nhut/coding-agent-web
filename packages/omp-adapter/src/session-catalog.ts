@@ -27,6 +27,8 @@ interface DetailedSessionScan {
   sessions: Array<Omit<NativeSessionSummary, "hasCollabHost"> & { startedAt: string | null }>;
   filesScanned: number;
   filesSkippedNonJournal: number;
+  /** Journals a scan could not read (not ENOENT). Non-zero means the page is incomplete. */
+  filesUnreadable: number;
   truncated: boolean;
 }
 
@@ -162,7 +164,7 @@ export class DefaultNativeSessionCatalog implements NativeSessionCatalog {
       if (lines.length === 0) return null;
 
       let title: string | null = null;
-      let updatedAt: string | null = null;
+      let slotUpdatedAt: string | null = null;
       let headerLineIndex = 0;
 
       const firstLine = lines[0]?.trim();
@@ -171,7 +173,7 @@ export class DefaultNativeSessionCatalog implements NativeSessionCatalog {
           const slot = JSON.parse(firstLine) as Record<string, unknown>;
           if (slot.type === "title" && slot.v === 1) {
             title = typeof slot.title === "string" && slot.title ? slot.title : null;
-            updatedAt = typeof slot.updatedAt === "string" ? slot.updatedAt : null;
+            slotUpdatedAt = typeof slot.updatedAt === "string" ? slot.updatedAt : null;
             headerLineIndex = 1;
           }
         } catch {
@@ -202,11 +204,23 @@ export class DefaultNativeSessionCatalog implements NativeSessionCatalog {
       const cwd = typeof headerObj.cwd === "string" ? headerObj.cwd : "";
       const timestamp = typeof headerObj.timestamp === "string" ? headerObj.timestamp : null;
       const version = typeof headerObj.version === "number" ? headerObj.version : null;
-      if (!title && typeof headerObj.title === "string") {
-        title = headerObj.title;
+      if (!title && typeof headerObj.title === "string") title = headerObj.title;
+      if (!title) {
+        for (const line of lines.slice(headerLineIndex + 1)) {
+          try {
+            const entry = JSON.parse(line) as Record<string, unknown>;
+            if (entry.type !== "message" || entry.role !== "user") continue;
+            const content = entry.content;
+            const text = typeof content === "string" ? content : Array.isArray(content)
+              ? content.filter((part): part is { type: "text"; text: string } => Boolean(part && typeof part === "object" && (part as Record<string, unknown>).type === "text" && typeof (part as Record<string, unknown>).text === "string")).map((part) => part.text).join("")
+              : "";
+            const prompt = text.replace(/[\r\n]+/gu, " ").trim().slice(0, 120);
+            if (prompt) { title = prompt; break; }
+          } catch { /* A malformed journal entry is not a title. */ }
+        }
       }
 
-      return {
+      const result = {
         header: {
           sessionId,
           cwd,
@@ -214,8 +228,12 @@ export class DefaultNativeSessionCatalog implements NativeSessionCatalog {
           version,
           title,
         },
-        updatedAt: updatedAt ?? timestamp,
+        // OMP uses file mtime for recency; its title-slot timestamp may lag while a journal is active.
+        updatedAt: slotUpdatedAt,
       };
+
+      return result;
+
     } finally {
       if (handle) {
         await handle.close().catch(() => {});
@@ -223,115 +241,85 @@ export class DefaultNativeSessionCatalog implements NativeSessionCatalog {
     }
   }
 
-  /** Last-updated is optional metadata; only ENOENT means its fallback is unavailable, other probe failures propagate. */
+  /** mtime matches OMP's picker; the slot timestamp only covers filesystems without usable mtime. */
   async #summaryFor(sessionPath: string, parsed: ParsedHeaderAndMeta): Promise<Omit<NativeSessionSummary, "hasCollabHost">> {
-    let updatedAt = parsed.updatedAt;
-    if (!updatedAt) {
-      try {
-        updatedAt = (await this.#stat(sessionPath)).mtime.toISOString();
-      } catch (err) {
-        if (!isMissingDirectory(err)) throw err;
-        // The journal bytes were already read; missing freshness metadata cannot change the existence result.
-        updatedAt = null;
-      }
-    }
+    let updatedAt: string | null = null;
+    let cwdAvailable = true;
+    try { updatedAt = (await this.#stat(sessionPath)).mtime.toISOString(); }
+    catch (err) { if (!isMissingDirectory(err)) throw err; updatedAt = parsed.updatedAt; }
+    try { await stat(parsed.header.cwd); }
+    catch (err) { if ((err as NodeJS.ErrnoException).code === "ENOENT") cwdAvailable = false; else throw err; }
     return {
       sessionId: parsed.header.sessionId,
       path: sessionPath,
       cwd: parsed.header.cwd,
       title: parsed.header.title,
       updatedAt,
+      cwdAvailable,
+      conversationId: null,
       live: await this.#leaseProbe.isLive(parsed.header.sessionId),
       tracked: this.#isTracked(parsed.header.sessionId),
     };
   }
 
   async listForCwd(cwd: string): Promise<Array<Omit<NativeSessionSummary, "hasCollabHost">>> {
-    const bucket = encodeSessionDirName(cwd);
-    const bucketDir = path.join(this.#sessionsRoot, bucket);
-
+    const bucketDir = path.join(this.#sessionsRoot, encodeSessionDirName(cwd));
     let entries: string[];
-    try {
-      entries = await readdir(bucketDir);
-    } catch (err) {
-      // No bucket means this directory has never hosted a session: an empty list
-      // is a confirmed answer. Anything else is an unreadable store, and callers
-      // must be able to tell that apart from "no sessions".
-      if (isMissingDirectory(err)) return [];
-      throw err;
-    }
-
-    const jsonlFiles = entries
-      .filter((name) => name.endsWith(".jsonl"))
-      .sort((a, b) => b.localeCompare(a)); // ISO timestamps prefix sorts newest first
-
-    // The bucket name is a lossy encoding of the cwd (separators become `-`), so
-    // two directories like `a-b` and `a/b` share one bucket. The bucket alone is
-    // therefore not proof of the cwd: each journal must carry a header whose cwd is
-    // the same canonical directory as the one asked for. Comparison is realpath
-    // equality on both sides, so a symlinked alias of the same directory still
-    // matches, while a sibling prefix never does.
+    try { entries = await readdir(bucketDir); }
+    catch (err) { if (isMissingDirectory(err)) entries = []; else throw err; }
     const canonicalCwd = resolveCanonical(cwd, realpathSync);
-
     const summaries: Array<Omit<NativeSessionSummary, "hasCollabHost">> = [];
-
-    for (const file of jsonlFiles) {
-      const fullPath = path.join(bucketDir, file);
-      const parsed = await this.#readHeaderAndMeta(fullPath);
-      if (!parsed) continue;
-      // The header cwd is resolved with the same realpath equality as the requested
-      // one. A resolution failure (EACCES/EIO) is a real read error, not proof that
-      // this journal is foreign, so it propagates: dropping the journal would hand
-      // the caller an empty or short list that is indistinguishable from "this
-      // project has no sessions", and callers use this list to decide whether a
-      // launch would fork history. ENOENT cannot arrive here — resolveCanonical
-      // already falls back to the lexical path for a not-yet-created directory.
-      const headerCwd = resolveCanonical(parsed.header.cwd, realpathSync);
-      if (headerCwd !== canonicalCwd) continue;
-      summaries.push(await this.#summaryFor(fullPath, parsed));
-    }
-
+    // A `.jsonl` *name* is not a journal: `encodeSessionDirName` can legally end a
+    // bucket directory's name in `.jsonl`, and `open(dir,"r")` succeeds on Linux
+    // before the read fails EISDIR. So every candidate is proved to be a regular
+    // file first, and a vanished entry is skipped rather than fatal.
+    const addMatching = async (base: string, files: string[]) => {
+      for (const file of files.filter((name) => name.endsWith(".jsonl"))) {
+        const fullPath = path.join(base, file);
+        try {
+          if (!(await this.#stat(fullPath)).isFile()) continue;
+        } catch (err) {
+          if (isMissingDirectory(err)) continue;
+          throw err;
+        }
+        const parsed = await this.#readHeaderAndMeta(fullPath);
+        if (!parsed) continue;
+        if (resolveCanonical(parsed.header.cwd, realpathSync) === canonicalCwd) summaries.push(await this.#summaryFor(fullPath, parsed));
+      }
+    };
+    await addMatching(bucketDir, entries);
+    let rootEntries: string[];
+    try { rootEntries = await readdir(this.#sessionsRoot); }
+    catch (err) { if (isMissingDirectory(err)) return summaries; throw err; }
+    await addMatching(this.#sessionsRoot, rootEntries);
+    // Newest first, matching the global listing and what `types.ts` documents.
+    summaries.sort((a, b) => (b.updatedAt ?? "").localeCompare(a.updatedAt ?? "") || a.sessionId.localeCompare(b.sessionId));
     return summaries;
   }
 
   async listAll(limit?: number): Promise<Array<Omit<NativeSessionSummary, "hasCollabHost">>> {
-    let bucketDirs: string[];
-    try {
-      bucketDirs = await readdir(this.#sessionsRoot);
-    } catch (err) {
-      // No store at all means no sessions have ever been recorded.
-      if (isMissingDirectory(err)) return [];
-      throw err;
-    }
-
-    const allFiles: Array<{ bucketDir: string; file: string }> = [];
-
-    for (const b of bucketDirs) {
-      const fullBucketDir = path.join(this.#sessionsRoot, b);
-      try {
-        const files = await readdir(fullBucketDir);
-        for (const file of files) {
-          if (file.endsWith(".jsonl")) {
-            allFiles.push({ bucketDir: fullBucketDir, file });
-          }
-        }
-      } catch (err) {
-        if (isMissingDirectory(err)) continue;
-        throw err;
+    let names: string[];
+    try { names = await readdir(this.#sessionsRoot); }
+    catch (err) { if (isMissingDirectory(err)) return []; throw err; }
+    const allFiles: string[] = [];
+    for (const name of names) {
+      const fullPath = path.join(this.#sessionsRoot, name);
+      if (name.endsWith(".jsonl")) {
+        // A directory can legally carry a `.jsonl` name; only regular files are journals.
+        try { if (!(await this.#stat(fullPath)).isFile()) continue; } catch (err) { if (!isMissingDirectory(err)) throw err; continue; }
+        allFiles.push(fullPath);
+        continue;
       }
+      try {
+        if ((await this.#stat(fullPath)).isDirectory()) for (const file of await readdir(fullPath)) if (file.endsWith(".jsonl")) allFiles.push(path.join(fullPath, file));
+      } catch (err) { if (!isMissingDirectory(err)) throw err; }
     }
-
-    allFiles.sort((a, b) => b.file.localeCompare(a.file));
-    const targetFiles = limit !== undefined && limit >= 0 ? allFiles.slice(0, limit) : allFiles;
-
+    allFiles.sort((a, b) => b.localeCompare(a));
     const summaries: Array<Omit<NativeSessionSummary, "hasCollabHost">> = [];
-    for (const { bucketDir, file } of targetFiles) {
-      const fullPath = path.join(bucketDir, file);
+    for (const fullPath of limit !== undefined && limit >= 0 ? allFiles.slice(0, limit) : allFiles) {
       const parsed = await this.#readHeaderAndMeta(fullPath);
-      if (!parsed) continue;
-      summaries.push(await this.#summaryFor(fullPath, parsed));
+      if (parsed) summaries.push(await this.#summaryFor(fullPath, parsed));
     }
-
     return summaries;
   }
   async listAllDetailed(options: { limit?: number; cacheTtlMs?: number } = {}): Promise<DetailedSessionScan> {
@@ -340,30 +328,40 @@ export class DefaultNativeSessionCatalog implements NativeSessionCatalog {
     let names: string[];
     try { names = await readdir(this.#sessionsRoot); }
     catch (error) {
-      if (isMissingDirectory(error)) return { sessions: [], filesScanned: 0, filesSkippedNonJournal: 0, truncated: false };
+      if (isMissingDirectory(error)) return { sessions: [], filesScanned: 0, filesSkippedNonJournal: 0, filesUnreadable: 0, truncated: false };
       throw error;
     }
-    const buckets: Array<{ dir: string; mtime: number }> = [];
     const files: string[] = [];
+    // Bucket names are collected here and reused for the cache signature: reading
+    // the directory twice would let a bucket deleted in between throw ENOENT out
+    // of a listing that had already succeeded in enumerating it.
+    const buckets: Array<{ dir: string; journals: string[] }> = [];
     for (const name of names) {
       const filePath = path.join(this.#sessionsRoot, name);
-      if (name.endsWith(".jsonl")) { files.push(filePath); continue; }
+      if (name.endsWith(".jsonl")) {
+        // A directory can legally be named `*.jsonl`; a directory is not a journal.
+        try { if (!(await this.#stat(filePath)).isFile()) continue; } catch (error) { if (!isMissingDirectory(error)) throw error; continue; }
+        files.push(filePath);
+        continue;
+      }
       try {
-        const info = await this.#stat(filePath);
-        if (info.isDirectory()) {
-          buckets.push({ dir: filePath, mtime: info.mtimeMs });
-          for (const file of await readdir(filePath)) if (file.endsWith(".jsonl")) files.push(path.join(filePath, file));
+        if ((await this.#stat(filePath)).isDirectory()) {
+          const journals = (await readdir(filePath)).filter((file) => file.endsWith(".jsonl")).sort();
+          buckets.push({ dir: filePath, journals });
+          for (const file of journals) files.push(path.join(filePath, file));
         }
       } catch (error) { if (!isMissingDirectory(error)) throw error; }
     }
-    const rootMtime = (await this.#stat(this.#sessionsRoot)).mtimeMs;
-    const signature = JSON.stringify([rootMtime, buckets.sort((a, b) => a.dir.localeCompare(b.dir))]);
+    // ponytail: process-local cache detects journal-name changes, not edits; TTL bounds content staleness, watcher only if observed stale.
+    const signature = JSON.stringify([names.sort(), buckets.sort((a, b) => a.dir.localeCompare(b.dir))]);
     if (!this.#disableGlobalCache && ttl > 0 && this.#globalCache?.signature === signature && Date.now() < this.#globalCache.expiresAt) return this.#globalCache.result;
+
     files.sort((a, b) => b.localeCompare(a));
     const target = files.slice(0, limit);
     const sessions: DetailedSessionScan["sessions"] = [];
     let filesScanned = 0;
     let filesSkippedNonJournal = 0;
+    let filesUnreadable = 0;
     let cursor = 0;
     const worker = async () => {
       while (true) {
@@ -374,45 +372,38 @@ export class DefaultNativeSessionCatalog implements NativeSessionCatalog {
           filesScanned++;
           if (!parsed) { filesSkippedNonJournal++; continue; }
           sessions.push({ ...(await this.#summaryFor(target[index]!, parsed)), startedAt: parsed.header.timestamp });
-        } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+        } catch (error) {
+          // A journal that vanished mid-scan is a confirmed non-event; anything
+          // else is a read we could not do. It is counted so the page can say it
+          // is incomplete instead of looking like a short-but-complete list.
+          if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+          filesUnreadable++;
+        }
       }
     };
     await Promise.all(Array.from({ length: Math.min(16, target.length) }, worker));
+    // Inserts newer than the cursor may shift mutable pages and skip rows; strict ordering never repeats a row.
     sessions.sort((a, b) => (b.updatedAt ?? "").localeCompare(a.updatedAt ?? "") || a.sessionId.localeCompare(b.sessionId));
-    const result = { sessions, filesScanned, filesSkippedNonJournal, truncated: files.length > target.length };
+    const result = { sessions, filesScanned, filesSkippedNonJournal, filesUnreadable, truncated: files.length > target.length };
     // ponytail: process-local TTL cache has no cross-process invalidation; use a filesystem watcher only if staleness is observed.
     if (!this.#disableGlobalCache && ttl > 0) this.#globalCache = { signature, expiresAt: Date.now() + ttl, result };
     return result;
   }
 
   async findBySessionId(sessionId: string): Promise<string | null> {
-    let bucketDirs: string[];
-    try {
-      bucketDirs = await readdir(this.#sessionsRoot);
-    } catch (err) {
-      if (isMissingDirectory(err)) return null;
-      throw err;
-    }
-
+    let entries: string[];
+    try { entries = await readdir(this.#sessionsRoot); }
+    catch (err) { if (isMissingDirectory(err)) return null; throw err; }
     const suffix = `_${sessionId}.jsonl`;
     const exact = `${sessionId}.jsonl`;
-
-    for (const b of bucketDirs) {
-      const fullBucketDir = path.join(this.#sessionsRoot, b);
+    for (const file of entries) if (file.endsWith(suffix) || file === exact) return path.join(this.#sessionsRoot, file);
+    for (const name of entries) {
+      const bucketDir = path.join(this.#sessionsRoot, name);
       let files: string[];
-      try {
-        files = await readdir(fullBucketDir);
-      } catch (err) {
-        if (isMissingDirectory(err)) continue;
-        throw err;
-      }
-      for (const file of files) {
-        if (file.endsWith(suffix) || file === exact) {
-          return path.join(fullBucketDir, file);
-        }
-      }
+      try { if (!(await this.#stat(bucketDir)).isDirectory()) continue; files = await readdir(bucketDir); }
+      catch (err) { if (isMissingDirectory(err)) continue; throw err; }
+      for (const file of files) if (file.endsWith(suffix) || file === exact) return path.join(bucketDir, file);
     }
-
     return null;
   }
   async readHistory(sessionId: string, expectedCwd: string, options: number | { before?: string } = {}): Promise<NativeSessionHistory> {

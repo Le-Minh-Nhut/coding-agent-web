@@ -1,6 +1,6 @@
 import { mkdir, rm } from "node:fs/promises";
 import { execFile, spawn } from "node:child_process";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { promisify } from "node:util";
@@ -37,6 +37,7 @@ describe("tmux", () => {
       } catch {
         // already stopped
       }
+      await rm(path.join(tmpdir(), `tmux-${process.getuid?.() ?? 0}`, socketName), { force: true }).catch(() => {});
     }
   });
 

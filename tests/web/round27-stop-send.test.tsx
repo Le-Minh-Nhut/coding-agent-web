@@ -77,7 +77,7 @@ describe("F10 stop delivery", () => {
   it("tells the user when the stop was not sent", async () => {
     await renderWithSend(async () => false);
     await act(async () => {
-      fireEvent.click(await screen.findByRole("button", { name: "Stop" }));
+      fireEvent.click(await screen.findByRole("button", { name: "Stop generating" }));
     });
     expect(stopFailure().length).toBe(1);
     expect(stopFailure()[0]!.textContent).toMatch(/agent may still be running/i);
@@ -88,7 +88,7 @@ describe("F10 stop delivery", () => {
       throw new Error("socket closed");
     });
     await act(async () => {
-      fireEvent.click(await screen.findByRole("button", { name: "Stop" }));
+      fireEvent.click(await screen.findByRole("button", { name: "Stop generating" }));
     });
     expect(stopFailure().length).toBe(1);
   });
@@ -96,7 +96,7 @@ describe("F10 stop delivery", () => {
   it("reports nothing when the stop was delivered", async () => {
     await renderWithSend(async () => true);
     await act(async () => {
-      fireEvent.click(await screen.findByRole("button", { name: "Stop" }));
+      fireEvent.click(await screen.findByRole("button", { name: "Stop generating" }));
     });
     expect(stopFailure().length).toBe(0);
   });

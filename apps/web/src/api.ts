@@ -12,6 +12,7 @@ import type {
   ConversationEventsResponse,
   DirectoryListing,
   GlobalSessionPage,
+  HandoffResponse,
   NativeSessionSummary,
   ProjectWithStats,
   RuntimeSnapshot,
@@ -197,6 +198,20 @@ export const api = {
     });
   },
 
+  /**
+   * Terminate the app-managed OMP process for this conversation.
+   *
+   * This is not the same thing as the Collab `abort` frame: abort ends the current
+   * turn and leaves the process alive, while this releases the agent slot. The
+   * native journal and the conversation record are preserved either way.
+   */
+  async stopConversation(id: string): Promise<ApiResult<Conversation>> {
+    return request<Conversation>(`/api/conversations/${encodeURIComponent(id)}/actions`, {
+      method: "POST",
+      body: JSON.stringify({ action: "stop" }),
+    });
+  },
+
   async getConversation(id: string): Promise<ApiResult<Conversation>> {
     return request<Conversation>(`/api/conversations/${encodeURIComponent(id)}`);
   },
@@ -230,6 +245,18 @@ export const api = {
 
   async getAttachInstructions(id: string): Promise<ApiResult<AttachInstructions>> {
     return request<AttachInstructions>(`/api/conversations/${encodeURIComponent(id)}/attach`);
+  },
+
+  /**
+   * Ask the server to deliver OMP's native `/handoff` builtin into this
+   * conversation's managed pane. The body is empty on purpose: the command
+   * takes no operand, and a focus argument is refused server-side.
+   */
+  async requestHandoff(id: string): Promise<ApiResult<HandoffResponse>> {
+    return request<HandoffResponse>(`/api/conversations/${encodeURIComponent(id)}/handoff`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
   },
 
   async getModels(): Promise<ApiResult<ModelCatalog>> {

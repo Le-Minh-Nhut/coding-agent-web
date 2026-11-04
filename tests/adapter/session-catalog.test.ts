@@ -1,4 +1,4 @@
-import { chmod, mkdir, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, rm, stat, symlink, utimes, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -117,6 +117,44 @@ describe("session-catalog", () => {
       expect(found).toBe(sessionFile);
     });
   });
+  it("keeps lossy bucket collisions scoped by canonical journal cwd", async () => {
+    const parent = path.join(testRoot, "cwd-collision");
+    const cwdA = path.join(parent, "a-b");
+    const cwdB = path.join(parent, "a", "b");
+    const sessionsRoot = path.join(testRoot, "cwd-collision-sessions");
+    const bucketDir = path.join(sessionsRoot, encodeSessionDirName(cwdA));
+    await mkdir(bucketDir, { recursive: true });
+    await mkdir(cwdA, { recursive: true });
+    await mkdir(cwdB, { recursive: true });
+    await writeFile(path.join(bucketDir, "a.jsonl"), `${JSON.stringify({ type: "session", id: "cwd-a", cwd: cwdA })}\n`);
+    await writeFile(path.join(bucketDir, "b.jsonl"), `${JSON.stringify({ type: "session", id: "cwd-b", cwd: cwdB })}\n`);
+    const catalog = new DefaultNativeSessionCatalog({ sessionsRoot, leaseProbe: { isLive: async () => false, liveSet: async () => new Map(), leaseName: (id) => id } });
+    expect((await catalog.listForCwd(cwdA)).map((row) => row.sessionId)).toEqual(["cwd-a"]);
+  });
+  it("lists root and bucket journals once, ignores deeper transcripts, and orders by journal mtime", async () => {
+    const sessionsRoot = path.join(testRoot, "depth-semantics-sessions");
+    const cwd = path.join(testRoot, "depth-semantics-cwd");
+    const bucket = path.join(sessionsRoot, encodeSessionDirName(cwd));
+    const transcripts = path.join(bucket, "subagents");
+    await mkdir(transcripts, { recursive: true });
+    const journal = (id: string) => `${JSON.stringify({ type: "title", v: 1, title: null, updatedAt: "2020-01-01T00:00:00.000Z" })}\n${JSON.stringify({ type: "session", id, cwd, timestamp: "2020-01-01T00:00:00.000Z" })}\n${JSON.stringify({ type: "message", role: "user", content: "first prompt\nsecond line" })}\n`;
+    const older = path.join(bucket, "2020-01-01_older.jsonl");
+    const loose = path.join(sessionsRoot, "2020-01-02_loose.jsonl");
+    await writeFile(older, journal("older"));
+    await writeFile(loose, journal("loose"));
+    await writeFile(path.join(transcripts, "2020-01-02_transcript.jsonl"), journal("transcript"));
+    await utimes(older, new Date("2020-01-01"), new Date("2020-01-01"));
+    await utimes(loose, new Date("2021-01-01"), new Date("2021-01-01"));
+    const catalog = new DefaultNativeSessionCatalog({ sessionsRoot, leaseProbe: { isLive: async () => false, liveSet: async () => new Map(), leaseName: (id) => id } });
+    const listed = await catalog.listAllDetailed();
+    expect(listed.sessions.map((row) => row.sessionId)).toEqual(["loose", "older"]);
+    expect(listed.sessions[0]?.title).toBe("first prompt second line");
+    expect(await catalog.findBySessionId("older")).toBe(older);
+    expect(await catalog.findBySessionId("loose")).toBe(loose);
+    expect(await catalog.findBySessionId("transcript")).toBeNull();
+    expect((await catalog.listAll()).map((row) => row.sessionId).sort()).toEqual(["loose", "older"]);
+    expect((await catalog.listForCwd(cwd)).map((row) => row.sessionId).sort()).toEqual(["loose", "older"]);
+  });
   it("globally scans bounded journals, counts bad files, and preserves deleted-cwd history checks", async () => {
     const sessionsRoot = path.join(testRoot, "global-detailed-sessions");
     const cwd = path.join(testRoot, "global-deleted-cwd");
@@ -183,6 +221,99 @@ describe("session-catalog", () => {
       const catalog = new DefaultNativeSessionCatalog({ sessionsRoot, stat: (async () => { throw permissionDenied; }) as never });
       await expect(catalog.listForCwd(project)).rejects.toMatchObject({ code: "EACCES" });
     });
+  });
+  describe("adversarial review regressions", () => {
+    const lease = { isLive: async () => false as const, liveSet: async () => new Map<string, boolean | "unknown">(), leaseName: (id: string) => id };
+    const journalFor = (id: string, cwd: string) => `${JSON.stringify({ type: "session", id, cwd, timestamp: "2026-01-01T00:00:00.000Z" })}\n`;
+
+    it("does not treat a directory named *.jsonl as a journal (F3)", async () => {
+      const sessionsRoot = path.join(testRoot, "f3-sessions");
+      const cwd = path.join(testRoot, "f3-cwd");
+      await mkdir(cwd, { recursive: true });
+      // `encodeSessionDirName` can legally end a bucket name in `.jsonl`; a bucket
+      // named that way used to be opened as a file and threw EISDIR out of listing.
+      const decoy = path.join(sessionsRoot, `${encodeSessionDirName(cwd)}.jsonl`);
+      await mkdir(decoy, { recursive: true });
+      await writeFile(path.join(decoy, "2026-01-01_inner.jsonl"), journalFor("inner", cwd));
+      await writeFile(path.join(sessionsRoot, "2026-01-02_loose.jsonl"), journalFor("loose", cwd));
+      const catalog = new DefaultNativeSessionCatalog({ sessionsRoot, leaseProbe: lease, disableGlobalCache: true });
+      await expect(catalog.listForCwd(cwd)).resolves.toMatchObject([{ sessionId: "loose" }]);
+      await expect(catalog.listAll()).resolves.toMatchObject([{ sessionId: "loose" }]);
+      expect((await catalog.listAllDetailed()).sessions.map((row) => row.sessionId)).toEqual(["loose"]);
+    });
+
+    it("counts an unreadable journal so the page cannot look complete (F4)", async () => {
+      const sessionsRoot = path.join(testRoot, "f4-sessions");
+      const cwd = path.join(testRoot, "f4-cwd");
+      const bucket = path.join(sessionsRoot, "bucket");
+      await mkdir(bucket, { recursive: true });
+      await writeFile(path.join(bucket, "2026-01-01_ok.jsonl"), journalFor("ok", cwd));
+      const secret = path.join(bucket, "2026-01-02_secret.jsonl");
+      await writeFile(secret, journalFor("secret", cwd));
+      await chmod(secret, 0o000);
+      try {
+        const scan = await new DefaultNativeSessionCatalog({ sessionsRoot, leaseProbe: lease, disableGlobalCache: true }).listAllDetailed();
+        expect(scan.sessions.map((row) => row.sessionId)).toEqual(["ok"]);
+        // The row is gone, but the page says so instead of claiming a complete store.
+        expect(scan.filesUnreadable).toBe(1);
+        expect(scan.truncated).toBe(false);
+      } finally {
+        await chmod(secret, 0o644);
+      }
+    });
+
+    it("orders listForCwd newest first, matching the global listing (F5)", async () => {
+      const sessionsRoot = path.join(testRoot, "f5-sessions");
+      const cwd = path.join(testRoot, "f5-cwd");
+      await mkdir(cwd, { recursive: true });
+      const bucket = path.join(sessionsRoot, encodeSessionDirName(cwd));
+      await mkdir(bucket, { recursive: true });
+      const older = path.join(bucket, "2026-01-01_older.jsonl");
+      const newer = path.join(bucket, "2026-01-02_newer.jsonl");
+      await writeFile(older, journalFor("older", cwd));
+      await writeFile(newer, journalFor("newer", cwd));
+      await utimes(older, new Date("2020-01-01"), new Date("2020-01-01"));
+      await utimes(newer, new Date("2021-01-01"), new Date("2021-01-01"));
+      const catalog = new DefaultNativeSessionCatalog({ sessionsRoot, leaseProbe: lease, disableGlobalCache: true });
+      expect((await catalog.listForCwd(cwd)).map((row) => row.sessionId)).toEqual(["newer", "older"]);
+      expect((await catalog.listAll()).map((row) => row.sessionId)).toEqual(["newer", "older"]);
+    });
+
+    it("does not re-read a bucket that vanished after enumeration (F6)", async () => {
+      const sessionsRoot = path.join(testRoot, "f6-sessions");
+      const cwd = path.join(testRoot, "f6-cwd");
+      await mkdir(cwd, { recursive: true });
+      // Two buckets, so whichever is enumerated first can be deleted by the stat
+      // of the other — deterministically, whatever order readdir returns.
+      const bucketA = path.join(sessionsRoot, "bucket-a");
+      const bucketB = path.join(sessionsRoot, "bucket-b");
+      await mkdir(bucketA, { recursive: true });
+      await mkdir(bucketB, { recursive: true });
+      await writeFile(path.join(bucketA, "2026-01-01_a.jsonl"), journalFor("a", cwd));
+      await writeFile(path.join(bucketB, "2026-01-02_b.jsonl"), journalFor("b", cwd));
+      const seen: string[] = [];
+      const catalog = new DefaultNativeSessionCatalog({
+        sessionsRoot,
+        leaseProbe: lease,
+        stat: (async (target: Parameters<typeof stat>[0], ...rest: never[]) => {
+          const info = await stat(target, ...rest);
+          const name = String(target);
+          if (name === bucketA || name === bucketB) {
+            // Every bucket enumerated strictly before this one has already had its
+            // journals collected; remove them, so a signature that re-reads the
+            // directory instead of reusing what it collected throws ENOENT.
+            for (const earlier of seen.splice(0)) await rm(earlier, { recursive: true, force: true });
+            seen.push(name);
+          }
+          return info;
+        }) as typeof stat,
+      });
+      // The page must survive: every bucket was already enumerated, so one that
+      // vanished afterwards must not turn a successful enumeration into a 500.
+      const scan = await catalog.listAllDetailed();
+      expect(Array.isArray(scan.sessions)).toBe(true);
+    });
+
   });
   describe("bounded native history", () => {
     const makeCatalog = (sessionsRoot: string) => new DefaultNativeSessionCatalog({

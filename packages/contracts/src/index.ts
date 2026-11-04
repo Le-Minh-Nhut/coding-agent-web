@@ -24,6 +24,8 @@ export const ERROR_CODES = [
   "link_unavailable",
   "stale_generation",
   "already_exists",
+  "terminal_attached",
+  "handoff_in_flight",
   "internal",
 ] as const;
 export type ErrorCode = (typeof ERROR_CODES)[number];
@@ -244,6 +246,10 @@ export interface NativeSessionSummary {
   cwd: string;
   title: string | null;
   updatedAt: string | null;
+  /** False when the original working directory is gone. */
+  cwdAvailable: boolean;
+  /** Conversation currently associated with this native session, if any. */
+  conversationId: string | null;
   /**
    * Whether a process currently holds the session's writer lease.
    *
@@ -270,8 +276,10 @@ export interface GlobalSessionSummary {
   cwdAvailable: boolean;
   /** True when `cwd` is a registered CAW project. */
   projectId: string | null;
+  /** Conversation currently associated with this native session, if any. */
+  conversationId: string | null;
   title: string | null;
-  /** Last activity: the title slot's `updatedAt`, else the header timestamp, else the journal mtime. */
+  /** Last activity from journal mtime; title-slot timestamp is fallback when mtime is unavailable. */
   updatedAt: string | null;
   /** The session's start time, from its header. */
   startedAt: string | null;
@@ -292,6 +300,12 @@ export interface GlobalSessionPage {
   excludedOutsideRoots: number;
   /** Journals skipped because the bytes are present but are not an OMP session journal. */
   skippedNonJournal: number;
+  /**
+   * Journals the scan could not read at all (not ENOENT). Anything above zero
+   * means this page is missing sessions it should have listed, so a client must
+   * not present it as the complete store.
+   */
+  unreadableJournals: number;
 }
 
 
@@ -356,6 +370,21 @@ export interface CollabLinkResponse {
   access: "full" | "view";
   instanceId: string;
   generation: number;
+}
+
+/**
+ * Outcome of asking the server to deliver OMP's builtin `/handoff`.
+ *
+ * Only the success shape: a refusal is a conflict, and travels as the standard
+ * failure envelope (`error.code`), so the client branches on one convention
+ * instead of two. The refusal vocabulary lives in `ERROR_CODES`
+ * (`terminal_attached`, `handoff_in_flight`, `capability_missing`,
+ * `conflict_owner`).
+ */
+export interface HandoffResponse {
+  delivered: true;
+  /** OMP pane id the keystrokes were sent to. */
+  paneId: string;
 }
 
 export interface ConversationEvent<T = unknown> {

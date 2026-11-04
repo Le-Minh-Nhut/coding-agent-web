@@ -182,6 +182,41 @@ function assertRelayScheme(protocol: string): void {
   }
 }
 
+/**
+ * Validate a room link and report the relay origin it actually points at.
+ *
+ * The registry is the only source of these links, so an unparsable one is a real
+ * fault and must still throw; the origin is used to decide whether this server
+ * is allowed to rewrite it at all.
+ */
+export function relayLinkOrigin(rawUrl: string): string {
+  let url: URL;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    throw new Error(`Cannot parse collab link: ${rawUrl}`);
+  }
+  if (url.hash && url.hash.length > 1) {
+    if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error(`Deep link must point at an http(s) page, got ${url.protocol}`);
+    if (url.search) throw new Error(`Collab link must not carry a query string: ${url.search}`);
+    const fragmentContent = url.hash.startsWith("#") ? url.hash.slice(1) : url.hash;
+    let innerUrl: URL;
+    try {
+      innerUrl = new URL(fragmentContent.includes("://") ? fragmentContent : `ws://${fragmentContent}`);
+    } catch {
+      throw new Error(`Cannot parse collab link fragment: ${fragmentContent}`);
+    }
+    assertRelayScheme(innerUrl.protocol);
+    assertRoomPath(innerUrl.pathname);
+    if (innerUrl.search) throw new Error(`Collab link must not carry a query string: ${innerUrl.search}`);
+    return innerUrl.origin;
+  }
+  assertRelayScheme(url.protocol);
+  assertRoomPath(url.pathname);
+  if (url.search) throw new Error(`Collab link must not carry a query string: ${url.search}`);
+  return url.origin;
+}
+
 export function rewriteCollabLink(rawUrl: string, publicOrigin: string): string {
   let url: URL;
   try {
@@ -274,11 +309,11 @@ export function createMintLink(
     list: () => Promise<Array<{ sessionId: string; instanceId: string | null; generation: number | null; relayConnected: boolean | null; access?: "control" | "view" | null }>>;
     link: (instanceId: string, access: "control" | "view") => Promise<{ instanceId?: string | null; generation?: number | null; access: "control" | "view"; url: string }>;
   },
-  publicOriginOrOptions?: string | { publicOrigin?: string },
+  publicOriginOrOptions?: string | { publicOrigin?: string; relayOrigin?: string },
 ) {
-  const publicOrigin = typeof publicOriginOrOptions === "string"
-    ? publicOriginOrOptions
-    : publicOriginOrOptions?.publicOrigin;
+  const publicOrigin = typeof publicOriginOrOptions === "string" ? publicOriginOrOptions : publicOriginOrOptions?.publicOrigin;
+  const relayOrigin = typeof publicOriginOrOptions === "string" ? undefined : publicOriginOrOptions?.relayOrigin;
+
   return async (conversation: Conversation, access: "control" | "view"): Promise<CollabLinkResponse> => {
     if (!conversation.nativeSessionId) {
       throw Object.assign(new Error("No native session for this conversation yet"), { code: "link_unavailable" });
@@ -317,7 +352,18 @@ export function createMintLink(
         },
       );
     }
-    const url = publicOrigin ? rewriteCollabLink(link.url, publicOrigin) : link.url;
+    // The origin is only needed to decide whether a rewrite is provable, so an
+    // unparsable link stays the registry's problem until we would rewrite it.
+    const url = publicOrigin ? (() => {
+      const linkOrigin = relayLinkOrigin(link.url);
+      // CAW's relay is loopback-bound, so a non-loopback origin is somebody else's
+      // room; rewriting it would point the phone at a relay that never heard of the
+      // room. With a configured endpoint, only that exact origin counts.
+      const ownedRelay = relayOrigin !== undefined
+        ? linkOrigin === new URL(relayOrigin).origin
+        : /^wss?:\/\/(127\.0\.0\.1|\[::1\]|localhost)(:\d+)?$/.test(linkOrigin);
+      return ownedRelay ? rewriteCollabLink(link.url, publicOrigin) : link.url;
+    })() : link.url;
     return {
       url,
       access: link.access === "view" ? "view" : "full",
@@ -472,7 +518,7 @@ const runtimeSpec = createRuntimeSpec({ store, paths, catalog });
  * generation with `stale_generation`, which surfaces to the client as "list
  * again" rather than a link to a successor room.
  */
-const mintLink = createMintLink(registry, config.publicOrigin);
+const mintLink = createMintLink(registry, { publicOrigin: config.publicOrigin, relayOrigin: `ws://127.0.0.1:${config.relayPort}` });
 
 /**
  * Native OMP sessions for a project directory, excluding the conversation that
@@ -483,34 +529,23 @@ const listNativeSessions = async (input: { projectPath: string }): Promise<Array
   const canonical = await paths.assertInsideRoots(input.projectPath, true);
   const sessions = await catalog.listForCwd(canonical);
   const projectIds = new Set((await store.listProjects()).map((project) => project.id));
-  const tracked = new Set(
-    (await store.listAllConversations())
-      .filter((conversation) => projectIds.has(conversation.projectId))
-      .map((conversation) => conversation.nativeSessionId)
-      .filter((id): id is string => Boolean(id)),
-  );
-  return sessions.map((session) => ({
-    sessionId: session.sessionId,
-    path: session.path,
-    cwd: session.cwd,
-    title: session.title,
-    updatedAt: session.updatedAt,
-    live: session.live,
-    tracked: tracked.has(session.sessionId),
-  }));
+  const conversations = (await store.listAllConversations()).filter((conversation) => projectIds.has(conversation.projectId));
+  const bySession = new Map(conversations.flatMap((conversation) => conversation.nativeSessionId ? [[conversation.nativeSessionId, conversation] as const] : []));
+  return sessions.map((session) => ({ ...session, tracked: bySession.has(session.sessionId), conversationId: bySession.get(session.sessionId)?.id ?? null }));
 };
 const listGlobalSessions = async () => {
   const scan = await catalog.listAllDetailed();
   const projectIds = new Set((await store.listProjects()).map((project) => project.id));
-  const tracked = new Set((await store.listAllConversations()).filter((conversation) => projectIds.has(conversation.projectId)).map((conversation) => conversation.nativeSessionId).filter((id): id is string => Boolean(id)));
-  return { ...scan, sessions: scan.sessions.map((session) => ({ ...session, tracked: tracked.has(session.sessionId) })) };
+  const conversations = (await store.listAllConversations()).filter((conversation) => projectIds.has(conversation.projectId));
+  const bySession = new Map(conversations.flatMap((conversation) => conversation.nativeSessionId ? [[conversation.nativeSessionId, conversation] as const] : []));
+  return { ...scan, sessions: scan.sessions.map((session) => ({ ...session, tracked: bySession.has(session.sessionId), conversationId: bySession.get(session.sessionId)?.id ?? null })) };
 };
 const readGlobalHistory = async (sessionId: string, before?: string) => {
   const journal = await catalog.findBySessionId(sessionId);
   if (!journal) throw Object.assign(new Error("Native session journal was not found"), { code: "not_found" });
   const header = await catalog.readHeader(journal);
   if (!header || header.sessionId !== sessionId) throw Object.assign(new Error("Native session journal was not found"), { code: "not_found" });
-  if (!paths.isInsideConfiguredRoots(header.cwd)) throw Object.assign(new Error("Native session journal does not belong to configured roots"), { code: "path_forbidden" });
+  if (!(await paths.isInsideConfiguredRootsForRead(header.cwd))) throw Object.assign(new Error("Native session journal does not belong to configured roots"), { code: "path_forbidden" });
   return catalog.readHistory(sessionId, header.cwd, { before });
 };
 const canonicalProjectPath = async (projectPath: string) => {
@@ -536,6 +571,13 @@ const app = buildApp({
   readNativeHistory: (sessionId, expectedCwd, options) => catalog.readHistory(sessionId, expectedCwd, options),
   listCollabHosts: () => registry.list(),
   findLiveHost: (sessionId) => registry.findBySessionId(sessionId),
+  // The adapter holds the constant command text; the route proves ownership and
+  // idleness, then hands the pane facts down.
+  sendHandoff: (input) => tmux.sendHandoff(input.sessionId, {
+    expectedIdentity: input.expectedIdentity,
+    expectedPanePid: input.expectedPanePid,
+    assertIdle: input.assertIdle,
+  }),
   tmuxSocketPath: privateTmuxSocketPath(config),
   tmuxServerIdentity: () => tmux.serverIdentity(),
 });

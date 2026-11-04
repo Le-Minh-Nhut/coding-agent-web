@@ -8,6 +8,12 @@ import type {
   WireMessage,
 } from "@caw/collab-protocol";
 
+export type TranscriptBlock =
+  | { type: "text"; text: string }
+  | { type: "toolCall"; name: string; arguments: unknown; intent?: string }
+  | { type: "image"; label: string; dataUrl?: string }
+  | { type: "notice"; text: string };
+
 export interface TranscriptMessage {
   /** Durable entry ID when available; otherwise stable for the live message's lifetime. */
   id: string;
@@ -17,6 +23,7 @@ export interface TranscriptMessage {
   eventIdentity?: string;
   role: "user" | "assistant" | "tool" | "notice";
   text: string;
+  blocks?: TranscriptBlock[];
   toolName?: string;
   isError?: boolean;
   isRunning?: boolean;
@@ -118,52 +125,50 @@ export function textFromContent(content: string | readonly { type: string; text?
   let text = "";
   let afterBlock = false;
   for (const part of content) {
-    if (part.type === "text") {
+    const block = transcriptBlocksFromContent([part])[0]!;
+    if (block.type === "text") {
       if (afterBlock && text && !text.endsWith("\n")) text += "\n";
-      text += part.text ?? "";
+      text += block.text;
       afterBlock = false;
       continue;
     }
     if (text && !text.endsWith("\n")) text += "\n";
-    if (part.type === "image" && /^(?:image\/(?:png|jpeg|gif|webp|avif))$/.test(part.mimeType ?? "") && part.data) {
-      text += `![Attachment](data:${part.mimeType};base64,${part.data})`;
-    } else if (part.type === "image") {
-      text += `[Image attachment not displayed${part.mimeType ? ` (${part.mimeType})` : ""}]`;
-    } else if (part.type === "thinking") {
-      text += `[Reasoning]\n${part.thinking ?? ""}`;
-    } else if (part.type === "redactedThinking") {
-      text += "[Reasoning redacted by host]";
-    } else if (part.type === "toolCall") {
-      const intent = part.intent ? ` — ${part.intent}` : "";
-      text += `[Tool call: ${part.name ?? "unknown"}${intent}] ${JSON.stringify(part.arguments ?? {}, null, 2)}`;
-    } else {
-      text += `[Unsupported content: ${part.type}]`;
-    }
+    if (block.type === "toolCall") text += `[Tool call: ${block.name}${block.intent ? ` — ${block.intent}` : ""}] ${JSON.stringify(block.arguments, null, 2)}`;
+    else if (block.type === "image" && block.dataUrl) text += `![Attachment](${block.dataUrl})`;
+    else text += block.type === "image" ? block.label : block.text;
     afterBlock = true;
   }
   return text;
 }
 
+export function transcriptBlocksFromContent(content: string | readonly { type: string; text?: string; mimeType?: string; data?: string; thinking?: string; name?: string; arguments?: unknown; intent?: string }[]): TranscriptBlock[] {
+  if (typeof content === "string") return [{ type: "text", text: content }];
+  return content.map((part): TranscriptBlock => {
+    if (part.type === "text") return { type: "text", text: part.text ?? "" };
+    if (part.type === "toolCall") return { type: "toolCall", name: part.name ?? "unknown", arguments: part.arguments ?? {}, ...(part.intent ? { intent: part.intent } : {}) };
+    if (part.type === "image" && /^(?:image\/(?:png|jpeg|gif|webp|avif))$/.test(part.mimeType ?? "") && part.data) return { type: "image", label: "Image attachment", dataUrl: `data:${part.mimeType};base64,${part.data}` };
+    if (part.type === "image") return { type: "image", label: `[Image attachment not displayed${part.mimeType ? ` (${part.mimeType})` : ""}]` };
+    if (part.type === "thinking") return { type: "notice", text: `[Reasoning]\n${part.thinking ?? ""}` };
+    if (part.type === "redactedThinking") return { type: "notice", text: "[Reasoning redacted by host]" };
+    return { type: "notice", text: `[Unsupported content: ${part.type}]` };
+  });
+}
+
 
 function displayMessage(entry: SessionEntry): TranscriptMessage | null {
   if (entry.type === "custom_message") {
-    if (entry.customType === "collab-prompt") {
-      return {
-        id: entry.id,
-        identity: entry.id,
-        role: "user",
-        text: textFromContent(entry.content),
-        source: "entry",
-      };
-    }
-    if (!entry.display) return null;
-    return {
-      id: entry.id,
-      identity: entry.id,
-      role: "notice",
-      text: `${entry.customType}: ${textFromContent(entry.content)}`,
-      source: "entry",
-    };
+    // A `collab-prompt` is the user's own text and is always a user row. Every
+    // OTHER custom message is system chatter (nudges, notices, loop redirects)
+    // and OMP marks the ones it intends humans to see with `display: true`;
+    // `display: false` — or absent, on records written before the field existed —
+    // means hidden, and rendering it would leak internal prompts into the
+    // transcript. Absence is checked as truthiness, not `!== false`, because the
+    // journals really do omit the field.
+    const prompt = entry.customType === "collab-prompt";
+    if (!prompt && !entry.display) return null;
+    const details = entry.details === undefined ? "" : `\n${JSON.stringify(entry.details, null, 2)}`;
+    const text = prompt ? textFromContent(entry.content) : `${entry.customType}: ${textFromContent(entry.content)}${details}`;
+    return { id: entry.id, identity: entry.id, role: prompt ? "user" : "notice", text, blocks: transcriptBlocksFromContent(entry.content), source: "entry" };
   }
   if (entry.type === "compaction") return {
     id: entry.id,
@@ -176,7 +181,7 @@ function displayMessage(entry: SessionEntry): TranscriptMessage | null {
     id: entry.id,
     identity: entry.id,
     role: "notice",
-    text: `Branch summary: ${entry.summary}`,
+    text: `Branch summary from ${entry.fromId}: ${entry.summary}`,
     source: "entry",
   };
   if (entry.type === "model_change") return {
@@ -197,26 +202,43 @@ function displayMessage(entry: SessionEntry): TranscriptMessage | null {
   const message = entry.message;
   switch (message.role) {
     case "user":
-      return { id: entry.id, identity: entry.id, eventIdentity: messageCorrelation(message), role: "user", text: textFromContent(message.content), source: "entry" };
+      return { id: entry.id, identity: entry.id, eventIdentity: messageCorrelation(message), role: "user", text: textFromContent(message.content), blocks: transcriptBlocksFromContent(message.content), source: "entry" };
     case "assistant": {
+      const blocks = transcriptBlocksFromContent(message.content);
       const content = textFromContent(message.content);
       const isError = message.stopReason === "error" || message.stopReason === "aborted";
       const errorText = message.stopReason === "aborted" ? "Assistant response aborted" : message.errorMessage ?? "Assistant response failed";
-      return { id: entry.id, identity: entry.id, eventIdentity: messageCorrelation(message), role: "assistant", text: isError ? `${content}${content ? "\n\n" : ""}${errorText}` : content, isError, source: "entry" };
+      // The failure reason is appended as a trailing block as well as into `text`:
+      // when `blocks` exists the renderer shows the blocks, so a suffix that lived
+      // only in `text` would vanish the moment the durable entry replaced the live
+      // row. Both paths must show the reason.
+      return {
+        id: entry.id,
+        identity: entry.id,
+        eventIdentity: messageCorrelation(message),
+        role: "assistant",
+        text: isError ? `${content}${content ? "\n\n" : ""}${errorText}` : content,
+        blocks: isError ? [...blocks, { type: "notice" as const, text: errorText }] : blocks,
+        isError,
+        source: "entry",
+      };
     }
-    case "toolResult":
+    case "toolResult": {
+      const details = message.details === undefined ? "" : `\n${JSON.stringify(message.details, null, 2)}`;
       return {
         id: entry.id,
         identity: entry.id,
         eventIdentity: messageCorrelation(message),
         role: "tool",
-        text: textFromContent(message.content),
+        text: `${textFromContent(message.content)}${details}`,
+        blocks: transcriptBlocksFromContent(message.content),
         toolName: message.toolName,
         isError: message.isError,
         source: "entry",
       };
+    }
     case "developer":
-      return { id: entry.id, identity: entry.id, role: "notice", text: `Developer message: ${textFromContent(message.content)}`, source: "entry" };
+      return { id: entry.id, identity: entry.id, eventIdentity: messageCorrelation(message), role: "notice", text: `Developer message: ${textFromContent(message.content)}`, blocks: transcriptBlocksFromContent(message.content), source: "entry" };
     default:
       return null;
   }

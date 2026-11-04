@@ -73,7 +73,9 @@ pnpm start
 CAW_CONFIG=/absolute/path/to/caw.config.json pnpm start
 ```
 
-First start prints a random bootstrap token to server stdout. It expires after
+First start writes a random bootstrap token to
+`<stateDir>/setup-token` (mode 0600) and prints that **path** to server stdout,
+never the token itself; read it with `cat <path>`. It expires after
 15 minutes and can authenticate once to open a setup-only session; choose a
 password of at least 12 characters, different from the token, to finish setup.
 That session can only set the password or log out. A normal password login works as before.
@@ -82,7 +84,8 @@ marked as legacy in `auth-password.json`; change that credential after login
 with `POST /api/auth/change-password` if you want to replace it.
 If you forget the password, stop the service and run
 `pnpm --filter @caw/server exec tsx src/auth.ts reset` locally. It writes a new
-15-minute setup token to stdout and replaces only the auth record. Restart the
+15-minute setup token to `<stateDir>/setup-token` and prints only that path, and
+replaces only the auth record. Restart the
 service, log in with that token, and set a new password. Password changes revoke
 all sessions except the current one. The reset command auto-discovers repo-root
 `caw.config.json` and honours `CAW_CONFIG`/`CAW_STATE_DIR`, so it uses the same
@@ -118,6 +121,7 @@ after any change to the link path or the launch flow.
 
 ## Documentation
 
+- 🇻🇳 [Hướng dẫn sử dụng (tiếng Việt)](docs/HUONG_DAN_SU_DUNG.md)
 - `docs/operations/ubuntu-setup.md` — install, configure, run as a service
 - `docs/operations/iphone-setup.md` — Tailscale Serve, PWA install, day-to-day use
 - `docs/operations/recovery.md` — what to do when something breaks

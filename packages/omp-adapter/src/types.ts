@@ -139,9 +139,51 @@ export interface LaunchRequest {
   args?: string[];
 }
 
+/**
+ * Why a handoff keystroke was not delivered.
+ *
+ * Every member is a positively observed fact about the recorded session, so the
+ * caller can retry, or tell the user to type the command themselves. A probe
+ * that could not run is never one of these — it throws, because "could not
+ * check" and "checked and refused" must not collapse into one another.
+ */
+export type HandoffRefusal =
+  | "session_missing"
+  | "identity_changed"
+  | "pane_ambiguous"
+  | "pane_changed"
+  | "command_changed"
+  | "process_changed"
+  | "terminal_attached"
+  | "not_idle";
+
+export type HandoffResult =
+  | { delivered: true; sessionId: string; paneId: string; panePid: number }
+  | { delivered: false; refusal: HandoffRefusal; reason: string };
+
+export interface HandoffRequest {
+  /** Recorded server identity (`socket:start:pid`) that must still own the session id. */
+  expectedIdentity: string;
+  /** Pane process id recorded at launch; re-proved against `/proc`, never trusted. */
+  expectedPanePid: number;
+  /**
+   * Idleness proof, supplied as a callback so the adapter cannot paste into a
+   * session the caller never checked. `true` only on positive evidence;
+   * `false` or absent refuses as `not_idle`.
+   */
+  assertIdle?: () => Promise<boolean>;
+}
+
 export interface TmuxService {
   /** List every session on this service's socket; app ownership comes from its private socket, not session names. */
   listManaged(): Promise<TmuxSession[]>;
+  /**
+   * Deliver OMP's builtin `/handoff` to a running TUI by bracketed paste.
+   *
+   * The command text is a constant inside the implementation and is never a
+   * parameter: no request path can inject text into a pane.
+   */
+  sendHandoff(sessionId: string, request: HandoffRequest): Promise<HandoffResult>;
   /** Look up one session by id. */
   getById(sessionId: string): Promise<TmuxSession | null>;
   getByName(name: string): Promise<TmuxSession | null>;

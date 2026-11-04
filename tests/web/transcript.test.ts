@@ -315,8 +315,8 @@ describe("Collab transcript reducer", () => {
     const state = frames.reduce(apply, createTranscriptState());
     expect(state.messages).toEqual([
       expect.objectContaining({ id: "omitted", role: "notice", text: "collab-entry-too-large: [tool result omitted by host]" }),
-      expect.objectContaining({ id: "mixed", role: "assistant", text: "Result\n[Reasoning]\nreasoning\n[Tool call: bash] {\n  \"command\": \"pwd\"\n}\n[Unsupported content: futureBlock]\ndone" }),
-      expect.objectContaining({ id: "image", role: "user", text: "Inspect this\n![Attachment](data:image/png;base64,aGVsbG8=)" }),
+      expect.objectContaining({ id: "mixed", role: "assistant", text: "Result\n[Reasoning]\nreasoning\n[Tool call: bash] {\n  \"command\": \"pwd\"\n}\n[Unsupported content: futureBlock]\ndone", blocks: expect.arrayContaining([expect.objectContaining({ type: "toolCall", name: "bash", arguments: { command: "pwd" } })]) }),
+      expect.objectContaining({ id: "image", role: "user", text: "Inspect this\n![Attachment](data:image/png;base64,aGVsbG8=)", blocks: expect.arrayContaining([expect.objectContaining({ type: "image", dataUrl: "data:image/png;base64,aGVsbG8=" })]) }),
     ]);
   });
 

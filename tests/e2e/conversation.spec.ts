@@ -136,10 +136,10 @@ test("a connected host reports a turn in flight, then settles without claiming c
   // The send is awaited so the state change is applied before asserting: the
   // frame travels through a real WebSocket, so "Stop" appears a tick later.
   await host.send(welcomeFrame(true));
-  await expect(page.getByRole("button", { name: "Stop" })).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByRole("button", { name: "Stop generating" })).toBeVisible({ timeout: 15_000 });
 
   await host.send(welcomeFrame(false));
-  await expect(page.getByRole("button", { name: "Stop" })).toBeHidden({ timeout: 15_000 });
+  await expect(page.getByRole("button", { name: "Stop generating" })).toBeHidden({ timeout: 15_000 });
   // Settling is never announced to the user as idle/finished.
   await expect(statusBanner(page).filter({ hasText: /idle|ready for prompt|finished|completed/i })).toBeHidden();
 });

@@ -230,7 +230,7 @@ describe("mobile reading behavior", () => {
     const view = await mountConversation(true);
     await act(async () => { socket?.onFrame?.(welcome(true)); });
     fireEvent.click(view.getByText("Conversation model settings"));
-    expect(view.queryByRole("button", { name: "Stop" })).toBeNull();
+    expect(view.queryByRole("button", { name: "Stop generating" })).toBeNull();
     expect(view.queryByRole("button", { name: "Save & restart agent" })).toBeNull();
     expect(view.queryByRole("button", { name: "Save model" })).toBeNull();
     expect(view.container.querySelector("textarea.composer-input")).not.toBeNull();

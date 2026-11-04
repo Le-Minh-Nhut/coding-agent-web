@@ -409,6 +409,34 @@ describe("live session link route", () => {
     expect(returnedSecret.length).toBe(secret.length);
     await app.close();
   });
+  it("rewrites a room link only when its relay origin is owned", async () => {
+    const secret = "A".repeat(64);
+    const room = "F".repeat(20);
+    const fakeRegistry = {
+      list: async () => [{ sessionId: "sess-owned", instanceId: "inst-owned", generation: 1, relayConnected: true, access: "control" }],
+      link: async () => ({ access: "control" as const, instanceId: "inst-owned", generation: 1, url: `ws://127.0.0.1:8792/r/${room}.${secret}` }),
+    };
+    const { app, headers, conversation, store } = await fixture({ mintLink: createMintLink(fakeRegistry, { publicOrigin: "https://phone.test", relayOrigin: "ws://127.0.0.1:8792" }) });
+    await store.updateConversation(conversation.id, { nativeSessionId: "sess-owned" });
+    const response = await app.inject({ method: "POST", url: `/api/conversations/${conversation.id}/link`, headers });
+    expect(response.statusCode).toBe(200);
+    expect(response.json().data.url).toBe(`https://phone.test/#wss://phone.test/r/${room}.${secret}`);
+    await app.close();
+  });
+  it("preserves a room link from a foreign relay origin", async () => {
+    const secret = "A".repeat(64);
+    const original = `ws://foreign-relay.test:9888/r/${"F".repeat(20)}.${secret}`;
+    const fakeRegistry = {
+      list: async () => [{ sessionId: "sess-foreign", instanceId: "inst-foreign", generation: 1, relayConnected: true, access: "control" }],
+      link: async () => ({ access: "control" as const, instanceId: "inst-foreign", generation: 1, url: original }),
+    };
+    const { app, headers, conversation, store } = await fixture({ mintLink: createMintLink(fakeRegistry, { publicOrigin: "https://phone.test", relayOrigin: "ws://127.0.0.1:8792" }) });
+    await store.updateConversation(conversation.id, { nativeSessionId: "sess-foreign" });
+    const response = await app.inject({ method: "POST", url: `/api/conversations/${conversation.id}/link`, headers });
+    expect(response.statusCode).toBe(200);
+    expect(response.json().data.url).toBe(original);
+    await app.close();
+  });
 
   it("a link with deep-link fragment format comes back with publicOrigin in outer URL and WebSocket origin in fragment", async () => {
     const roomId = "0123456789abcdef";

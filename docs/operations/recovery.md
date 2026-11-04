@@ -118,7 +118,7 @@ omp collab link <instanceId>
 ```bash
 systemctl --user stop coding-agent-web
 rm ~/.local/state/coding-agent-web/auth-password.json
-systemctl --user start coding-agent-web      # prints a fresh one-time setup token
+systemctl --user start coding-agent-web      # writes a fresh one-time setup token to <stateDir>/setup-token
 ```
 
 This revokes existing sessions with the credentials file. Conversations and

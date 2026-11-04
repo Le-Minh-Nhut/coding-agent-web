@@ -26,6 +26,8 @@ function session(over: Partial<NativeSessionSummary> = {}): NativeSessionSummary
     cwd: "/tmp/project",
     title: "A session",
     updatedAt: "2026-01-01T00:00:00.000Z",
+    cwdAvailable: true,
+    conversationId: null,
     live: false,
     hasCollabHost: false,
     tracked: false,
@@ -111,7 +113,7 @@ describe("native session liveness badge", () => {
   it("does not offer attach when a live session has no verified Collab host", async () => {
     await renderWith([session({ live: true, hasCollabHost: false })]);
     expect(screen.queryByRole("button", { name: "Open live session" })).toBeNull();
-    expect(screen.getByText("This session is live but has no verified Collab host. Attach in the terminal instead.")).toBeTruthy();
+    expect(screen.getByText("Open live unavailable: no verified Collab host for this session.")).toBeTruthy();
     expect(api.attachLiveSession).not.toHaveBeenCalled();
   });
 
@@ -133,19 +135,20 @@ describe("native session liveness badge", () => {
   });
 
   it("does not offer resume when the lease is unknown or session is already tracked", async () => {
-    await renderWith([session({ live: "unknown" }), session({ sessionId: "tracked-id", tracked: true })]);
+    await renderWith([session({ live: "unknown" }), session({ sessionId: "tracked-id", tracked: true, conversationId: "known-conversation" })]);
     expect(screen.queryByRole("button", { name: "Resume in app" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Open conversation" })).toBeTruthy();
   });
   it("offers a resume action for untracked sessions and hides it for tracked sessions", async () => {
     await renderWith([
       session({ title: "Recreated project session", live: false, tracked: false }),
-      session({ sessionId: "tracked-session", title: "Tracked session", live: false, tracked: true }),
+      session({ sessionId: "tracked-session", title: "Tracked session", live: false, tracked: true, conversationId: "known-conversation" }),
     ], () => {}, "Recreated project");
     expect(screen.getByRole("heading", { name: "Recreated project" })).toBeTruthy();
     expect(screen.getByText("No conversations yet.")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Resume in app" })).toBeTruthy();
     expect(screen.getByText("Tracked session")).toBeTruthy();
-    expect(within(screen.getByText("Tracked session").closest(".card")!).queryByRole("button", { name: "Resume in app" })).toBeNull();
+    expect(within(screen.getByText("Tracked session").closest(".card")!).getByRole("button", { name: "Open conversation" })).toBeTruthy();
     expect(screen.getAllByRole("button", { name: "Resume in app" })).toHaveLength(1);
   });
   it("retries only failed managed stopped sessions without creating a row", async () => {

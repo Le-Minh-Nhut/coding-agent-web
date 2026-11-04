@@ -530,6 +530,31 @@ textarea::placeholder {
   margin: 6px 0;
 }
 
+/* Handoff reason sits under the header, outside the transcript so it never
+   changes the scroll region the reader is anchored to. */
+.handoff-reason {
+  margin: 0;
+  padding: 6px calc(var(--safe-right) + 16px) 6px calc(var(--safe-left) + 16px);
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+
+.handoff-confirm {
+  margin: 8px calc(var(--safe-right) + 12px) 0 calc(var(--safe-left) + 12px);
+  padding: 12px;
+}
+
+.handoff-confirm p {
+  margin: 6px 0;
+}
+
+.handoff-refusal {
+  color: var(--danger-text);
+  margin: 6px 0 0;
+}
+
  .latest-row {
   flex: none;
   min-height: 52px;
@@ -741,3 +766,6 @@ details[open] summary {
 .history-reader { position: fixed; inset: 0; z-index: 100; overflow-y: auto; background: var(--bg); padding: calc(var(--safe-top) + 16px) calc(var(--safe-right) + 16px) calc(var(--safe-bottom) + 16px) calc(var(--safe-left) + 16px); }
 .history-reader-head { justify-content: space-between; margin-bottom: 8px; }
 .history-reader .message-card { margin-top: 10px; }
+.tool-output-preview { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 7rem; overflow: hidden; color: var(--text-muted); }
+.message-card pre { max-width: 100%; overflow-x: auto; white-space: pre; }
+.message-card summary, .message-card button { min-height: var(--touch-min); }

@@ -2,9 +2,18 @@ import { execFile } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import { AdapterError } from "./errors.js";
-import type { LaunchRequest, TmuxService, TmuxSession } from "./types.js";
+import type { HandoffRefusal, HandoffRequest, HandoffResult, LaunchRequest, TmuxService, TmuxSession } from "./types.js";
 
 const execFileAsync = promisify(execFile);
+
+/**
+ * The one command this module will ever type into a pane.
+ *
+ * A module constant, deliberately never a parameter: an adapter that accepted
+ * the command text from its caller would put arbitrary keystrokes one bug away
+ * from a live agent's editor.
+ */
+const HANDOFF_COMMAND = "/handoff";
 
 /** Tmux diagnostics for an absent server or unreachable socket; permission failures stay errors. */
 const NO_SERVER_PATTERNS = [/no server running/i, /error connecting to .*?(?:no such file or directory|enoent)/i];
@@ -124,6 +133,38 @@ export class DefaultTmuxService implements TmuxService {
       // "_", making tab-delimited output unparseable. Pin a UTF-8 locale so the
       // separator survives; glibc>=2.35 ships C.UTF-8 everywhere we target.
       env: { ...process.env, LC_ALL: "C.UTF-8", LANG: "C.UTF-8" },
+    });
+  }
+
+  /**
+   * Feed tmux a payload on stdin instead of argv.
+   *
+   * A buffer's *content* must never travel through argv: an argument list is
+   * visible in `/proc/<pid>/cmdline` to every same-uid process, and it is the one
+   * place a future refactor could interpolate something. Writing the child's
+   * stdin keeps the command text off the command line entirely.
+   */
+  async #execTmuxStdin(args: string[], input: string): Promise<{ stdout: string; stderr: string }> {
+    const child = execFile(this.#tmuxBinary, [...this.#socketArgs, ...args], {
+      shell: false,
+      env: { ...process.env, LC_ALL: "C.UTF-8", LANG: "C.UTF-8" },
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout?.on("data", (chunk: Buffer) => { stdout += chunk.toString("utf8"); });
+    child.stderr?.on("data", (chunk: Buffer) => { stderr += chunk.toString("utf8"); });
+    return new Promise((resolve, reject) => {
+      // A child that exits before draining stdin turns the pending write into an
+      // EPIPE *stream* error. An unhandled 'error' event on a stream is an uncaught
+      // exception, so it would take the whole server down; the payload not being
+      // delivered is a failure of this call, and rejecting says so.
+      child.stdin?.on("error", (error: Error) => reject(error));
+      child.once("error", reject);
+      child.once("close", (code) => {
+        if (code === 0) resolve({ stdout, stderr });
+        else reject(Object.assign(new Error(stderr.trim() || `tmux exited with code ${code}`), { stderr, stdout, code }));
+      });
+      child.stdin?.end(input);
     });
   }
   /**
@@ -275,6 +316,143 @@ export class DefaultTmuxService implements TmuxService {
         { sessionId },
       );
     }
+  }
+
+  /**
+   * Deliver OMP's builtin `/handoff` to a running TUI by bracketed paste.
+   *
+   * Why keystrokes at all: `/handoff` is an OMP *builtin slash command* that
+   * appends a compaction entry in place (same session id, same journal). It is
+   * not reachable through a Collab `prompt` frame (that path wraps text as a
+   * custom message and never dispatches builtins), and the RPC surface is a
+   * separate stdio process that cannot attach to a running TUI. Terminal
+   * keystrokes are the only route into the live pane.
+   *
+   * Why paste rather than typed keys: OMP enables bracketed paste (DEC 2004), so
+   * `paste-buffer -p` lands the text as one paste event instead of a burst of
+   * keystrokes the editor would reinterpret. The text is the module constant
+   * below — never a parameter — so no caller can inject anything into a pane.
+   */
+  async sendHandoff(sessionId: string, request: HandoffRequest): Promise<HandoffResult> {
+    if (!/^\$\d+$/.test(sessionId)) {
+      throw new AdapterError("bad_request", `Invalid tmux session id: ${sessionId}`);
+    }
+    const identity = /^(.*):(\d+):(\d+)$/.exec(request.expectedIdentity);
+    if (!identity) {
+      throw new AdapterError("bad_request", `Invalid expected tmux server identity: ${request.expectedIdentity}`);
+    }
+    if (!Number.isSafeInteger(request.expectedPanePid) || request.expectedPanePid <= 0) {
+      throw new AdapterError("bad_request", "Handoff requires the recorded pane process id");
+    }
+    const refuse = (refusal: HandoffRefusal, reason: string): HandoffResult => {
+      this.#diagnostic("tmux.handoff_refused", { sessionId, refusal });
+      return { delivered: false, refusal, reason };
+    };
+
+    // Idleness is the caller's proof to give, not ours to assume: a paste into a
+    // session mid-turn is a second writer by keystroke instead of by lease.
+    let idle: boolean;
+    try {
+      idle = (await request.assertIdle?.()) === true;
+    } catch {
+      idle = false;
+    }
+    if (!idle) return refuse("not_idle", "The session is not confirmed idle; refusing to paste into it.");
+
+    if ((await this.serverIdentity()) !== request.expectedIdentity) {
+      return refuse("identity_changed", "The tmux server that owns this session is not the one recorded.");
+    }
+
+    let stdout: string;
+    try {
+      ({ stdout } = await this.#execTmux([
+        "list-panes", "-t", sessionId, "-F",
+        "#{session_id}\t#{pane_id}\t#{pane_pid}\t#{pane_current_command}\t#{pane_dead}\t#{session_attached}",
+      ]));
+    } catch (err) {
+      const text = execErrorText(err);
+      if (MISSING_SESSION_PATTERNS.some((pattern) => pattern.test(text)) || isNoServer(err)) {
+        return refuse("session_missing", "The recorded tmux session is no longer present.");
+      }
+      // A probe that could not run is not a verdict about the pane.
+      throw new AdapterError("internal", `Could not inspect the pane for ${sessionId}: ${text}`);
+    }
+
+    const panes = stdout.split("\n").map((line) => line.trim()).filter((line) => line.length > 0).map((line) => line.split("\t"));
+    if (panes.length === 0) return refuse("session_missing", "The recorded tmux session is no longer present.");
+    if (panes.length > 1) return refuse("pane_ambiguous", "The tmux session has more than one pane; refusing to guess which runs the agent.");
+
+    const [paneSessionId, paneId, panePidRaw, paneCommand, paneDeadRaw, attachedRaw] = panes[0]!;
+    if (paneSessionId !== sessionId) {
+      return refuse("identity_changed", "Tmux returned a different session id for the recorded session.");
+    }
+    const panePid = panePidRaw && /^\d+$/.test(panePidRaw) ? Number(panePidRaw) : null;
+    if (!paneId || panePid === null) {
+      return refuse("pane_changed", "Tmux did not report a usable pane id and process id.");
+    }
+    if (paneDeadRaw === "1") {
+      return refuse("session_missing", "The recorded pane's process has already exited.");
+    }
+    // Never the display name: `caw-*` can be renamed by hand, and the recorded id
+    // is the only thing the launch actually established. The recorded pane pid is
+    // what proves the pane is still *our* process and not a reused slot.
+    if (panePid !== request.expectedPanePid) {
+      return refuse("pane_changed", "The pane's process id is not the one recorded at launch.");
+    }
+    // The pane must still run this server's configured agent binary. tmux reports
+    // the process's own command name, so the comparison is against the basename —
+    // a pinned absolute path would never appear here.
+    const recordedCommand = this.#ompBinary.split("/").pop() ?? this.#ompBinary;
+    if (paneCommand !== recordedCommand) {
+      return refuse("command_changed", "The pane is not running the agent command that was recorded.");
+    }
+    // A terminal attached means a human may have a half-typed draft sitting in
+    // the TUI editor, and a paste splices at the cursor. With zero clients only
+    // CAW drives the session — prompts arrive through the Collab frame path,
+    // which never touches the editor — so there is no draft to corrupt. This is
+    // the gate that makes the feature honestly safe; it is not negotiable.
+    if (attachedRaw !== "0") {
+      return refuse("terminal_attached", "A terminal is attached to this session; run /handoff there instead.");
+    }
+    try {
+      const stat = await readFile(`/proc/${panePid}/stat`, "utf8");
+      if (parentPidFromProcStat(stat, panePid) === null) {
+        return refuse("process_changed", "The recorded pane process id no longer identifies that process.");
+      }
+      // Existence is not identity: a recycled pid can belong to a stranger. The
+      // kernel's own view of the process's argv is the corroboration — its first
+      // argument must still be the agent binary this server launched.
+      const cmdline = await readFile(`/proc/${panePid}/cmdline`, "utf8");
+      const argv0 = cmdline.split("\0")[0] ?? "";
+      if ((argv0.split("/").pop() ?? "") !== recordedCommand) {
+        return refuse("process_changed", "The pane process no longer runs the recorded agent command.");
+      }
+    } catch {
+      // The pid is gone, so it cannot be the process the launch recorded.
+      return refuse("process_changed", "The recorded pane process id no longer exists.");
+    }
+
+    const bufferName = `caw-handoff-${panePid}`;
+    try {
+      // `load-buffer -` reads the constant on stdin: no shell, no interpolation,
+      // and the text never appears in an argv the caller could influence.
+      await this.#execTmuxStdin(["load-buffer", "-b", bufferName, "-"], HANDOFF_COMMAND);
+    } catch (err) {
+      throw new AdapterError("internal", `Could not stage the handoff command: ${execErrorText(err)}`, { sessionId });
+    }
+    try {
+      // Bracketed paste (`-p`), then Enter as a separate key press: the TUI sees
+      // a paste event followed by a submitted line, which is what triggers the
+      // builtin rather than inserting literal text into the draft.
+      await this.#execTmux(["paste-buffer", "-p", "-b", bufferName, "-t", paneId]);
+      await this.#execTmux(["send-keys", "-t", paneId, "Enter"]);
+    } catch (err) {
+      return refuse("session_missing", `The pane disappeared before the handoff was delivered: ${execErrorText(err)}`);
+    } finally {
+      // Buffer cleanup is best-effort; a leftover buffer is not a correctness fault.
+      await this.#execTmux(["delete-buffer", "-b", bufferName]).catch(() => {});
+    }
+    return { delivered: true, sessionId, paneId, panePid };
   }
 
   async sendKeys(sessionId: string, keys: string): Promise<void> {

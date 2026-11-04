@@ -112,7 +112,9 @@ CAW_CONFIG=/absolute/path/to/caw.config.json pnpm start
 ```
 Only one server can bind port 8791; stop an enabled service before manual run.
 
-The first start prints a random bootstrap token to server stdout. It expires
+The first start writes a random bootstrap token to `<stateDir>/setup-token` and
+prints only that **path** to server stdout (never the token; `cat` the file to
+read it). It expires
 after 15 minutes and can authenticate once to open a setup-only session; choose
 a password of at least 12 characters, different from the token, to finish
 setup. Until set, that session may only call the set-password route or log out;
@@ -148,8 +150,9 @@ Forgotten password recovery is local-only: stop the server, then from the repo
 root run `pnpm --filter @caw/server exec tsx src/auth.ts reset`. It auto-discovers
 repo-root `caw.config.json` and honours `CAW_CONFIG`/`CAW_STATE_DIR`, using the
 same state directory as the service without extra flags. It replaces only
-`auth-password.json`, leaves other state files untouched, and prints a fresh
-15-minute setup token. Then restart the server, log in with that token, and set
+`auth-password.json`, leaves other state files untouched, and writes a fresh
+15-minute setup token to `<stateDir>/setup-token`, printing only that path. Then
+restart the server, log in with that token, and set
 a new password. Stopping the server discards all in-memory sessions.
 
 State lives in `~/.local/state/coding-agent-web/` (metadata, password hash `auth-password.json`, and the private tmux socket `tmux.sock`); override with `CAW_STATE_DIR`.

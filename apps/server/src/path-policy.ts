@@ -52,6 +52,16 @@ export class WorkspacePathPolicy {
   isInsideConfiguredRoots(path: string): boolean {
     return !path.includes("\0") && isAbsolute(path) && this.inside(path, this.configuredRoots);
   }
+  async isInsideConfiguredRootsForRead(path: string): Promise<boolean> {
+    if (!this.isInsideConfiguredRoots(path)) return false;
+    try {
+      const [canonicalPath, roots] = await Promise.all([realpath(path), this.roots()]);
+      return this.inside(canonicalPath, roots);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return true;
+      throw error;
+    }
+  }
 
   private async roots(): Promise<string[]> {
     return Promise.all(this.configuredRoots.map(async (root) => {

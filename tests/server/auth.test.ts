@@ -108,6 +108,20 @@ describe("AuthenticationService", () => {
     expect(await reloaded.authenticate(init.setupToken!, "old-token-ip")).toBe(false);
     expect(await reloaded.authenticate(newToken, "new-token-ip")).toBe("setup");
   });
+  it("replaces a pending setup token whose hash does not match the persisted record", async () => {
+    const { stateDir, init } = await setup();
+    const authPath = join(stateDir, "auth-password.json");
+    const tokenPath = join(stateDir, "setup-token");
+    const token = await readFile(tokenPath, "utf8");
+    const record = JSON.parse(await readFile(authPath, "utf8")) as { salt: string; hash: string; kind: string; expiresAt: number };
+    await writeFile(authPath, JSON.stringify({ ...record, hash: "0".repeat(128) }), { mode: 0o600 });
+    const reloaded = createAuthenticationService({ stateDir, setupOutput: () => undefined });
+    const healed = await reloaded.initAuth();
+    expect(healed.setupToken).not.toBe(token);
+    expect(await reloaded.authenticate(token, "mismatch-ip")).toBe(false);
+    expect(await reloaded.authenticate(healed.setupToken!, "healed-ip")).toBe("setup");
+    expect(JSON.parse(await readFile(authPath, "utf8")).kind).toBe("pending");
+  });
 
   it("refuses expired pending tokens", async () => {
     const { auth, init, advance } = await setup();

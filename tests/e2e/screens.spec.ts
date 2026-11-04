@@ -497,7 +497,7 @@ test.describe("Screenshot inventory & geometry verification", () => {
         await expect(page.getByText(/Read-only view/)).toBeVisible();
         await expect(page.locator("textarea.composer-input")).toBeDisabled();
         await expect(page.getByRole("button", { name: "Send" })).toBeDisabled();
-        await expect(page.getByRole("button", { name: "Stop" })).toHaveCount(0);
+        await expect(page.getByRole("button", { name: "Stop generating" })).toHaveCount(0);
         if (["375x812", "390x844", "430x932"].includes(vp.name)) {
           await captureScreen(page, vp.name, "read-only-welcome");
         }
