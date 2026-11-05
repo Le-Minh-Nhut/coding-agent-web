@@ -43,15 +43,19 @@ describe("R35 GUEST findings", () => {
     vi.useFakeTimers();
     const key = await importRoomKey(generateRoomKey());
     const sockets: CollabSocket[] = [];
+    const hellos: Promise<boolean>[] = [];
     let target!: CollabSocket;
     const make = () => {
       const socket = new CollabSocket({ wsUrl: "ws://fake/r/x", role: "guest", key });
       sockets.push(socket);
-      socket.onOpen = () => { void socket.send({ t: "hello", proto: 3, name: "x" }); };
+      socket.onOpen = () => { hellos.push(socket.send({ t: "hello", proto: 3, name: "x" })); };
       socket.connect(); FakeWebSocket.all.at(-1)!.open();
       return socket;
     };
     const acknowledge = async (socket: CollabSocket, ws: FakeWebSocket) => {
+      // Await the handshake write first: it rides the same send chain, so a still-pending
+      // hello would otherwise sit ahead of the frames these assertions count.
+      await hellos.at(-1);
       const welcomed = new Promise<void>(resolve => { socket.onFrame = frame => { if (frame.t === "welcome") resolve(); }; });
       ws.onmessage?.({ data: packEnvelope(0, await seal(key, { t: "welcome" } as never)).buffer } as MessageEvent);
       await welcomed;
