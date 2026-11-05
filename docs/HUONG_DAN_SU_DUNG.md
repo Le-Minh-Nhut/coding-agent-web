@@ -29,6 +29,14 @@ Tài liệu dành cho người mới dùng Coding Agent Web (CAW) trên Ubuntu c
 23. [Vibe mode — director và worker](#23-vibe-mode--director-và-worker)
 24. [Giao diện mới: chat gọn, Agents Center, thu gọn prompt dài](#24-giao-diện-mới-chat-gọn-agents-center-thu-gọn-prompt-dài)
 25. [Vòng 54 — tinh chỉnh giao diện di động](#25-vòng-54--tinh-chỉnh-giao-diện-di-động)
+26. [Mở một agent và đọc hội thoại thật](#26-mở-một-agent-và-đọc-hội-thoại-thật)
+27. [Trung tâm Tệp (Files Center)](#27-trung-tâm-tệp-files-center)
+28. [Màu sắc diff và cách đọc](#28-màu-sắc-diff-và-cách-đọc)
+29. [Dòng thời gian Hoạt động (Activity)](#29-dòng-thời-gian-hoạt-động-activity)
+30. [Menu hành động trên di động](#30-menu-hành-động-trên-di-động)
+31. [Chỉ báo Advisor](#31-chỉ-báo-advisor)
+32. [Điều hướng và nút Back](#32-điều-hướng-và-nút-back)
+33. [Giới hạn đã biết](#33-giới-hạn-đã-biết)
 
 ## 1. Giới thiệu
 
@@ -398,18 +406,17 @@ Chấm tròn đổi màu: xanh khi kết nối đang tốt, vàng khi đang kế
 
 | Chip | Khi nào hiện | Chạm để làm gì |
 | --- | --- | --- |
-| `Adv N` | N ≥ 1 ghi chú advisor **đã ghi lại** trong session này | Mở panel Advisor |
-| `Adv N ⚠` | Trong số đó có ít nhất một ghi chú mức **blocker** | Mở panel Advisor (chip này đổi màu để bạn không bỏ sót) |
+| `Adv ⚠` | Có **ít nhất một ghi chú mức `blocker` đã được ghi lại** trong session này | Mở panel Advisor |
 | `Vibe ● n` | Chế độ Vibe đang **bật** (đọc từ tiến trình); `n` = số worker **đã xác minh**, và chỉ được in khi n > 0 | Mở panel Vibe mode |
 
-Chip `Adv N` là **số ghi chú đã ghi lại**, không phải cảnh báo đang chạy: transport hiện tại không báo được advisor đang bật hay tắt, nên chip không khẳng định điều đó (xem [24.6](#246-advisor-ghi-chú-và-chip)). Chip `Vibe` chỉ hiện khi chế độ đang bật — trạng thái "tắt" là mặc định nên không đáng chiếm chỗ. Cả hai panel luôn mở được từ menu **⋯** dù chip có hiện hay không (xem [chương 22](#22-advisor--mô-hình-review-thứ-hai) và [chương 23](#23-vibe-mode--director-và-worker)).
+Chip `Adv ⚠` chỉ hiện khi có **một blocker đã được ghi lại**, chứ không phải cảnh báo đang chạy: transport hiện tại không báo được advisor đang bật hay tắt, nên chip không khẳng định điều đó. Số ghi chú đầy đủ nằm ở mục **Advisor (n)** trong menu **⋯**, nên không mất thông tin nào khi chip không hiện (xem [24.6](#246-advisor-ghi-chú-và-chip) và [chương 31](#31-chỉ-báo-advisor)). Chip `Vibe` chỉ hiện khi chế độ đang bật — trạng thái "tắt" là mặc định nên không đáng chiếm chỗ. Cả hai panel luôn mở được từ menu **⋯** dù chip có hiện hay không (xem [chương 22](#22-advisor--mô-hình-review-thứ-hai) và [chương 23](#23-vibe-mode--director-và-worker)).
 
 **Menu ⋯ (More actions).** Các thao tác phụ nằm trong menu này, mỗi mục một lần chạm:
 
 | Mục | Việc nó làm |
 | --- | --- |
 | Activity | Mở timeline sự kiện hoạt động |
-| Files | Cuộn transcript tới chỗ thay đổi tệp mới nhất đã xác minh (không có thì tới cuối transcript) |
+| Files | Mở **Files Center** — màn hình danh sách mọi tệp transcript ghi nhận có sửa (xem [chương 27](#27-trung-tâm-tệp-files-center)) |
 | Advisor | Mở panel Advisor (xem [chương 22](#22-advisor--mô-hình-review-thứ-hai)) |
 | Vibe mode | Mở panel Vibe mode (xem [chương 23](#23-vibe-mode--director-và-worker)) |
 | Agents (n) | Mở **Agents Center** — màn hình riêng (xem [24.3](#243-agents-center--hai-cấp-điều-hướng)) |
@@ -496,6 +503,8 @@ Các con số này được **đếm từ diff thật** mà host gửi, không p
 Chạm vào dòng tool có thay đổi tệp để mở. Phần **Changes** liệt kê **từng tệp thành một dòng riêng**, chỉ gồm: tên tệp, trạng thái (`A`/`M`/`D`/`R`/`bin`/`?`/`✕`) và số dòng `+x −y`.
 
 **Mở tệp nào thì xem diff tệp đó.** Chạm vào một dòng tệp để mở **đúng diff của tệp đó** — không phải diff của mọi tệp cùng lúc. Một lần sửa 5 tệp là 5 dòng gọn; bạn mở từng dòng khi cần. Đóng/mở xen kẽ nhiều dòng cùng lúc cũng được.
+
+> Thao tác `edit` nay đi xa hơn một bước: dòng tệp **phẳng** (một cấp, không accordion) và **mở trình xem diff riêng** của Files Center thay vì dựng diff trong transcript — xem [chương 27.3](#273-chạm-vào-một-tệp--trình-xem-diff) và [28.4](#284-dòng-sửa-phẳng--sửa-tệp-là-một-hàng-tệp-không-phải-một-bức-tường-diff). Các công cụ có thay đổi tệp khác (`write`, `patch`) vẫn dùng accordion mô tả ở đây.
 
 Trong diff:
 
@@ -618,7 +627,7 @@ Chạm vào dòng đó để mở toàn bộ nội dung, tên advisor đã nói,
 
 Các ghi chú advisor **không bị mất** khi lịch sử được phát lại (replay) hay khi context bị nén (compaction): chúng là một dòng transcript như mọi dòng khác, nên vẫn còn trong **History** và khi xem lại phiên đã lưu.
 
-**Chip `Adv` trên thanh trên.** Chip `Adv ●` xuất hiện khi phiên này đã có ít nhất một ghi chú advisor; chip chuyển thành `Adv ⛔` (đỏ) khi có ít nhất một `blocker`. Chạm chip để mở panel Advisor.
+**Chip `Adv ⚠` trên thanh trên.** Chip **chỉ** xuất hiện khi phiên này có **ít nhất một ghi chú mức `blocker` đã được ghi lại**; nó không hiện chỉ vì có ghi chú mức thấp hơn. Chạm chip để mở panel Advisor. Số ghi chú đầy đủ nằm ở mục **Advisor (n)** trong menu **⋯**, nên không có thông tin nào bị mất khi chip vắng mặt (xem [chương 31](#31-chỉ-báo-advisor)).
 
 **Panel Advisor** (menu **⋯ → Advisor**) cho bạn:
 
@@ -836,11 +845,11 @@ Transcript
 
 Ghi chú advisor hiện dưới dạng **dòng gọn** trong chat (`⚠ Advisor · Concern ›`), mở ra xem đầy đủ; mức **blocker** hiện **màu đỏ** và **nội dung được in ngay cả khi chưa mở**.
 
-Chip trên thanh trên hiện **số ghi chú đã ghi nhận** (ví dụ `Adv 3 ⚠`), **không** phải trạng thái runtime:
+Chip trên thanh trên **chỉ** hiện khi có **một blocker đã được ghi lại** (`Adv ⚠`), **không** phải trạng thái runtime và **không** phải một con số đứng thường trực:
 
-- Chip cho biết **đã từng có ghi chú**, không có nghĩa advisor **đang bật** (transport hiện tại không báo được điều đó).
-- Nhãn đọc cho screen reader nói rõ "recorded note".
-- Bật/tắt advisor vẫn phải làm trong **terminal** của phiên (xem [chương 22](#22-advisor--mô-hình-review-thứ-hai)).
+- Chip cho biết **đã từng có một blocker được ghi**, không có nghĩa advisor **đang bật**, và chắc chắn không có nghĩa đang có gì sai **lúc này** (transport hiện tại không báo được trạng thái đó).
+- **Số ghi chú** đầy đủ nằm ở mục `Advisor (n)` trong menu **⋯** — nhãn đọc cho screen reader ghi rõ "N recorded notes".
+- Bật/tắt advisor vẫn phải làm trong **terminal** của phiên (xem [chương 22](#22-advisor--mô-hình-review-thứ-hai) và [chương 31](#31-chỉ-báo-advisor)).
 
 ### 24.7 Agent Center không lẫn phiên khác
 
@@ -908,7 +917,7 @@ Ba thẻ là **thẻ điều hướng**, không phải bảng số liệu trang 
 
 Ba quy tắc trung thực — đây là lý do thẻ không in con số bừa:
 
-- **Files chưa có dữ liệu thì không in `0`.** Khi chưa chứng minh được thay đổi tệp nào, thẻ ghi `Files` + `View changes` — chạm vào sẽ cuộn tới cuối transcript. Một số `0` sẽ là lời khẳng định CAW chưa kiểm chứng.
+- **Files chưa có dữ liệu thì không in `0`.** Khi chưa chứng minh được thay đổi tệp nào, thẻ ghi `Files` + `View changes`. Một số `0` sẽ là lời khẳng định CAW chưa kiểm chứng. Chạm thẻ **luôn** mở **Files Center** (xem [chương 27](#27-trung-tâm-tệp-files-center)); bên trong đó, khi thật sự chưa có sự kiện sửa nào, màn hình ghi *"No edits have been observed in this conversation's transcript yet."*
 - **`+a −d` chỉ hiện khi cả hai tổng đều biết.** Nếu thiếu hoặc bị cắt, con số bị bỏ thay vì in một tổng cụt. Văn xuôi của trợ lý **không** được dùng làm nguồn: câu "tôi đã sửa ba tệp" không phải bản ghi thay đổi tệp.
 - **Thẻ Activity không đếm gì cả.** Số sự kiện server ghi lại chỉ có khi gọi trang Activity; gọi nó chỉ để trang trí một thẻ là một request bạn không yêu cầu.
 
@@ -956,7 +965,7 @@ A src/auth.test.ts                 +18  −0    ›
 
 - Chữ cái đầu là trạng thái: `A` thêm mới, `M` sửa, `D` xoá, `R` đổi tên, `bin` nhị phân, `?` chưa xác định, `✕` **thao tác thất bại**.
 - Không có diff thì ghi `counts unavailable`; diff bị host cắt thì ghi `counts partial`; tệp lỗi thì ghi `not applied`. **Không bao giờ** in một con số chưa được chứng minh.
-- **Bấm vào từng tệp** để xem diff của chính tệp đó (một accordion, không phải một bức tường diff): diff thật được tô màu `+`/`−`, kèm nút **Copy patch**. Diff dài hơn 200 dòng thì hiện trước 200 dòng và nút `⋯ N more lines` — mở ra là xem đủ, không mất dòng nào.
+- **Bấm vào từng tệp** để xem diff của chính tệp đó. Với các công cụ có nhiều tệp (`write`, `patch`), đó là một accordion trong dòng; với `edit`, dòng tệp nay **phẳng** và mở **trình xem diff riêng** — xem [28.4](#284-dòng-sửa-phẳng--sửa-tệp-là-một-hàng-tệp-không-phải-một-bức-tường-diff) và [27.3](#273-chạm-vào-một-tệp--trình-xem-diff).
 - **Dữ liệu không bị cắt:** dòng tool đã mở có nút **View tool details** để xem **nguyên văn** tham số (JSON) và output transport; khi không có kết quả có cấu trúc thì phần thô này được in thẳng ra, không giấu sau nút.
 - Nhóm chưa mở **không dựng** nội dung bên trong, nên transcript dài vẫn nhẹ. Lỗi của một dòng trong nhóm được in ngay dưới dòng nhóm **dù chưa mở**.
 
@@ -989,7 +998,7 @@ Nếu agent **rời roster** khi bạn đang mở chi tiết, màn hình ghi **"
 
 ### 25.7 Advisor và Vibe — chip và nơi điều khiển
 
-**Chip `Adv N` là số ghi chú đã ghi lại, không phải cảnh báo đang chạy.** Nhãn đọc cho screen reader nói đúng điều đó ("N recorded notes"), và dấu `⚠` chỉ đánh dấu rằng **trong số ghi chú đã ghi** có một cái mức blocker — không phải "advisor đang báo động lúc này". Transport hiện tại **không** cho biết advisor đang bật hay tắt, nên chip không khẳng định điều đó.
+**Chip `Adv ⚠` là dấu rằng có một blocker ĐÃ ĐƯỢC GHI LẠI, không phải cảnh báo đang chạy.** Nhãn đọc cho screen reader nói đúng điều đó ("recorded a blocker among N notes"), và dấu `⚠` chỉ đánh dấu rằng **trong số ghi chú đã ghi** có một cái mức blocker — không phải "advisor đang báo động lúc này". Transport hiện tại **không** cho biết advisor đang bật hay tắt, nên chip không khẳng định điều đó. Số ghi chú đầy đủ nằm ở mục **Advisor (n)** trong menu **⋯** (xem [chương 31](#31-chỉ-báo-advisor)).
 
 **Chip `Vibe ● n` chỉ hiện khi chế độ đang bật** (đọc từ tiến trình OMP). Khi hiện, `n` là số **worker đã được xác minh**, không phải toàn bộ roster — nên một subagent lẻ không bị đếm thành "1 worker". Khi chế độ tắt (mặc định), không có chip.
 
@@ -1055,6 +1064,7 @@ Tin nhắn **không bị cắt**: nếu dài hơn số dòng đó, một nút **
 - **Conversation → Agents → Agent Detail → (Detail) → (Center) → Conversation.** Cả ba cấp nằm trong **một** viewport; màn đang mở chiếm trọn nó.
 - **Nút Back của trình duyệt** đi đúng một cấp mỗi lần, khớp với nút **←** trong app.
 - Khi quay lại, **bản nháp** và **vị trí cuộn** của hội thoại **được giữ nguyên**, kết nối WebSocket **không** dựng lại, và listener `popstate` **không** chồng lên nhau.
+- Bảng **đầy đủ** cho **mọi** cấp — kể cả lớp Files Center, trình xem diff và menu hành động — nằm ở [chương 32](#32-điều-hướng-và-nút-back).
 
 ### 25.12 Xử lý sự cố (vòng 54)
 
@@ -1066,13 +1076,336 @@ Tin nhắn **không bị cắt**: nếu dài hơn số dòng đó, một nút **
 | Agent đang xem biến mất khỏi danh sách | Màn hình ghi **"Agent unavailable"**. Bấm **←** để về danh sách mới nhất. |
 | Không thấy nút **Kill worker** cho một agent đang chạy | Agent đó **không** được journal chứng minh là worker Vibe (main agent / subagent thường), hoặc link đang read-only. Đúng theo thiết kế. |
 | Transcript không cuộn được | Cuộn **trong vùng transcript**, không phải cuộn cả trang — trang hội thoại được ghim cao đúng viewport (`100dvh`). Nếu một thẻ/notice che mất, đóng sheet (phím **Esc** hoặc nút **✕**) rồi cuộn lại. |
-| Thẻ **Files** trong dashboard chỉ ghi `View changes` | Chưa có **diff đã xác minh** (workspace không phải git, host không gửi diff, hoặc tệp quá lớn). CAW không in `0` cho thứ nó chưa chứng minh. Chạm thẻ để nhảy tới cuối transcript và xem dòng tool thật. |
+| Thẻ **Files** trong dashboard chỉ ghi `View changes` | Chưa có **diff đã xác minh** (workspace không phải git, host không gửi diff, hoặc tệp quá lớn). CAW không in `0` cho thứ nó chưa chứng minh. Chạm thẻ để mở **Files Center** và xem danh sách tệp ([chương 27](#27-trung-tâm-tệp-files-center)). |
 | Thẻ Activity không có số | Cố ý — con số chỉ có sau khi gọi trang Activity; xem sự kiện bằng cách chạm thẻ hoặc menu **⋯ → Activity**. |
 
 ### 25.13 Giới hạn đã biết (vòng 54)
 
 - **Chưa xác minh trên iPhone Safari thật** với bàn phím ảo: hành vi `safe-area`, việc bàn phím ảo che ô nhập, và việc iOS đuổi tiến trình tab đều được xử lý trong mã nhưng **chưa** được kiểm trên máy thật. Playwright headless không mô phỏng được bàn phím ảo phần mềm — các ca đo đều được đánh dấu `keyboard-unverified`.
 - **Xác minh pixel do người dùng thực hiện.** Vòng 54 không tự nhận đạt tiêu chí pixel; phần đo đạc và ảnh chụp là bằng chứng **bên ngoài kho mã**.
-- **Ảnh chụp màn hình không nằm trong git như bằng chứng của vòng này.** Bộ ảnh kiểm thử được sinh vào thư mục scratch (`$TMPDIR/caw-screens` hoặc `/var/tmp/…`), không cam kết là ảnh tracked; xem [chính sách ảnh chụp](operations/screenshot-policy.md). Ảnh baseline cũ vẫn nằm ở `docs/assets/screens/`, nhưng là ảnh **lịch sử**, không phải ảnh của vòng 54.
-- Model của agent trong **Agent Detail** hiện `model: not reported` — kênh snapshot không mang trường này; CAW không bịa.
+- **Ảnh chụp màn hình vòng 54 không nằm trong git như bằng chứng của vòng đó.** Bộ ảnh kiểm thử vòng 54 được sinh vào thư mục scratch (`$TMPDIR/caw-screens` hoặc `/var/tmp/…`), không cam kết là ảnh tracked; xem [chính sách ảnh chụp](operations/screenshot-policy.md). Ảnh baseline cũ vẫn nằm ở `docs/assets/screens/`, nhưng là ảnh **lịch sử**, không phải ảnh của vòng 54. Một số ảnh vòng 54 (`round54-agents-layer.png`) được **sao chép vào** `docs/assets/screens/round55/` và dùng lại trong [chương 32](#32-điều-hướng-và-nút-back) — đó là bản sao của ảnh scratch, không phải ảnh baseline được tái sinh.
+- Model của agent trong **Agent Detail** đọc từ **journal của chính agent** (`model_change` cuối cùng, hoặc `session_init.resolvedModel`) — xem [26.5](#265-model-và-task-lấy-từ-đâu). Khi journal không có trường đó, màn hình ghi `model: not reported`; CAW không lấy model ưu tiên đã lưu rồi in như model đang chạy.
 
+
+## 26. Mở một agent và đọc hội thoại thật
+
+Chương này mô tả **Agent Detail** — màn hình mở ra khi bạn chạm một dòng agent trong Agents Center (menu **⋯ → Agents (n)**, thẻ **Agents**, hoặc panel Vibe). Xem [24.3](#243-agents-center--hai-cấp-điều-hướng) và [25.6](#256-agents-center-và-agent-detail) để biết cách vào.
+
+![Agent Detail của scout-codebase: nút ←, tên agent, dòng trạng thái, Task, hàng tab Chat / Activity / Results, một lượt hội thoại thật và khối "Raw session bytes (diagnostics)" đang đóng — 390×844](assets/screens/round55/agent-detail-chat.png)
+
+*Ảnh: **Agent Detail**, viewport 390×844. Transcript hiện dưới dạng **hội thoại** (bong bóng người dùng, câu trả lời, dòng tool gom nhóm) — không phải JSONL thô.*
+
+### 26.1 Ba tab: Chat / Activity / Results
+
+Transcript của agent nằm sau ba tab (`role="tablist"`, nhãn **Chat**, **Activity**, **Results**). Chuyển tab **không dựng lại** hàng nào và **không mất vị trí cuộn** của Chat: panel Chat được giữ mounted, chỉ bị ẩn.
+
+| Tab | Hiện gì | Không hiện gì |
+| --- | --- | --- |
+| **Chat** | Transcript dạng hàng: **người dùng**, **trợ lý**, **dòng tool** (các tool call liền kề cùng loại gom thành nhóm hoạt động như ở hội thoại chính), và **dòng notice** khi journal có ghi chú hệ thống. | Không có JSONL thô; chạm hàng tệp của `edit` là no-op (xem 26.5). |
+| **Activity** | Mỗi kết quả tool **đã ghi lại** một dòng, theo đúng thứ tự session ghi: tên tool, trạng thái `failed` hoặc `not reported as failed`, và dòng đầu của kết quả. | Không có mốc thời gian — bản ghi ở đây không mang mốc nào. |
+| **Results** | Payload hoàn tất mà chính kết quả `yield` của session mang, in dạng JSON. | Nếu session không ghi `yield` nào có `data`, tab ghi thẳng **"This session recorded no completion payload."** |
+
+`not reported as failed` **không** phải "đã thành công": đó là điều duy nhất mà cờ boolean của bản ghi nói được. CAW không nâng "không báo lỗi" thành "đã pass".
+
+### 26.2 Vì sao JSONL thô nằm sau "Dữ liệu gốc (Diagnostics)"
+
+Bản ghi gốc của OMP **không** phải transcript. Hai bản ghi đầu của nó là bản ghi kỹ thuật: một slot tiêu đề **độ rộng cố định** (đệm khoảng trắng) và header `{"type":"session"}`. In thẳng tệp đó ra sẽ mở đầu bằng thứ **agent chưa từng nói**.
+
+Vì vậy **Chat** là chế độ đọc mặc định, còn byte thô nằm sau một disclosure đóng sẵn, với chú thích nói rõ nó là gì:
+
+> Raw session bytes (diagnostics) — this is the session file as written, including the fixed-width title slot and the `"session"` header, and it is not a transcript
+
+Chỉ khi bạn mở disclosure đó thì đoạn thô mới được dựng vào DOM (nội dung có thể tới hàng chục MB). Đóng lại là nó biến mất khỏi DOM, không chỉ khỏi màn hình.
+
+`session` được giải mã và **đếm**, nhưng **không** tạo hàng — cũng như các bản ghi `title`, `session_init`, `model_usage`, `custom`. Chúng là sổ sách nội bộ; hai bản ghi có dữ liệu cho người dùng (`session_init`, `model_change`) được đọc như **trường**, không phải in ra như văn xuôi.
+
+### 26.3 Cửa sổ 100 hàng và nút "Hiện thêm"
+
+Journal của subagent có thể tới **6.690 hàng / 52 MB**, nên cửa sổ hàng là bắt buộc, không phải tối ưu hoá:
+
+- Mặc định dựng **100 hàng cuối**.
+- Còn hàng chưa dựng thì đầu vùng cuộn có nút **Show N earlier** kèm câu `N earlier records are not shown.` (số nhiều/số ít đúng ngữ pháp).
+- Mỗi lần bấm thêm **100 hàng**, và vị trí đọc của bạn **được giữ**: hàng cũ chèn lên **phía trên** khung nhìn, nên CAW bù đúng phần chiều cao vừa thêm thay vì để bạn bị đẩy đi.
+
+### 26.4 Dòng "streaming…" và số bản ghi không đọc được
+
+Hai chuyện khác nhau, và CAW không gộp chúng:
+
+- **`streaming…`** — transport trả về **phần đuôi chưa hoàn chỉnh** của một dòng (`carry`). Đó là **nửa bản ghi**, không phải một bản ghi: CAW hiện nó thành một dòng tạm có nhãn, **không** parse, và **không** đưa vào danh sách hàng — nếu parse thì nửa dòng sẽ thành một hàng, rồi khi phần còn lại tới, cùng bản ghi đó lại thành hàng thứ hai.
+- **`N records in this session file could not be read. Everything below that could be read is shown.`** — có N dòng **không giải mã được**. CAW **đếm** chứ không âm thầm bỏ. "Không dựng được gì" và "không có gì đọc được" là hai sự thật khác nhau, và chỉ một trong hai được phép diễn giải thành "agent không nói gì".
+
+Trạng thái rỗng cũng được nói đúng loại của nó: chưa nhận byte nào → *"No transcript bytes have been received for this agent yet."*; có byte nhưng chưa có bản ghi hội thoại → *"This session contains no conversational records yet."*; agent không có tệp session → *"No session file was reported for this agent, so there is no transcript to read."*
+
+### 26.5 Model và task lấy từ đâu
+
+| Thứ hiện ra | Nguồn | Khi thiếu |
+| --- | --- | --- |
+| `model: …` trên dòng trạng thái | Bản ghi `model_change` **cuối cùng** trong journal (journal chỉ ghi thêm, nên cái cuối là cái đang dùng); nếu không có thì `session_init.resolvedModel` | Ghi thẳng **`model: not reported`** — CAW không lấy "model ưu tiên" đã lưu rồi in như model đang chạy |
+| Mục **Task** | `session_init.task` (bản ghi bền của OMP) **ưu tiên**; chỉ khi không có mới dùng task đến từ bus live | Ghi thẳng **"The host reported no task for this agent."** |
+| Ghi chú `live-only` | Chỉ hiện khi task đang hiển thị đến từ bus live: *"This task text is live-only: OMP does not persist it, so it may not survive a reconnect."* | Không hiện — khi bản bền đang được dùng, câu đó sẽ là sai |
+| Phân loại agent | `view.class` trong snapshot của host | Không suy đoán; không hiện thì không in |
+
+Task dài hơn **240 ký tự** nằm sau **Show full task**; task ngắn in thẳng. Bản đầy đủ **chỉ** có ở màn này — màn danh sách giới hạn 2 dòng.
+
+**Nhịp lấy dữ liệu.** Khi agent còn `running`, transcript được hỏi lại mỗi **1,2 s**. Khi agent **không** chạy, CAW dừng sau **4 lần** liên tiếp không có byte mới — nên một agent đã xong sẽ không bị hỏi mãi, nhưng byte cuối vẫn được lấy về.
+
+**Một chi tiết cố ý:** trong Agent Detail, chạm vào một hàng tệp của thao tác `edit` **không** mở diff. Không có lớp Files Center nào phía sau màn này, nên CAW để nó là no-op thay vì mở một trình xem không tồn tại.
+
+## 27. Trung tâm Tệp (Files Center)
+
+**Files Center** là màn hình riêng, chiếm toàn bộ viewport (`position: fixed; inset: 0`), mở từ **hai** đường:
+
+1. Thẻ **Files** trong dashboard (hàng ba thẻ dưới thanh trên).
+2. Menu **⋯ → Files**.
+
+Ngoài ra, chạm vào **một hàng tệp** trong thao tác `edit` ở transcript cũng mở lớp này — nhưng vào thẳng **trình xem diff của tệp đó**; CAW đẩy entry danh sách trước, nên nút Back từ đó vẫn về **danh sách** rồi mới ra khỏi lớp (xem [chương 32](#32-điều-hướng-và-nút-back)).
+
+### 27.1 Dòng đếm, bộ lọc, tìm kiếm, sắp xếp
+
+- **`N files`** dưới tiêu đề **Changed Files**: `N` là số **đường dẫn khác nhau** mà transcript của hội thoại này có ghi lại ít nhất một lần sửa.
+- **Bộ lọc** (chip, `aria-pressed`): **All**, **Modified**, **Added**, **Deleted**. Lọc "Added" chỉ còn tệp có trạng thái `added`, v.v.
+- **Tìm kiếm** (`input type="search"`, placeholder `Filter by path`): khớp **chuỗi con, không phân biệt hoa/thường, trên toàn bộ đường dẫn** — gõ `auth` khớp cả `src/auth.ts` lẫn `packages/x/auth-tokens.ts`.
+- **Sắp xếp** (nút `Sort: …`, mỗi lần chạm đổi vòng): **Changes** → **Path** → **Status**.
+  - `Changes`: số dòng thêm giảm dần, rồi số dòng bỏ giảm dần, rồi theo đường dẫn. Tệp **chưa chứng minh được số** xếp **cuối**, không bị coi là "không thay đổi".
+  - `Path`: đường dẫn đầy đủ tăng dần. `Status`: theo thứ tự cố định (modified, added, deleted, renamed, binary, unknown), rồi theo đường dẫn.
+
+Mọi thứ tự đều kết thúc bằng so sánh đường dẫn, nên danh sách **ổn định** — hàng không nhảy dưới ngón tay bạn khi dữ liệu mới về.
+
+### 27.2 Một hàng tệp gồm gì
+
+Mỗi hàng: **ký tự trạng thái**, **tên tệp** (nhãn chính), **thư mục** (nhãn phụ), và **số dòng**. Tên tệp và thư mục đều bị **cắt bằng dấu `…`** khi dài, nên một đường dẫn dài không bao giờ làm hàng cao lên. Ký tự trạng thái: `A` thêm mới, `M` sửa, `D` xoá, `R` đổi tên, `bin` nhị phân, `?` chưa xác định, `✕` **thao tác thất bại**.
+
+Ba nhãn chỉ hiện khi có bằng chứng:
+
+| Nhãn | Khi nào | Nghĩa |
+| --- | --- | --- |
+| `edits ×N` | Đường dẫn đó được sửa nhiều hơn một lần | Số **sự kiện sửa** đã quan sát, không phải N phiên bản |
+| `failed` | Có ít nhất một sự kiện thất bại | Thao tác đó không áp dụng được gì |
+| `truncated` | Có diff bị host cắt | Con số là **sàn**, không phải tổng thật |
+
+> **Nguồn gốc dữ liệu — đọc kỹ.** Đây là **các thay đổi được ghi lại trong transcript** của hội thoại này, **không phải trạng thái git hiện tại** của workspace. Không có kênh git nào ở đây: một hàng "đã sửa" nghĩa là "**host đã báo** có sửa đường dẫn này". Và nó chỉ bao phủ **cửa sổ lịch sử đã tải** — lịch sử được phân trang theo lô **500 entry**, nên các sửa đổi **cũ hơn** có thể nằm ngoài cửa sổ đó. Câu này được in ngay trên màn hình, không phải chỉ nói trong tài liệu.
+
+### 27.3 Chạm vào một tệp — trình xem diff
+
+Chạm một hàng mở **trình xem diff của đúng tệp đó**:
+
+- **Diff thật**, tô màu theo loại dòng (xem [chương 28](#28-màu-sắc-diff-và-cách-đọc)).
+- **Điều hướng theo hunk**: nút **↑** / **↓** nhảy giữa các hunk; nhảy tới hunk nằm ngoài phần đã dựng thì CAW dựng thêm trước khi nhảy.
+- **Nút `Wrap lines`** (`aria-pressed`): bật thì dòng dài tự xuống hàng thay vì cuộn ngang.
+- **Nút `Copy patch`**: SAO CHÉP một patch dạng unified được dựng lại từ diff quan sát được — chuyển gutter ` 12|` / `-7|` / `+9|` về `+` / `-` / khoảng trắng và neo lại hunks bằng `@@`. Kết quả hiện `Copied` hoặc `Copy failed — clipboard unavailable`.
+- **Dòng meta**: số dòng (`+a −d`), số hunk, `N edits observed` khi tệp được sửa nhiều lần.
+- **Giới hạn lần dựng đầu**: tối đa **50 hunk** hoặc **400 dòng**; phần bị giữ lại có nút **`Show all — N more hunks, M more lines hidden`** nói **đúng số còn thiếu**, không cắt im lặng.
+- **`Technical details`**: disclosure đóng sẵn chứa payload thô của host cho tệp đó (JSON). Không có gì thô nằm trên màn hình cho tới khi bạn yêu cầu.
+
+Trạng thái đặc biệt, nói thẳng thay vì vẽ một khung rỗng: tệp thất bại → in **văn bản lỗi của host** (`The host reported this edit failed and sent no error text.` nếu host không gửi lỗi) **thay cho** diff; `The host sent no diff for this file.` khi không có diff; `The host truncated this diff, so it is a prefix of the edit and its counts are a floor.` khi diff bị cắt.
+
+**Số dòng gutter không đọc được thì để TRỐNG.** Một số dòng sai trong trình xem tệp nguy hiểm hơn một số dòng thiếu, và host không gửi số phía đối diện cho dòng ngữ cảnh.
+
+**Hai trạng thái rỗng riêng biệt:** *"No edits have been observed in this conversation's transcript yet."* (chưa có gì), và *"No modified files in this conversation."* / *"No file path matches “abc”."* (bộ lọc/tìm kiếm lọc sạch).
+
+*Không có ảnh chụp cho màn **Files Center** trong vòng này — bộ spec E2E của nó chỉ đo DOM và màu, không ghi ảnh. Phần này vì vậy không có hình.*
+
+## 28. Màu sắc diff và cách đọc
+
+![Diff trong hội thoại: dòng `--- / +++` được tô nền, dòng `-` đỏ, dòng `+` xanh, dòng ngữ cảnh trung tính, header `@@ -1,4 +1,6 @@` mờ hơn code — 390×844](assets/screens/round55/diff-colors-fixed.png)
+
+*Ảnh: một thẻ tool có thay đổi tệp (`write`) đã mở trong hội thoại, viewport 390×844 — dòng thêm xanh, dòng bỏ đỏ, ngữ cảnh trung tính.*
+
+### 28.1 Các loại dòng trong diff
+
+| Loại dòng | Màu | Ghi chú |
+| --- | --- | --- |
+| Dòng **thêm** (`+`) | Chữ **xanh**, nền xanh nhạt | Phải đọc ra được là xanh **kể cả khi chỉ nhìn chữ**, không chỉ nhờ nền |
+| Dòng **bỏ** (`-`) | Chữ **đỏ**, nền đỏ nhạt | Đối xứng với dòng thêm |
+| Dòng **ngữ cảnh** | Trung tính (không tô) | Không có số phía file mới: host không gửi số đó |
+| Header hunk (`@@ … @@`) | **Mờ hơn code**, khác hẳn dòng ngữ cảnh | Là mốc định vị, không phải nội dung |
+| Dòng **ngăn cách** (`…` hoặc dòng trống) | Mờ, **không chọn được** | Là chỗ host ngừng hiện các dòng không đổi — nó **đóng** hunk, nhờ vậy nút "hunk kế" mới có nghĩa |
+
+Quy tắc màu này được đo bằng computed style trên DOM thật, ở **cả dòng chữ lẫn nền**, và ngưỡng tương phản chữ đạt AA (đo được khoảng 6,65:1 cho dòng thêm và 6,19:1 cho dòng bỏ trên theme hiện tại).
+
+### 28.2 `+N −M` nghĩa là gì — và không nghĩa là gì
+
+`+N −M` là **tổng các sự kiện sửa đã quan sát** cho đường dẫn đó (trường `observedAdditions` / `observedDeletions`). Nó **không** phải net diff của tệp: lần sửa thứ hai có thể đã xoá đúng thứ lần đầu thêm vào, nhưng bạn vẫn thấy cả hai được cộng lại. Vì vậy chữ `observed` mới là tên trường.
+
+Ba câu thay cho con số — mỗi câu nói một sự thật khác nhau:
+
+| Chữ hiện ra | Nghĩa |
+| --- | --- |
+| **`not applied`** | Thao tác sửa **thất bại**; không có gì được áp dụng, nên mọi con số sẽ là lời khẳng định về tệp mà host chưa hề làm |
+| **`counts unavailable`** (hoặc *"counts unavailable"* / *"The host sent no diff for this operation, so no added/removed counts are shown."*) | Không có diff nên **không có** số — không in một phần tổng |
+| **`counts partial`** | Diff bị host **cắt**: con số là **sàn**, phần còn lại không đọc được |
+
+Tổng ở cấp hội thoại (dashboard và dòng nhóm) **chỉ** được in khi **cả hai** tổng đều biết. Thiếu một cái là bỏ con số thay vì in tổng cụt. Văn xuôi của trợ lý **không** bao giờ là nguồn: câu "tôi đã sửa ba tệp" không phải bản ghi thay đổi tệp.
+
+### 28.3 `×N` và dòng sửa lặp lại
+
+Một đường dẫn được sửa N lần vẫn là **một hàng** duy nhất:
+
+- Trong Files Center: nhãn **`edits ×N`**.
+- Trong trình xem diff: dòng meta ghi **`N edits observed`**.
+- Trạng thái của hàng là trạng thái của **quan sát cuối cùng** (điều mới nhất host nói về đường dẫn đó) — trừ **đổi tên**: một `rename` là sự kiện về danh tính nên nó **thắng** và không bị một `update` sau đó đảo ngược.
+
+`lastDiff` mà trình xem vẽ là **diff của lần sửa gần nhất**, không phải nội dung hiện tại của tệp.
+
+### 28.4 Dòng sửa "phẳng" — sửa tệp là một hàng tệp, không phải một bức tường diff
+
+![Thẻ `edit` đã mở ở dạng phẳng: một hàng tệp `M advisor.ts +2 −1` và nút "View technical details"; không có diff nào được dựng trong transcript — 390×844](assets/screens/round55/tool-activity-flat.png)
+
+*Ảnh: thẻ `edit` mở ra ở dạng **phẳng**, viewport 390×844. Mỗi tệp là **một hàng**; diff chỉ hiện trong trình xem riêng.*
+
+Với thao tác `edit`, CAW cố ý chỉ dựng **một cấp**: danh sách tệp, mỗi tệp **một hàng** (một nút). **Không** có diff nào được dựng trong transcript — bấm vào hàng tệp là mở trình xem ở [chương 27.3](#273-chạm-vào-một-tệp--trình-xem-diff). Hàng tệp hiện kèm **số dòng thật** hoặc một trong ba câu ở bảng 28.2, và nếu host gửi **nhận xét LSP** cho tệp đó thì nó in ngay dưới dạng văn bản (đó là thứ diff không thể hiện được).
+
+**`View technical details`** mở payload thô của lần gọi (JSON tham số + văn bản transport) — đóng sẵn, chỉ dựng nội dung khi mở. Khi host không gửi kết quả có cấu trúc, phần thô này được in thẳng ra chứ không giấu sau nút, vì một hàng CAW không đọc được **không** được phép trông như một thành công rỗng.
+
+## 29. Dòng thời gian Hoạt động (Activity)
+
+**Activity Timeline** là một modal (`max-height: 85vh`) mở từ menu **⋯ → Activity** hoặc thẻ **Activity**. Nó mở ở **đuôi** (sự kiện mới nhất trước), có nút **Load older activity** để lật về quá khứ, và gộp các trang theo `seq` nên không sinh hàng trùng.
+
+Mỗi hàng gồm: **nhãn**, mốc thời gian địa phương, dòng chi tiết (nếu payload nói được điều gì), và một disclosure **`Raw event #<seq>`** chứa payload thô. Tiêu đề ngày (`Today`, hoặc ngày theo locale) chỉ hiện khi **đổi ngày** — không bịa. Không có gì thì ghi *"No activity recorded for this conversation yet."*
+
+### 29.1 Sự kiện ghi lại **bước vòng đời**, không phải kết quả
+
+Đây là điều quan trọng nhất của chương này: **một sự kiện chỉ chứng minh rằng một bước đã được GHI LẠI.** Không payload nào mang thời lượng, mã thoát, diff, số tệp hay kết quả test — nên **không** nhãn nào được phép khẳng định thành công, hoàn tất, thời gian chạy hay một con số.
+
+| Nhóm | `type` | Nhãn hiện ra | Chi tiết kèm theo |
+| --- | --- | --- | --- |
+| **Khởi chạy** | `launch.refused` | `Launch refused` | Lý do bị từ chối: `Another writer already owns this native session.`, `The concurrent agent limit is reached.`, hoặc **chính văn bản của host** — mã lạ không bị đoán nghĩa |
+| | `agent.launch_discarded` | `Launch discarded` | Tiến trình vừa khởi động **đã dừng được**; kèm lỗi ghi lại nếu có |
+| | `agent.launch_unrecorded` | `Launch unrecorded` | Tiến trình vừa khởi động **đã KHÔNG dừng được** — hai nửa này khác nhau và tên loại là thứ duy nhất mang sự thật đó |
+| **Vòng đời agent** | `agent.launched` | `Agent started` | `Terminal session <tên>` |
+| | `agent.hosted` | `Agent connected` | `Native session <id>` |
+| | `agent.exited` | `Agent process exited` | `It exited during startup.` khi payload nói vậy |
+| | `agent.stopped` | `Agent stopped` | `The process was already gone.` khi payload nói vậy |
+| | `agent.publish_timeout` | `Agent did not publish in time` | `Waited 30 s.` (dưới 1 giây giữ đơn vị ms: `Waited 1500 ms.`) |
+| | `agent.stop_timeout` | `Agent did not stop in time` | như trên |
+| **Handoff** | `handoff-start` | `Handoff started` | `Native session <id>` |
+| | `handoff-cancelled` | `Handoff cancelled` | Không có — hàng nội bộ này được vẽ **mờ hơn** (nó vẫn không bị giấu: đây là bản ghi duy nhất rằng bước đó đã xảy ra) |
+
+Bảng trên liệt kê **11 giá trị `type` khác nhau** — đúng bằng số khoá trong bảng từ vựng của giao diện, và đúng bằng số loại mà mã nguồn thực sự ghi (kiểm bằng cách grep `recordEvent` trong `packages/runtime/src/supervisor.ts` và `apps/server/src/app.ts`). Nhiều loại có nhiều biến thể payload dẫn tới nhãn hoặc dòng chi tiết khác nhau — `agent.exited` có/không `duringStartup`, `agent.stopped` có/không `alreadyGone`, `launch.refused` với từng mã từ chối — nên cổng kiểm tra độ trung thực của bảng này liệt kê **15 ca payload** trên 11 loại đó. `agent.stop_requested` từng có trong danh sách nhưng đã bị bỏ vì **không có nơi nào trong mã sinh ra nó**.
+
+Nhãn dừng ở **"started"** là có chủ đích: một lần bắt đầu chứng minh **một thao tác dán đã xảy ra**, không bao giờ chứng minh việc nén đã đáp xuống.
+
+`type` là **chuỗi mở**, không phải union: một loại máy này chưa từng thấy vẫn phải render được. Loại lạ rơi vào nhãn suy ra từ chính chữ của nó (viết hoa từng từ) và **không có dòng chi tiết** — bịa chi tiết cho payload lạ đúng là kiểu nói quá mà chương này cấm.
+
+### 29.2 Vì sao payload thô bị gập lại
+
+Vai trò của hàng là **ý nghĩa**, không phải bằng chứng. Payload thô nằm sau **`Raw event #<seq>`**, và chỉ được dựng khi bạn mở. Payload rỗng ghi `No payload recorded.`
+
+### 29.3 Activity **không** cho bạn biết những gì
+
+Nói thẳng, vì đây là chỗ dễ bị hiểu sai nhất:
+
+- **Không có kết quả test.** Không có sự kiện nào nói một test đã pass hay fail.
+- **Không có mã thoát của lệnh.** Một tool chạy xong không sinh sự kiện nào ở đây.
+- **Không có thời lượng.** Không có "mất 12 s" ở bất kỳ hàng nào; con số duy nhất liên quan thời gian là **timeout** đã chờ (`Waited 30 s.`), và nó là tham số, không phải thời gian thực thi.
+- **Không có diff, số tệp, số dòng.** File thay đổi nằm ở thao tác `edit` trong transcript và ở Files Center.
+- **Không chứng minh một tiến trình còn sống.** `agent.stopped` là "đã ghi lại bước dừng", không phải một phép đo hiện tại.
+- **Không suy ra được agent có đang chạy hay không.** Trạng thái live nằm ở dòng trạng thái trên thanh trên.
+
+Nói ngắn: **Activity là sổ ghi các bước vòng đời**, không phải bảng kết quả.
+
+## 30. Menu hành động trên di động
+
+Nút **⋯** (More actions) trên thanh trên mở một **disclosure** — danh sách nút phẳng, **không** phải `role="menu"`. Đây là chủ đích: menu thật hứa hẹn điều hướng bằng phím mũi tên và roving tabindex; thứ này chỉ đi bằng **Tab**, nên gán role đó sẽ là một lời nói dối về trợ năng.
+
+### 30.1 Ba nhóm
+
+| Nhóm | Mục | Việc nó làm |
+| --- | --- | --- |
+| **Go to** | `Activity` | Mở Activity Timeline ([chương 29](#29-dòng-thời-gian-hoạt-động-activity)) |
+| | `Files` | Mở Files Center ([chương 27](#27-trung-tâm-tệp-files-center)) |
+| | `Agents (n)` | Mở Agents Center |
+| | `Review prompts (n)` | Mở sheet xem lại prompt chưa xác nhận — **chỉ hiện khi n > 0** |
+| **Panels** | `Advisor` / `Advisor (n)` | Mở panel Advisor; `(n)` là số ghi chú **đã ghi lại** |
+| | `Vibe mode` | Mở panel Vibe |
+| | `Model settings` | Mở sheet cấu hình model |
+| **Session** | `Handoff context` | Nén ngữ cảnh tại chỗ; **chỉ hiện** khi thông tin conversation đã tải xong, và có thể ở trạng thái **vô hiệu hoá kèm lý do** |
+| | `Stop OMP session` | Kết thúc tiến trình OMP do CAW quản lý; **chỉ hiện** với session `managed` |
+
+**Thao tác nguy hiểm được tách riêng.** Nhóm **Session** là nhóm **cuối**, có đường kẻ ngăn cách phía trên, và hai nút trong đó giữ **đủ 44px** chiều cao (các hàng chỉ để đọc là 40px). `Stop OMP session` mang thêm màu `danger`. Lý do: đây là hai thao tác mà một cú chạm nhầm tốn nhiều nhất, và cả hai đều **kết thúc** một thứ gì đó — chúng không thuộc cạnh một hàng điều hướng.
+
+**Không có gì bị "mất" khi mục không hiện.** `Advisor` và `Vibe mode` **luôn** có mặt trong menu dù chip trên thanh trên không hiện (chip Adv chỉ hiện khi có blocker — xem [chương 31](#31-chỉ-báo-advisor)), nên không ai bị kẹt vì không tìm thấy đường vào panel.
+
+### 30.2 Đóng menu bằng cách nào
+
+Ba đường, và cả ba đều thật:
+
+| Cách | Chi tiết |
+| --- | --- |
+| **Chạm ra ngoài** | Listener `pointerdown` trên `document`; chạm vào bất cứ đâu **không** nằm trong `.header-menu` hoặc `.header-menu-button` là đóng. Dùng `closest()` trên phần tử đích, không dùng tham chiếu node đã lưu — re-render thay phần tử, tham chiếu cũ sẽ trả lời từ node không còn trên màn hình |
+| **Phím Escape** | Listener `keydown` trên `document`; đóng và **trả focus về nút ⋯** |
+| **Chọn một mục** | Chạm một mục đóng menu rồi mới thực hiện hành động của nó |
+
+**Nút Back của trình duyệt cũng đóng menu — và KHÔNG rời khỏi hội thoại.** Mở menu đẩy một entry `{cawMenu:true, conversationId}`; listener `popstate` áp trạng thái đó bằng cách **mở lại menu** (đúng cho Forward). Khi bạn đóng menu bằng chạm ngoài hoặc Escape, entry của chính nó được **vô hiệu hoá bằng `replaceState`** (không phải `back()`), nên một cú Back sau đó không thể mở lại một menu bạn đã bỏ. Back khi không còn entry nào của CAW thì chỉ **xoá trạng thái lớp** — màn hình vẫn là hội thoại.
+
+Entry của menu mang `conversationId`: một entry do **hội thoại khác** đẩy sẽ bị **từ chối**, vì hành động theo nó là hiện menu của hội thoại A trên hội thoại B.
+
+*Không có ảnh chụp cho menu hành động trong vòng này — spec E2E của nó đo DOM và thứ tự Tab, không ghi ảnh. Phần này vì vậy không có hình.*
+
+## 31. Chỉ báo Advisor
+
+### 31.1 Chip trên thanh trên
+
+**Chip `Adv ⚠` chỉ hiện khi có một ghi chú mức `blocker` đã được ghi lại**, và nó là chip duy nhất của Advisor:
+
+- Nhãn trợ năng đọc đúng sự thật: *"Advisor recorded a blocker among N notes."* — quá khứ, đã ghi lại.
+- Chạm chip mở panel Advisor.
+- **Số N nằm ở menu, không ở chip.** Mục menu là `Advisor (n)` với nhãn trợ năng *"Advisor (N recorded notes)"*. Nhờ vậy không mất thông tin nào khi chip bị ẩn.
+
+### 31.2 Ghi chú lịch sử **không** phải cảnh báo đang chạy
+
+Một con số ghi chú đứng thường trực (`Adv 3`) sẽ đọc thành "advisor đang báo động ngay lúc này" — một khẳng định mà dữ liệu **không** đỡ được:
+
+- Transport hiện tại **không** mang trạng thái bật/tắt của advisor. Một ghi chú chứng minh advisor **đã chạy**; nó không nói advisor **đang** chạy.
+- Ghi chú là các mục OMP đã viết **vào transcript** — có thể đã vài phút hoặc vài giờ.
+- Vì vậy cờ nội bộ dùng để hiện chip chỉ được phép mang nghĩa "**một blocker đã được ghi lại**", không bao giờ "**có gì đó sai ngay bây giờ**".
+
+### 31.3 Mức và cách đọc
+
+Ba mức: `nit` < `concern` < `blocker`. **Mức thiếu hoặc không nhận ra được coi là `nit`**, không bao giờ bị đoán lên cao hơn — đoán lên là biến tiếng ồn thành blocker. Ghi chú lỗi định dạng (không có văn bản) bị **bỏ**, không render thành mục rỗng: một thẻ advisor trống đọc như "advisor không có gì để nói".
+
+Panel Advisor **không** có công tắc bật/tắt — `advisor.enabled` và `/advisor on|off` là thao tác **bên trong tiến trình OMP qua terminal** (xem [chương 22](#22-advisor--mô-hình-review-thứ-hai)).
+
+## 32. Điều hướng và nút Back
+
+Cả ba lớp (Agents, Files, menu) đều **không** unmount hội thoại: hội thoại ở dưới vẫn mounted (đánh `inert`, nên bỏ khỏi cây trợ năng **và** thứ tự Tab), giữ nguyên socket, transcript, bản nháp và vị trí cuộn.
+
+![Lớp Agents Center đang mở trên hội thoại: nút ←, tiêu đề `Agents (2)`, chip lọc All / Running / Finished và hai dòng agent — 390×844](assets/screens/round55/round54-agents-layer.png)
+
+*Ảnh: **Agents Center** (lớp cấp 2) phủ toàn viewport, viewport 390×844. Đây là ảnh vòng 54 được dùng lại vì **cách vào lớp này không đổi**; menu hành động và Files Center không có ảnh riêng trong vòng này.*
+
+### 32.1 Bảng đầy đủ
+
+| Đang ở | Nút **←** trong app | Nút Back của trình duyệt |
+| --- | --- | --- |
+| **Hội thoại** (không lớp nào mở) | Rời conversation, về project (hoặc danh sách project) | **Không** do CAW xử lý: đây là Back bình thường của trình duyệt (CAW chỉ đẩy entry cho ba lớp của nó) |
+| **Hội thoại → Menu ⋯** | Menu không có nút ←; đóng bằng chạm ngoài, Escape, hoặc chọn một mục | Đóng menu, **ở lại hội thoại** |
+| **Hội thoại → Agents Center** (danh sách) | Đóng lớp, về hội thoại; đồng thời dừng theo dõi transcript của agent đang xem | Pop entry `cawAgents:"list"` → về hội thoại, `inert` được bỏ, ô soạn tin gõ được lại |
+| **Agents Center → Agent Detail** | Về **danh sách** agent (không phải về hội thoại) | Pop entry `cawAgents:"detail"` → về **danh sách**, không phải hội thoại |
+| **Agent Detail** (tab Chat / Activity / Results) | Ba tab **không** phải cấp điều hướng: chuyển tab chỉ đổi panel, nút ← vẫn về danh sách | Như trên — Back về danh sách, Back lần nữa mới ra hội thoại |
+| **Hội thoại → Files Center** (danh sách) | Đóng lớp, về hội thoại | Pop entry `cawFiles:"list"` → về hội thoại |
+| **Files Center → trình xem diff** | Về **danh sách** tệp; entry chi tiết của chính nó được nghỉ | Pop entry `cawFiles:"detail"` → về **danh sách**; Back lần nữa mới ra hội thoại |
+| **Mở diff từ một hàng tệp trong transcript** | Về **danh sách** tệp — CAW đã đẩy **cả hai** entry (`list` rồi `detail`) trước khi mở, nên đường đi y hệt như vào từ Files Center | Như trên: Back về danh sách, Back nữa mới ra hội thoại |
+
+**Vì sao thứ tự này ổn định.** Nút **←** trong app áp trạng thái **ngay lập tức** rồi mới **nghỉ** entry lịch sử của chính nó — nhưng chỉ nghỉ khi `history.state` hiện tại thật sự là entry của CAW. Nếu một cú Back đã tiêu thụ entry đó (hoặc host từ chối `pushState`), CAW **không** gọi `back()`, vì làm vậy sẽ ném bạn ra khỏi app. Một listener `popstate` duy nhất được gắn một lần và gỡ khi unmount, nên điều hướng lặp lại không chồng listener.
+
+**Hai quy tắc chống trạng thái cũ:**
+
+- Mỗi entry mang `conversationId`. Một entry do **hội thoại khác** đẩy bị **từ chối** — nếu không, Back sẽ hiện agent đã chọn của hội thoại A trên roster của B.
+- Khi ConversationView unmount (bạn đóng hội thoại), một entry lớp còn sót lại bị **nghỉ bằng `replaceState`**; không có nó, cú Back tiếp theo của bất kỳ ai sẽ tiêu thụ entry đó và mở lại một lớp cho hội thoại không còn mounted.
+
+**Đường đi bất thường:** nếu agent bạn đang xem **rời roster**, màn hình ghi **"Agent unavailable"** kèm giải thích thay vì im lặng quay về danh sách; nút ← từ đó về danh sách mới nhất. Nếu tệp trong trình xem **không còn** trong danh sách (transcript đổi dưới chân bạn), CAW ghi *"`<path>` is no longer in this conversation's change list."* và rơi về danh sách thay vì vẽ một lớp trắng.
+
+## 33. Giới hạn đã biết
+
+Nói thẳng những gì **chưa** được xác minh, để không có chương nào ở trên bị đọc thành một lời hứa mạnh hơn bằng chứng:
+
+- **Không có xác minh production có xác thực trong vòng này.** Các ca đo và ảnh chụp được thực hiện trên server E2E cục bộ với host Collab giả và fixture tạo sẵn, **không** phải trên một bản triển khai production đã đăng nhập.
+- **Không có thử nghiệm trên iPhone thật.** Bàn phím ảo, `safe-area`, và việc iOS đuổi tiến trình tab đều được xử lý trong mã nhưng **chưa** được kiểm trên máy thật; Playwright headless không mô phỏng được bàn phím ảo phần mềm (các ca đo được đánh dấu `keyboard-unverified`).
+- **Files Center là view của các sự kiện trong transcript, không phải git.** Không có truy cập git trên transport này, và chỉ **cửa sổ lịch sử đã tải** (phân trang 500 entry) được bao phủ. Xem lại callout ở [27.2](#272-một-hàng-tệp-gồm-gì).
+- **Activity không thể chứng minh kết quả test.** Không payload sự kiện nào mang kết quả test, mã thoát, diff hay số tệp — xem danh sách đầy đủ ở [29.3](#293-activity-không-cho-bạn-biết-những-gì).
+- **Tab Results chỉ hiện payload hoàn tất khi journal có ghi `yield`.** Không có thì nó ghi thẳng *"This session recorded no completion payload."* — CAW không bịa một bản tóm tắt thay cho nó.
+- **Một thao tác sửa thất bại không mang đường dẫn tệp trong payload của OMP.** Payload thất bại là `{diff, errorKind}` (hoặc `{isError, error}`), **không có** `path`. CAW vì vậy lấy đường dẫn từ **tham số của lần gọi**; khi cả hai đều không có đường dẫn, sự kiện bị **bỏ** thay vì bị xếp vào một đường dẫn không ai nói ra. Hệ quả: một số thất bại chỉ được báo ở **cấp lần gọi**, không hiện thành hàng tệp riêng trong Files Center.
+- **Số dòng gutter có thể trống.** CAW chỉ vẽ số khi gutter của host mang nó; số còn lại để trống thay vì tính bằng một offset host không gửi. Header `@@` chỉ được dựng khi **mọi** dòng của hunk khớp với dự đoán — một số dòng sai trong patch nguy hiểm hơn một patch không có số.
+- **Ảnh chụp trong chương này là ảnh của vòng kiểm thử này, không phải ảnh baseline đã track từ trước.** `agent-detail-chat.png`, `diff-colors-fixed.png`, `tool-activity-flat.png` được ghi bởi các spec E2E tương ứng ở viewport 390×844; `round54-agents-layer.png` là ảnh vòng 54 dùng lại cho lớp Agents Center (cách vào lớp này không đổi).
+- **Files Center và menu hành động không có ảnh chụp trong vòng này** — hai bộ spec của chúng chỉ đo DOM/thứ tự Tab và không ghi ảnh. Các mục tương ứng ở trên vì vậy không có hình minh hoạ.
