@@ -255,6 +255,18 @@ export function registerBridgeRoutes(app: FastifyInstance<HttpServer>, deps: Bri
           `The bridge did not answer in time (${outcome.reason}), and the current mode does not yet show the change. The transition may still be running; re-read the state rather than assuming it failed.`,
         ));
       }
+      // Re-verify AFTER the write. The check above happens before `setMode`, and a
+      // `/resume` inside the same TUI between the two would mutate the session the
+      // process moved to. Re-reading narrows that window to nothing observable and
+      // reports the attribution problem rather than returning a success that
+      // belongs to another session. It cannot make the window impossible — only a
+      // session-scoped transport could — so it is reported as a refusal, not
+      // hidden.
+      const settled = await resolved.client.readState();
+      if (settled.ok) {
+        const drifted = sessionMismatch(verdict.conversation, settled.state.sessionId);
+        if (drifted !== null) return reply.code(409).send(fail("conflict_owner", drifted));
+      }
       // Verbatim: OMP's refusal is the answer, and the state it carries is what
       // makes it actionable. The route adds nothing and removes nothing.
       return ok(normalizeResult(outcome.result));

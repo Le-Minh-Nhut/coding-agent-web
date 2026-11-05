@@ -66,22 +66,35 @@ export interface AgentView {
 }
 
 /**
- * Ids of Vibe workers, read from the session journal.
+ * Turn worker evidence into the id set the classifier consumes.
  *
- * The caller supplies the parsed `vibe-session-lifecycle` records it already has.
- * A malformed record is skipped: a record we cannot read is not evidence that a
- * worker exists, and it is certainly not evidence that one may be killed.
+ * Accepts **either** shape, because both are real in this codebase and mixing
+ * them silently is exactly how this gate became dead once already:
+ *
+ *  - `string[]` — what `GET /vibe` returns. The server has already replayed the
+ *    journal (spawn/tombstone/tombstone-revoked) and hands over final ids, so the
+ *    owner/parent checks have happened there;
+ *  - raw `vibe-session-lifecycle` records — the shape a caller reads itself, where
+ *    a record without an owner/parent pair cannot be attributed and is skipped.
+ *
+ * A string is kept verbatim; anything else must carry an id AND the owner/parent
+ * pair. An unreadable entry is dropped in both cases: "I cannot read this" is not
+ * evidence that a worker exists, and certainly not that one may be killed.
  */
-export function vibeWorkerIds(lifecycleRecords: readonly unknown[]): Set<string> {
+export function vibeWorkerIds(evidence: readonly unknown[]): Set<string> {
   const ids = new Set<string>();
-  for (const record of lifecycleRecords) {
-    if (record === null || typeof record !== "object") continue;
-    const candidate = record as { id?: unknown; ownerId?: unknown; parentSessionId?: unknown };
-    if (typeof candidate.id !== "string" || candidate.id === "") continue;
+  for (const entry of evidence) {
+    if (typeof entry === "string") {
+      if (entry !== "") ids.add(entry);
+      continue;
+    }
+    if (entry === null || typeof entry !== "object") continue;
+    const record = entry as { id?: unknown; ownerId?: unknown; parentSessionId?: unknown };
+    if (typeof record.id !== "string" || record.id === "") continue;
     // A record with no owner or parent cannot tie the worker to this director,
     // so it is not proof of ownership and is ignored.
-    if (typeof candidate.ownerId !== "string" || typeof candidate.parentSessionId !== "string") continue;
-    ids.add(candidate.id);
+    if (typeof record.ownerId !== "string" || typeof record.parentSessionId !== "string") continue;
+    ids.add(record.id);
   }
   return ids;
 }

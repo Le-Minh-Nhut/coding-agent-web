@@ -120,6 +120,22 @@ describe("B01 — only a proven Vibe worker may be a Kill target", () => {
     snapshot({ id: "sub-2" }),
   ];
 
+  it("accepts the server's id list, which is the shape the route actually returns", () => {
+    // Regression for a real defect: `GET /vibe` returns `workerIds: string[]`, and
+    // the classifier only understood raw journal records. Every id was therefore
+    // dropped, no agent was ever classified as a worker, and the Kill control (and
+    // the worker chip count) were unreachable — compiled clean, because the state
+    // was typed `unknown[]`.
+    expect([...vibeWorkerIds(["w1", "w2"])]).toEqual(["w1", "w2"]);
+    const views = agentViews([snapshot({ id: "w1" })], vibeWorkerIds(["w1"]));
+    expect(views[0]!.class).toBe("worker");
+    expect(views[0]!.canKillWorker).toBe(true);
+  });
+
+  it("still drops unreadable or unattributable evidence in both shapes", () => {
+    expect([...vibeWorkerIds(["", 42, null, {}, { id: "x" }, { id: "y", ownerId: "main" }])]).toEqual([]);
+  });
+
   it("recognises a worker only from a journal lifecycle record", () => {
     // sub-2 is a real worker; sub-1 is an ordinary subagent. Both are
     // `kind: "sub"` and both are running, so only the journal record separates them.
@@ -129,8 +145,9 @@ describe("B01 — only a proven Vibe worker may be a Kill target", () => {
       { id: "sub-3", ownerId: "main" },
       { id: "sub-4", parentSessionId: "sess" },
       null,
-      "not-a-record",
     ]);
+    // Only the fully-attributable record yields an id. A record missing its owner
+    // or parent is not proof of ownership and must not produce one.
     expect([...ids]).toEqual(["sub-2"]);
   });
 

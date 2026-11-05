@@ -222,18 +222,24 @@ export const MessageRow = memo(function MessageRow({ message }: { message: Displ
             on a phone. The full string stays in `message.text` — Copy reads it and
             expanding mounts all of it, so nothing is deleted, only deferred. */}
         {expanded && <pre className="message-content" style={{ overflowX: "auto", whiteSpace: "pre" }}><code>{message.text}</code></pre>}
-      </details> : blocks && message.role !== "notice" ? (
-        <div className="message-content">{blocks.map((block, index) => renderTranscriptBlock(block, index))}</div>
-      ) : message.role === "user" ? (
-        /* A pasted multi-page task used to occupy whole screens (Phase 4). Only
-           user rows collapse: an assistant answer is what the reader came for, and
-           hiding it by default would be the wrong trade. The body stays mounted in
-           full and `Copy` reads `message.text` verbatim, so nothing is lost — only
+      </details> : message.role === "user" ? (
+        /* A pasted multi-page task used to occupy whole screens (Phase 4).
+           This branch MUST precede the `blocks` one: durable user rows always
+           carry blocks (`transcript.ts:315`), so testing blocks first meant a
+           long prompt collapsed while optimistic and then expanded again the
+           moment the host echo replaced the row. The body is always mounted and
+           `Copy` reads `message.text` verbatim, so nothing is lost — only
            deferred. `identity` is the durable row id, never an index, so two
            identical prompts expand independently. */
         <CollapsibleMessage identity={message.id} text={message.text}>
-          <div className="message-content">{renderMarkdown(message.text)}</div>
+          {blocks ? (
+            <div className="message-content">{blocks.map((block, index) => renderTranscriptBlock(block, index))}</div>
+          ) : (
+            <div className="message-content">{renderMarkdown(message.text)}</div>
+          )}
         </CollapsibleMessage>
+      ) : blocks && message.role !== "notice" ? (
+        <div className="message-content">{blocks.map((block, index) => renderTranscriptBlock(block, index))}</div>
       ) : (
         <div className="message-content">{message.role === "notice" ? <p>{message.text}</p> : renderMarkdown(message.text)}</div>
       )}
@@ -345,7 +351,14 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
    */
   const [vibeState, setVibeState] = useState<VibeStateResponse | null>(null);
   /** Worker ids the server proved from the journal; empty ⇒ no worker controls. */
-  const [vibeWorkerIdsFromServer, setVibeWorkerIdsFromServer] = useState<readonly unknown[]>([]);
+  /**
+   * Worker ids the server proved from the journal; empty ⇒ no worker controls.
+   *
+   * Typed `string[]` because that is what `GET /vibe` returns. The earlier
+   * `readonly unknown[]` is exactly why a shape mismatch here compiled clean
+   * while leaving the Kill gate permanently closed.
+   */
+  const [vibeWorkerIdsFromServer, setVibeWorkerIdsFromServer] = useState<readonly string[]>([]);
   const [vibeBusy, setVibeBusy] = useState(false);
   const [vibeError, setVibeError] = useState<string | null>(null);
   const [showMenu, setShowMenu] = useState(false);
@@ -495,6 +508,21 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
   const historyModeGenerationRef = useRef(0);
   const conversationIdRef = useRef(conversationId);
   conversationIdRef.current = conversationId;
+  /**
+   * Per-conversation UI state must not survive a switch (B11).
+   *
+   * A selected agent id, a mode, or a worker-id list from conversation A would
+   * otherwise be resolved against conversation B's roster — showing, or worse
+   * gating on, the wrong conversation's data. Keyed on `conversationId` so the
+   * reset happens exactly when the switch is observed.
+   */
+  useEffect(() => {
+    setAgentNav({ open: false, selectedId: null });
+    setVibeState(null);
+    setVibeWorkerIdsFromServer([]);
+    setVibeError(null);
+    setVibeBusy(false);
+  }, [conversationId]);
   const modelDraftRef = useRef(modelDraft);
   modelDraftRef.current = modelDraft;
   /**
@@ -2563,6 +2591,9 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
             loading={loadingAgentIds.includes(selected.id)}
             onFetchTranscript={handleFetchTranscript}
             onWatchAgent={handleWatchTranscript}
+            // Same gate the Vibe panel applies: a destructive control is not
+            // offered where the host would refuse it.
+            readOnly={transcript.readOnly || linkAccess === "view" || !canManageConversation}
             onBack={() => setAgentNav({ open: true, selectedId: null })}
             onKillWorker={killWorker}
           />

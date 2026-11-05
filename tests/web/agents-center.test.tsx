@@ -204,6 +204,15 @@ describe("AgentDetail", () => {
     expect(getByText(view.readOnlyReason!)).toBeTruthy();
   });
 
+  it("does not offer Kill on a read-only link, and says why", () => {
+    // The host would refuse the frame, so the control must not be presented as
+    // available. Same rule the Vibe panel applies.
+    const worker = props("w1", { view: { ...props("w1").view, class: "worker", canKillWorker: true, readOnlyReason: null } });
+    const { queryByRole, getByText } = render(<AgentDetail {...worker} readOnly />);
+    expect(queryByRole("button", { name: "Kill worker" })).toBeNull();
+    expect(getByText(/read-only/)).toBeTruthy();
+  });
+
   it("never offers Kill to a plain subagent, and shows why it is read-only", () => {
     const view = props("sub-1").view;
     const { queryByRole, getByText } = render(<AgentDetail {...props("sub-1")} />);

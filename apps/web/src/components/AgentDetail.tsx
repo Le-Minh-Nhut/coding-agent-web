@@ -39,6 +39,12 @@ export interface AgentDetailProps {
   onWatchAgent?(agentId: string | null): void;
   onBack(): void;
   onKillWorker?(agentId: string): void;
+  /**
+   * The link cannot write (read-only or view-only). Destructive controls are then
+   * not offered at all, matching the Vibe panel: an action the host would refuse
+   * must not be presented as available.
+   */
+  readOnly?: boolean;
 }
 
 const TRANSCRIPT_POLL_MS = 1200;
@@ -56,6 +62,7 @@ export function AgentDetail({
   onWatchAgent,
   onBack,
   onKillWorker,
+  readOnly = false,
 }: AgentDetailProps) {
   const fetchRef = useRef(onFetchTranscript);
   fetchRef.current = onFetchTranscript;
@@ -156,10 +163,14 @@ export function AgentDetail({
 
       <section className="agent-section" aria-labelledby="agent-actions-heading">
         <h3 id="agent-actions-heading">Actions</h3>
-        {view.canKillWorker ? (
+        {view.canKillWorker && !readOnly ? (
           <button type="button" className="danger" onClick={() => onKillWorker?.(view.id)}>
             Kill worker
           </button>
+        ) : view.canKillWorker && readOnly ? (
+          <p className="agent-readonly" role="note">
+            This link is read-only, so the worker cannot be cancelled from here.
+          </p>
         ) : (
           <p className="agent-readonly" role="note">
             {view.readOnlyReason ?? "No worker control is offered for this agent."}
