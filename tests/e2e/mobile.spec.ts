@@ -246,7 +246,12 @@ test("long conversation scrolls internally and detached reading stays put", asyn
     scrollTop: element.scrollTop,
     scrollHeight: element.scrollHeight,
   }));
-  await toolDetails.evaluate((element) => { (element as HTMLDetailsElement).open = true; });
+  // The real user interaction, not a property poke: clicking the summary runs
+  // <summary>'s activation behaviour (React's onToggle fires), which is the only
+  // path that mounts the body. Dispatched rather than clicked because Playwright
+  // scrolls an element into view before a real click, which would itself move the
+  // reader we are asserting stays put.
+  await toolDetails.locator("summary").dispatchEvent("click");
   await expect(toolDetails.locator("pre")).toBeVisible();
   await page.waitForTimeout(100);
   const afterExpandGeometry = await scroller.evaluate((element: HTMLElement) => ({

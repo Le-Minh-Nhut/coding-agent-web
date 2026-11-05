@@ -132,7 +132,11 @@ export const MessageRow = memo(function MessageRow({ message }: { message: Displ
         <summary>{message.toolName ?? "Tool Result"} {"isRunning" in message && message.isRunning ? "(Running…)" : message.isError ? "(Error)" : "(Completed)"}</summary>
         <p className="tool-output-preview">{message.text.slice(0, 240)}{message.text.length > 240 ? "…" : ""}</p>
         <div className="history-actions"><button type="button" onClick={() => setExpanded((value) => !value)}>{expanded ? "Collapse output" : "Expand output"}</button><button type="button" onClick={() => void copy(message.text)}>Copy output</button></div>
-        <pre className="message-content" style={{ overflowX: "auto", whiteSpace: "pre" }}><code>{message.text}</code></pre>
+        {/* Mounted only while open: a 5000-line result otherwise builds every text
+            node the collapsed card never shows, which is the expensive-render case
+            on a phone. The full string stays in `message.text` — Copy reads it and
+            expanding mounts all of it, so nothing is deleted, only deferred. */}
+        {expanded && <pre className="message-content" style={{ overflowX: "auto", whiteSpace: "pre" }}><code>{message.text}</code></pre>}
       </details> : blocks && message.role !== "notice" ? <div className="message-content">{blocks.map((block, index) => renderTranscriptBlock(block, index))}</div> : (
         <div className="message-content">{message.role === "notice" ? <p>{message.text}</p> : renderMarkdown(message.text)}</div>
       )}
@@ -465,6 +469,23 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     }
     return optimisticMessages.filter((pending) => (hostCounts.get(pending.text) ?? 0) <= (pending.hostEchoCount ?? 0));
   }, [savedHistory, optimisticMessages]);
+  /**
+   * Saved-mode rows in the shape `MessageRow` takes, built ONCE per journal read.
+   *
+   * The render used to build a fresh object literal per row on every parent
+   * render, so `MessageRow`'s `memo` shallow-compare always missed and every
+   * saved row re-rendered on any state change. Mapping here keeps the row objects
+   * identical between renders (the live path already gets this from its useMemo).
+   */
+  const savedRows = useMemo<DisplayMessage[]>(() => savedHistory?.messages.map((message) => ({
+    id: message.id,
+    role: message.role,
+    text: message.text,
+    ...(message.blocks ? { blocks: message.blocks } : {}),
+    ...(message.toolName ? { toolName: message.toolName } : {}),
+    ...(message.isError ? { isError: true } : {}),
+  })) ?? [], [savedHistory]);
+
   useEffect(() => {
     const hostCounts = new Map<string, number>();
     for (const message of transcript.messages) {
@@ -1765,9 +1786,7 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
             {olderHistoryLoading && <p role="status">Loading older history…</p>}
             {olderHistoryError && <p role="alert">{olderHistoryError}</p>}
             {!savedHistory.hasOlder && !savedHistory.skippedOversized && <p role="status">Beginning of history.</p>}
-            {savedHistory.messages.map((message) => (
-              <MessageRow key={message.id} message={{ id: message.id, role: message.role, text: message.text, ...(message.blocks ? { blocks: message.blocks } : {}), ...(message.toolName ? { toolName: message.toolName } : {}), ...(message.isError ? { isError: true } : {}) }} />
-            ))}
+            {savedRows.map((message) => <MessageRow key={message.id} message={message} />)}
             {savedModeOptimistic.map((message) => <MessageRow key={message.id} message={message} />)}
           </>
         ) : linkUnavailable ? (
