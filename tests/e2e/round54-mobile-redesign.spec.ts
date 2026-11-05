@@ -380,6 +380,119 @@ test("the agents screen fills the viewport and the composer is not on it", async
   await expect(page.locator("textarea.composer-input")).toBeVisible();
 });
 
+/**
+ * Journey C — real browser history over the agents layer.
+ *
+ * The jsdom suite (tests/web/round54-agents-layer.test.tsx) dispatches synthetic
+ * `popstate` events, which proves the mapping but not browser semantics: it cannot
+ * show that Chromium *keeps* a Forward entry after a Back, nor that Back from a
+ * DETAIL lands on the LIST instead of skipping to the conversation underneath.
+ * Only a real Back/Forward pair does that, so it is asserted here.
+ *
+ * The conversation must also survive the whole walk: it stays mounted under the
+ * layer, and the layer's history entries are the app's own, so no step may
+ * remount it. Two markers prove it — the document's `performance.timeOrigin`
+ * (a document navigation would change it) and a marker stamped on the
+ * `.conversation-screen` element itself (a React remount would produce a new
+ * element without it).
+ */
+test("browser Back and Forward walk the agents list, the detail and the conversation in order", async ({ page }) => {
+  const fixture = harnessFixture();
+  const host = await installMockCollabHost(page, { conversationId: fixture.seededConversationId });
+  await page.setViewportSize(MOBILE);
+  await openSeededConversation(page);
+  await host.send(welcomeFrame(false));
+  await host.send({ t: "agents", agents: MOCK_SUBAGENTS });
+  // A real transcript row: its text is the user-visible proof the same conversation
+  // is still on screen, unmounted-rendered from scratch would lose it (a remount
+  // re-reads the snapshot, this row only ever arrived over the live socket).
+  await host.send({ t: "entry", entry: createUserMessageEntry("journey-c-row", "JOURNEY_C_MARKER_ROW", Date.now()) });
+  const markerRow = page.getByText("JOURNEY_C_MARKER_ROW");
+  await expect(markerRow).toBeVisible();
+  const markerText = await markerRow.innerText();
+
+  const marked = await page.evaluate(() => {
+    const screen = document.querySelector(".conversation-screen") as HTMLElement | null;
+    if (screen !== null) screen.dataset.cawJourneyC = "mounted-once";
+    return { timeOrigin: performance.timeOrigin, stamped: screen !== null };
+  });
+  expect(marked.stamped, "the conversation screen is up before the layer opens").toBe(true);
+
+  // 2. Open Agents Center from the overflow menu.
+  await page.getByRole("button", { name: "More actions" }).click();
+  await page.getByRole("button", { name: /^Agents \(/ }).click();
+
+  const chips = page.getByRole("group", { name: "Filter agents" });
+  const taskHeading = page.getByRole("heading", { name: "Task", exact: true });
+  const transcriptHeading = page.getByRole("heading", { name: "Transcript", exact: true });
+  const actionsHeading = page.getByRole("heading", { name: "Actions", exact: true });
+
+  // ... list is showing.
+  await expect(page.getByRole("heading", { name: /Agents \(2\)/ })).toBeVisible();
+  await expect(chips.getByRole("button", { name: "All", exact: true })).toBeVisible();
+  await expect(chips.getByRole("button", { name: "Running", exact: true })).toBeVisible();
+  await expect(chips.getByRole("button", { name: "Finished", exact: true })).toBeVisible();
+
+  // 3. Select an agent -> its detail is showing.
+  await page.locator(".agent-row").filter({ hasText: "scout-codebase" }).click();
+  await expect(page.getByRole("heading", { name: "scout-codebase", exact: true })).toBeVisible();
+  await expect(taskHeading).toBeVisible();
+  await expect(transcriptHeading).toBeVisible();
+  await expect(actionsHeading).toBeVisible();
+
+  // 4. Back -> the LIST, not the conversation.
+  await page.goBack();
+  await expect(page.getByRole("heading", { name: /Agents \(2\)/ })).toBeVisible();
+  await expect(chips.getByRole("button", { name: "All", exact: true })).toBeVisible();
+  await expect(chips.getByRole("button", { name: "Running", exact: true })).toBeVisible();
+  await expect(chips.getByRole("button", { name: "Finished", exact: true })).toBeVisible();
+  await expect(taskHeading, "the detail's sections are gone, so this is the list").toHaveCount(0);
+  await expect(transcriptHeading).toHaveCount(0);
+  await expect(actionsHeading).toHaveCount(0);
+
+  // 5. Back again -> the conversation, interactive again.
+  await page.goBack();
+  await expect(page.locator(".agents-layer")).toHaveCount(0);
+  await expect(page.locator(".agents-center")).toHaveCount(0);
+  await expect(page.locator("textarea.composer-input")).toBeEditable();
+  expect(await page.locator(".conversation-column").evaluate((el) => el.hasAttribute("inert")), "the conversation is no longer inert").toBe(false);
+
+  // 6. Forward -> back to the LIST (not the detail).
+  await page.goForward();
+  await expect(page.getByRole("heading", { name: /Agents \(2\)/ })).toBeVisible();
+  await expect(chips.getByRole("button", { name: "All", exact: true })).toBeVisible();
+  await expect(chips.getByRole("button", { name: "Running", exact: true })).toBeVisible();
+  await expect(chips.getByRole("button", { name: "Finished", exact: true })).toBeVisible();
+  await expect(taskHeading, "Forward returns the list, not the detail").toHaveCount(0);
+  await expect(transcriptHeading).toHaveCount(0);
+  await expect(actionsHeading).toHaveCount(0);
+
+  // 7. Forward again -> the detail returns.
+  await page.goForward();
+  await expect(page.getByRole("heading", { name: "scout-codebase", exact: true })).toBeVisible();
+  await expect(taskHeading).toBeVisible();
+  await expect(transcriptHeading).toBeVisible();
+  await expect(actionsHeading).toBeVisible();
+
+  // 8. The conversation was never unmounted, and its live-only row is intact.
+  const after = await page.evaluate(() => {
+    const screen = document.querySelector(".conversation-screen") as HTMLElement | null;
+    return { timeOrigin: performance.timeOrigin, stamped: screen?.dataset.cawJourneyC ?? null };
+  });
+  expect(after.timeOrigin, "no document navigation happened on the whole walk").toBe(marked.timeOrigin);
+  expect(after.stamped, "the same conversation element is still mounted").toBe("mounted-once");
+  expect(await markerRow.innerText(), "the live-only transcript row is unchanged").toBe(markerText);
+
+  // The walk left no orphan entry: Back from the detail is the list, and Back again
+  // is the conversation — never a re-opened layer over a screen that is gone.
+  await page.goBack();
+  await expect(chips.getByRole("button", { name: "All", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: /Agents \(2\)/ })).toBeVisible();
+  await page.goBack();
+  await expect(page.locator(".agents-layer")).toHaveCount(0);
+  expect(await page.locator(".conversation-column").evaluate((el) => el.hasAttribute("inert"))).toBe(false);
+});
+
 test("the header has no horizontal overflow at 320px and the dashboard row is bounded", async ({ page }) => {
   const fixture = harnessFixture();
   const host = await installMockCollabHost(page, { conversationId: fixture.seededConversationId });
