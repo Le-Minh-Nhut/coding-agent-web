@@ -256,7 +256,10 @@ test("draft survives navigation and clears after successful send", async ({ page
   await expect(returnedComposer).toHaveValue("draft survives navigation");
   await expect.poll(() => host.connections).toBeGreaterThan(connectionsBefore);
   await host.send(welcomeFrame(false));
-  await expect(page.getByText("Connected — no turn in flight")).toBeVisible();
+  // R51: a healthy link no longer paints a full-width idle banner — the header's
+  // single status line carries it. The claim under test is still that the app
+  // shows the live state after returning to the conversation.
+  await expect(page.locator(".header-status")).toHaveText("idle");
   await returnedComposer.fill("send this and clear draft");
   await page.getByRole("button", { name: "Send", exact: true }).click();
   await expect.poll(() => host.prompts.length).toBe(1);

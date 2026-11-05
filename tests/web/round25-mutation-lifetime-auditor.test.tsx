@@ -10,6 +10,7 @@ import {api} from '../../apps/web/src/api.js';
 import {resetMutationQueues} from '../../apps/web/src/mutation-order.js';
 import {resetProjectMutationState} from '../../apps/web/src/components/ProjectsView.js';
 import {CollabSocket,type HostFrame} from '@caw/collab-protocol';
+import {openModelSheet} from './model-sheet.js';
 import {buildApp} from '../../apps/server/src/app.js';
 import {createMetadataStore} from '../../apps/server/src/store.js';
 import {createAuthenticationService} from '../../apps/server/src/auth.js';
@@ -43,7 +44,7 @@ async function setup(){
  vi.spyOn(CollabSocket.prototype,'connect').mockImplementation(function(this:CollabSocket){sockets.push(this);this.onOpen?.();});
  vi.spyOn(CollabSocket.prototype,'send').mockResolvedValue(true);
  const welcome:HostFrame={t:'welcome',proto:3,header:{type:'session',id:'native',cwd:dir,timestamp:''},state:{isStreaming:false,queuedMessageCount:0,cwd:dir,participants:[]},agents:[],entryCount:0};
- const openChat=async()=>{fireEvent.click(await screen.findByText('Original'));fireEvent.click(await screen.findByText('Chat'));await waitFor(()=>expect(sockets.length).toBeGreaterThan(0));await act(async()=>sockets.at(-1)!.onFrame?.(welcome,0));await screen.findByText('Preferred for next launch:');};
+ const openChat=async()=>{fireEvent.click(await screen.findByText('Original'));fireEvent.click(await screen.findByText('Chat'));await waitFor(()=>expect(sockets.length).toBeGreaterThan(0));await act(async()=>sockets.at(-1)!.onFrame?.(welcome,0));await screen.findByRole('button',{name:'More actions'});};
  return {store,project,conversation,request,sockets,welcome,openChat,teardown:async()=>{cleanup();await app.close();await rm(dir,{recursive:true,force:true});}};
 }
 
@@ -83,14 +84,16 @@ it.each([false,true])('V25 a delayed model save cannot override a later save aft
   const p=(++calls===1?gate.promise:Promise.resolve()).then(()=>f.request('PATCH',`/api/conversations/${id}/model`,{model}));writes.push(p);return p;
  });
  try{
-  render(<App/>);await f.openChat();fireEvent.click(screen.getByText('Conversation model settings'));
+  render(<App/>);await f.openChat();openModelSheet();
   fireEvent.change(screen.getByLabelText('Custom model ID'),{target:{value:'MODEL_FIRST'}});fireEvent.click(screen.getByRole('button',{name:'Save model'}));
   await waitFor(()=>expect(calls).toBe(1));
   if(remount){
    fireEvent.click(screen.getByTitle('Back'));fireEvent.click(await screen.findByText('Chat'));
    await waitFor(()=>expect(f.sockets).toHaveLength(2));await act(async()=>f.sockets.at(-1)!.onFrame?.(f.welcome,0));
+   // R51: reopening the conversation closes the sheet, so it is opened again before
+   // the controls inside it can be read.
+   openModelSheet();
    await waitFor(()=>expect((screen.getByLabelText('Custom model ID') as HTMLInputElement).value).toBe('INITIAL_MODEL'));
-   fireEvent.click(screen.getByText('Conversation model settings'));
   }
   fireEvent.change(screen.getByLabelText('Custom model ID'),{target:{value:'MODEL_FINAL'}});
   if(remount){
@@ -117,7 +120,7 @@ it('V26 a model save recorded before sign-out is retired, not replayed',async()=
   const p=(++calls===1?gate.promise:Promise.resolve()).then(()=>f.request('PATCH',`/api/conversations/${id}/model`,{model}));writes.push(p);return p;
  });
  try{
-  render(<App/>);await f.openChat();fireEvent.click(screen.getByText('Conversation model settings'));
+  render(<App/>);await f.openChat();openModelSheet();
   // First Save: its request goes out and its response is held.
   fireEvent.change(screen.getByLabelText('Custom model ID'),{target:{value:'OLD_FIRST'}});fireEvent.click(screen.getByRole('button',{name:'Save model'}));
   await waitFor(()=>expect(calls).toBe(1));

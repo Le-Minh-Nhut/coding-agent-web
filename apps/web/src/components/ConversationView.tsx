@@ -3,7 +3,11 @@ import { api, type SavedConversationHistory } from "../api.js";
 import { chainMutation, MUTATION_CANCELLED } from "../mutation-order.js";
 import { MarkdownCodeBlock, parseInline, renderMarkdown } from "../sanitize.js";
 import { ActivityPanel } from "./ActivityPanel.js";
+import { AdvisorPanel } from "./AdvisorPanel.js";
+import { ModalOverlay } from "./ModalOverlay.js";
 import { SubagentPanel } from "./SubagentPanel.js";
+import { VibePanel, vibeVerdictLabel } from "./VibePanel.js";
+import { advisorNotesOf, summarizeAdvisorNotes } from "../advisor.js";
 import {
   CollabSocket,
   parseCollabLink,
@@ -16,7 +20,7 @@ import { clearTranscriptRequests, createTranscriptState, forgetTranscriptRequest
 import { findSlashCommand, slashCommands, type SlashCommand } from "../commands.js";
 import { ActivityGroupRow } from "./ToolActivity.js";
 import { groupActivity, pairToolArguments } from "../tool-activity.js";
-import type { AttachInstructions, Conversation } from "@caw/contracts";
+import type { AttachInstructions, Conversation, NativeModeResult, VibeStateResponse } from "@caw/contracts";
 /** A settled prompt record kept until explicit dismissal. */
 export interface RefusedRecovery {
   id: number;
@@ -50,6 +54,10 @@ interface DisplayMessage {
   isRunning?: boolean;
   awaitingHost?: boolean;
   hostEchoCount?: number;
+  /** Custom-message type, so an advisor card can render structurally. */
+  customType?: string;
+  /** That entry's `details` payload, verbatim. */
+  customDetails?: unknown;
 }
 interface PendingPrompt {
   text: string;
@@ -77,6 +85,9 @@ const MAX_TRANSCRIPT_REQUESTS = 64;
 const TRANSCRIPT_REQUEST_TIMEOUT_MS = 15_000;
 const TRANSCRIPT_POLL_MS = 1200;
 const STARTUP_PROMPT_REFUSAL = "prompting is unavailable until the host finishes starting up";
+
+export type ConnectionStatus = "connecting" | "idle" | "running" | "reconnecting" | "disconnected" | "unknown";
+
 /**
  * V20-09: the exact host messages that prove a prompt was NOT submitted. Each one
  * is lifted verbatim from the pinned OMP host (collab/host.ts); an unrelated error
@@ -125,6 +136,65 @@ export function shouldSubmitOnEnter(
   return !coarsePointer && event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing && !composing;
 }
 
+/**
+ * An advisor card, in the compact form the phone needs.
+ *
+ * OMP delivers advice as a batched `custom_message` (`customType: "advisor"`)
+ * whose details carry one or more notes with a severity each. The row's shape is
+ * a single line per note — `⚠ Advisor · Concern ›` — with the note text revealed
+ * on tap, because a wall of advisor prose between two turns is exactly the kind
+ * of chrome that pushes the conversation off a 390px screen.
+ *
+ * Severity is never levelled: a `blocker` keeps the error colour and its own
+ * prominent line so it cannot be mistaken for a nit, and it is never hidden
+ * behind the transcript's own collapsing (the row is a normal transcript row, so
+ * replay and compaction keep it).
+ */
+function AdvisorMessageCard({ message }: { message: DisplayMessage }) {
+  const [open, setOpen] = useState(false);
+  const notes = advisorNotesOf({ customType: message.customType, details: message.customDetails });
+  if (notes.length === 0) {
+    return <div className="message-content"><p>{message.text}</p></div>;
+  }
+  const worst = notes.some((note) => note.severity === "blocker")
+    ? "blocker"
+    : notes.some((note) => note.severity === "concern") ? "concern" : "nit";
+  return (
+    <div className={`advisor-card advisor-card--${worst}`}>
+      <button
+        type="button"
+        className="advisor-card-head"
+        aria-expanded={open}
+        onClick={() => setOpen((value) => !value)}
+      >
+        <span className="advisor-card-glyph" aria-hidden="true">{worst === "blocker" ? "⛔" : "⚠"}</span>
+        <span className="advisor-card-label">
+          Advisor{notes.length === 1 ? "" : ` · ${notes.length} notes`}
+          {worst !== "nit" ? ` · ${worst === "blocker" ? "Blocker" : "Concern"}` : ""}
+        </span>
+        <span className="advisor-card-preview">{notes[0]!.note.split("\n", 1)[0]}</span>
+        <span className="advisor-card-chevron" aria-hidden="true">{open ? "▾" : "›"}</span>
+      </button>
+      {worst === "blocker" && !open && (
+        // A blocker is the one severity that must survive a collapsed row: the
+        // user has to be able to read what it says without tapping anything.
+        <p className="advisor-card-blocker-text">{notes.find((note) => note.severity === "blocker")!.note}</p>
+      )}
+      {open && (
+        <ul className="advisor-card-notes">
+          {notes.map((note, index) => (
+            <li key={index}>
+              <span className={`badge ${note.severity === "blocker" ? "error" : note.severity === "concern" ? "warning" : "idle"}`}>{note.severity}</span>
+              {note.advisor !== null && <span className="advisor-note-owner">{note.advisor}</span>}
+              <p>{note.note}</p>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 export const MessageRow = memo(function MessageRow({ message }: { message: DisplayMessage | TranscriptMessage }) {
   const [expanded, setExpanded] = useState(false);
   const blocks = "blocks" in message ? message.blocks : undefined;
@@ -135,7 +205,12 @@ export const MessageRow = memo(function MessageRow({ message }: { message: Displ
         {message.role} {message.toolName ? `(${message.toolName})` : ""}{message.isError ? " · error" : ""}
         {"awaitingHost" in message && message.awaitingHost ? " · sent while active; awaiting host" : ""}
       </div>
-      {message.role === "tool" ? <details open={expanded} onToggle={(event) => setExpanded(event.currentTarget.open)}>
+      {/* An advisor card is a transcript row, so it survives replay and is never
+          folded into a group: an advisor warning hidden inside a collapsed
+          activity row is a warning the user will not see. */}
+      {"customType" in message && message.customType === "advisor" ? (
+        <AdvisorMessageCard message={message} />
+      ) : message.role === "tool" ? <details open={expanded} onToggle={(event) => setExpanded(event.currentTarget.open)}>
         <summary>{message.toolName ?? "Tool Result"} {"isRunning" in message && message.isRunning ? "(Running…)" : message.isError ? "(Error)" : "(Completed)"}</summary>
         <p className="tool-output-preview">{message.text.slice(0, 240)}{message.text.length > 240 ? "…" : ""}</p>
         <div className="history-actions"><button type="button" onClick={() => setExpanded((value) => !value)}>{expanded ? "Collapse output" : "Expand output"}</button><button type="button" onClick={() => void copy(message.text)}>Copy output</button></div>
@@ -178,8 +253,6 @@ function renderTranscriptBlock(block: TranscriptBlock, index: number): React.Rea
   if (block.type === "notice") return <p key={index}>{block.text}</p>;
   return <React.Fragment key={index}>{renderMarkdown(block.text)}</React.Fragment>;
 }
-
-export type ConnectionStatus = "connecting" | "idle" | "running" | "reconnecting" | "disconnected" | "unknown";
 
 /**
  * Render a handoff refusal in the user's terms.
@@ -241,6 +314,18 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
   const [modelBusy, setModelBusy] = useState(false);
   const [showSubagents, setShowSubagents] = useState(false);
   const [showActivity, setShowActivity] = useState(false);
+  const [showAdvisor, setShowAdvisor] = useState(false);
+  const [showVibe, setShowVibe] = useState(false);
+  /**
+   * Native vibe state, as reported by the control bridge.
+   *
+   * `null` means "not asked yet"; the panel distinguishes that from an
+   * `available: false` answer (asked, could not be told) and from a real state.
+   * Nothing here guesses a mode.
+   */
+  const [vibeState, setVibeState] = useState<VibeStateResponse | null>(null);
+  const [vibeBusy, setVibeBusy] = useState(false);
+  const [vibeError, setVibeError] = useState<string | null>(null);
   const [showMenu, setShowMenu] = useState(false);
   const [transcriptErrors, setTranscriptErrors] = useState<Record<string, string>>({});
   const [savedHistory, setSavedHistory] = useState<(SavedConversationHistory & { messages: TranscriptMessage[] }) | null>(null);
@@ -336,8 +421,17 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
   const pendingStreamFrameRef = useRef<Extract<HostFrame, { t: "event" }> | null>(null);
   const composingRef = useRef(false);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
-  const modelControlsRef = useRef<HTMLDetailsElement | null>(null);
   const modelInputRef = useRef<HTMLInputElement | null>(null);
+  /**
+   * Model settings live in a sheet, not in the transcript.
+   *
+   * They used to be a collapsed `<details>` in the flow, which still cost a
+   * permanent full-width row above the transcript on a phone — the single largest
+   * piece of avoidable chrome after the duplicate status banner. The state is a
+   * boolean now, opened from the overflow menu or the `/model` command, and the
+   * sheet holds the same controls with the same draft semantics.
+   */
+  const [modelSheetOpen, setModelSheetOpen] = useState(false);
   const socketRef = useRef<CollabSocket | null>(null);
   const pendingUiResponsesRef = useRef(new Map<number, object>());
   const [pendingUiResponseIds, setPendingUiResponseIds] = useState<Set<number>>(() => new Set());
@@ -500,6 +594,17 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
   useEffect(() => {
     if (activeUiRequest?.kind === "editor") setUiEditorValue(activeUiRequest.prefill ?? "");
   }, [activeUiRequest?.reqId]);
+  /**
+   * Advisor notes for this conversation, read from the same rows the transcript
+   * renders — so the panel and the chat card can never disagree about what was
+   * said or how severe it was. Notes prove an advisor ran; nothing here infers
+   * that one is enabled, because this transport does not report that.
+   */
+  const advisorSummary = useMemo(
+    () => summarizeAdvisorNotes(transcript.messages.map((message) => ({ customType: message.customType, details: message.customDetails }))),
+    [transcript.messages],
+  );
+
   const messages: DisplayMessage[] = useMemo(() => {
     const hostCounts = new Map<string, number>();
     for (const message of transcript.messages) {
@@ -515,6 +620,11 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
         ...(message.toolCallId ? { toolCallId: message.toolCallId } : {}),
         ...(message.toolResult ? { toolResult: message.toolResult } : {}),
         ...(message.toolArgs ? { toolArgs: message.toolArgs } : {}),
+        // An advisor card needs its type + structured notes to render at all: the
+        // flattened text alone loses the severity that decides how loudly the row
+        // must appear.
+        ...(message.customType ? { customType: message.customType } : {}),
+        ...(message.customDetails === undefined ? {} : { customDetails: message.customDetails }),
         ...(message.isError ? { isError: true } : {}),
         ...(message.isRunning ? { isRunning: true } : {}),
       })),
@@ -551,6 +661,9 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     ...(message.toolCallId ? { toolCallId: message.toolCallId } : {}),
     ...(message.toolResult ? { toolResult: message.toolResult } : {}),
     ...(message.toolArgs ? { toolArgs: message.toolArgs } : {}),
+    // Saved history must render advisor cards exactly as the live view does.
+    ...(message.customType ? { customType: message.customType } : {}),
+    ...(message.customDetails === undefined ? {} : { customDetails: message.customDetails }),
     ...(message.isError ? { isError: true } : {}),
   })) ?? [], [savedHistory]);
 
@@ -1230,9 +1343,10 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
   const handoffOffered = conversation !== null && conversation.id === conversationId;
   const openCommandAction = (): void => {
     setInterceptedCommand(null);
-    if (modelControlsRef.current) modelControlsRef.current.open = true;
-    modelInputRef.current?.focus();
-    modelInputRef.current?.scrollIntoView?.({ block: "nearest" });
+    setModelSheetOpen(true);
+    // The sheet's input is focused by its own effect once mounted; scrolling is
+    // handled by the overlay, which is anchored to the viewport rather than to
+    // the transcript the user may have scrolled far from.
   };
 
   /**
@@ -1574,6 +1688,79 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     setTranscript(transcriptRef.current);
   }, []);
 
+  /** Kept in a ref so `runVibeAction` can call the latest `sendPrompt` without re-creating. */
+  const sendPromptRef = useRef<(text: string, allowSlashCommand?: boolean) => void>(() => {});
+
+  /**
+   * Read the native vibe state from the live process.
+   *
+   * A transport failure is surfaced as `available: false` with the reason — never
+   * as a state — so the panel can say "could not be read" instead of showing a
+   * confident "Off" it did not verify.
+   */
+  const refreshVibe = useCallback(async (): Promise<void> => {
+    const target = conversationIdRef.current;
+    const read = await api.getVibe(target);
+    if (conversationIdRef.current !== target) return;
+    if (read.ok) { setVibeState(read.data); setVibeError(null); return; }
+    setVibeState({ available: false, reason: read.error?.message ?? "The control bridge could not be reached.", modes: null, tools: null, model: null, thinkingLevel: null });
+  }, []);
+
+  // Read once when the panel opens, and only then: this is a control surface, not
+  // a polled readout, so it costs nothing while the user is reading the chat.
+  useEffect(() => {
+    if (!showVibe) return;
+    void refreshVibe();
+  }, [showVibe, refreshVibe]);
+
+  /**
+   * Ask for a native mode transition and adopt OMP's own verdict.
+   *
+   * A refusal (`busy`, `conflict`, `disabled`) is rendered as the explanation it
+   * is; only `ok: true` updates the shown mode, so a refused request can never
+   * leave the panel claiming a change that did not happen.
+   */
+  /**
+   * Enter or leave vibe mode, then optionally send the first directive.
+   *
+   * The directive is threaded here rather than fired alongside the transition so
+   * it can only be sent once OMP has CONFIRMED the mode is on. Firing it early
+   * would contradict the panel's own promise: if the enter is refused (busy or
+   * blocked by plan/goal mode), the directive would still have gone out as a
+   * plain prompt into a session that never entered vibe — a silently wrong turn.
+   */
+  const runVibeAction = (action: "enter" | "exit", directive?: string): void => {
+    const target = conversationIdRef.current;
+    setVibeBusy(true);
+    setVibeError(null);
+    void api.setVibe(target, action).then((result) => {
+      if (conversationIdRef.current !== target) return;
+      setVibeBusy(false);
+      if (!result.ok) { setVibeError(result.error?.message ?? "The control bridge did not answer."); return; }
+      const verdict: NativeModeResult = result.data;
+      if (verdict.state !== null) setVibeState({ available: true, reason: null, modes: verdict.state, tools: vibeState?.tools ?? null, model: vibeState?.model ?? null, thinkingLevel: vibeState?.thinkingLevel ?? null });
+      if (!verdict.ok) { setVibeError(vibeVerdictLabel(verdict)); return; }
+      void refreshVibe();
+      // Only now — the mode is on, so the directive is a real director prompt.
+      if (directive !== undefined && directive !== "") sendPromptRef.current(directive, true);
+    });
+  };
+
+  /**
+   * Kill one worker through the wire's own agent control.
+   *
+   * `agent-cmd` with `cmd: "kill"` is the host's documented control for a
+   * subagent (`packages/wire/src/index.ts:343`) — the same frame the Agents panel
+   * uses. Sending text like "/stop" as a chat message would not kill anything; it
+   * would become a prompt to that worker.
+   */
+  const killWorker = useCallback((agentId: string): void => {
+    socketRef.current?.send({ t: "agent-cmd", cmd: "kill", agentId });
+  }, []);
+
+  // Re-pointed every render so the vibe path always calls the current closure.
+  sendPromptRef.current = sendPrompt;
+
   const handleCloseSubagents = () => {
     handleWatchTranscript(null);
     for (const request of transcriptRequestsRef.current.values()) clearTimeout(request.timer);
@@ -1593,14 +1780,55 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
           </button>
           <div className="conversation-header-copy">
             <h3 style={{ fontSize: "1rem" }}>{conversation?.title ?? "Conversation"}</h3>
-            {/* One compact status line: the record's state plus the live link's,
-                since either can be the stale one. A disconnected link is called
-                out in colour here as well as in the banner, because the compact
-                header is the only chrome visible while the transcript scrolls. */}
-            <span className={`header-status header-status--${status}`} title="Conversation state">
+            {/* One status line, one fact: the live link's state.
+                The record's `state` and the link disagree only while one is
+                stale, and the link is the one that can be verified right now — a
+                healthy link proves the host is answering, which supersedes a
+                stored `starting`. Printing both produced `idle · idle`: the same
+                fact twice, in the width a transcript row needs. The record's own
+                state stays available in Session details, and a saved transcript
+                states its own case in the transcript banner. */}
+            <span
+              className={`header-status header-status--${status}`}
+              title={`Live link: ${status} · stored record: ${conversation?.state ?? "unknown"}`}
+              // The status moved out of the banner area, so this element is now
+              // the one that announces a change for a screen reader. Polite: the
+              // state is information, not an interruption.
+              role="status"
+              aria-live="polite"
+            >
               <span className="header-status-dot" aria-hidden="true" />
-              {conversation?.state ?? "status unknown"} · {status}
+              {status}
             </span>
+              {/* Mode chips, on the same line as the status (§5.5): one small
+                  control each, with the full name in the accessible label. They
+                  replace the rows these states used to occupy, and an advisor with
+                  a recorded blocker is the only case that gets a loud colour —
+                  everything else stays quiet until tapped. */}
+              {advisorSummary.notes.length > 0 && (
+                <button
+                  type="button"
+                  className={`mode-chip${advisorSummary.notes.some((note) => note.severity === "blocker") ? " mode-chip--alert" : ""}`}
+                  aria-label={`Advisor: ${advisorSummary.notes.length} note${advisorSummary.notes.length === 1 ? "" : "s"} recorded. Open the advisor panel.`}
+                  title={`Advisor notes: ${advisorSummary.notes.length}`}
+                  onClick={() => setShowAdvisor(true)}
+                >
+                  Adv{advisorSummary.notes.some((note) => note.severity === "blocker") ? " ⛔" : " ●"}
+                </button>
+              )}
+              {/* Rendered only when the mode is known ON, or when the bridge could
+                  not be asked while the panel has been opened at least once. An
+                  "off" mode is not worth a permanent chip — it is the default. */}
+              {vibeState?.available === true && vibeState.modes?.vibe.status === "active" && (
+                <button
+                  type="button"
+                  className="mode-chip mode-chip--on"
+                  aria-label={`Vibe mode is on${agents.length > 0 ? `, ${agents.length} worker${agents.length === 1 ? "" : "s"}` : ""}. Open the vibe panel.`}
+                  onClick={() => setShowVibe(true)}
+                >
+                  Vibe ●{agents.length > 0 ? ` ${agents.length}` : ""}
+                </button>
+              )}
           </div>
         </div>
 
@@ -1642,6 +1870,17 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
               <button type="button" onClick={() => { setShowMenu(false); setShowActivity(true); }}>
                 Activity
               </button>
+              {/* Advisor and Vibe are always reachable from the menu, not only
+                  through a header chip: the chips appear only when there is
+                  something to show (a recorded note, an active mode), so without
+                  these entries a user with no notes yet would have no way to open
+                  either panel and read where its controls live. */}
+              <button type="button" onClick={() => { setShowMenu(false); setShowAdvisor(true); }}>
+                Advisor
+              </button>
+              <button type="button" onClick={() => { setShowMenu(false); setShowVibe(true); }}>
+                Vibe mode
+              </button>
               {agents.length > 0 && (
                 <button type="button" aria-label={`Agents (${agents.length})`} onClick={() => { setShowMenu(false); setShowSubagents(true); }}>
                   Agents ({agents.length})
@@ -1680,9 +1919,9 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
               <button
                 type="button"
                 className="header-menu-item"
-                onClick={() => { setShowMenu(false); if (modelControlsRef.current) modelControlsRef.current.open = true; }}
+                onClick={() => { setShowMenu(false); setModelSheetOpen(true); }}
               >
-                Model &amp; session info
+                Model settings
               </button>
             </div>
           )}
@@ -1789,28 +2028,44 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
           </button>
         </div>
       )}
-      <details className="model-controls-disclosure" ref={modelControlsRef}>
-        <summary>Conversation model settings</summary>
-        <section className="model-controls" aria-label="Conversation model">
-          <label htmlFor="conversation-model">Preferred model for next launch</label>
-          <select id="conversation-model" value={modelCatalogState.status === "loaded" && modelCatalogState.models.includes(modelDraft) ? modelDraft : ""} onChange={(event) => { modelDraftTouchedRef.current = true; setModelDraft(event.target.value); }}>
-            <option value="">Choose a catalog model</option>
-            {modelCatalogState.status === "loaded" && modelCatalogState.models.map((model) => <option key={model} value={model}>{model}</option>)}
-          </select>
-          <label htmlFor="custom-model">Custom model ID</label>
-          <input id="custom-model" ref={modelInputRef} value={modelDraft} maxLength={128} onChange={(event) => { modelDraftTouchedRef.current = true; setModelDraft(event.target.value); }} placeholder="Enter any OMP model ID" aria-describedby="model-launch-note" />
-          {modelCatalogState.status === "loading" && <p role="status">Loading model catalog…</p>}
-          {modelCatalogState.status === "empty" && <p role="status">No models reported by OMP. Saved preference is unchanged.</p>}
-          {modelCatalogState.status === "unavailable" && <p role="status">Model catalog unavailable: {modelCatalogState.reason}. Saved preference is unchanged.</p>}
-          {modelCatalogState.status === "error" && <p role="alert">Could not load models: {modelCatalogState.message}. Saved preference is unchanged.</p>}
-          <p>{conversation?.ownership === "external" ? "Saved preference for app-launched chats:" : "Preferred for next launch:"} <strong>{conversation?.modelPreference || "not set"}</strong></p>
-          <p>Effective model reported now: <strong>{effectiveModel?.conversationId === conversationId ? effectiveModel.model ?? "not reported" : "not reported"}</strong></p>
-          {canManageConversation && <button type="button" onClick={handleSaveModel} disabled={modelBusy || !modelDraft.trim()}>Save model</button>}
-          {canManageConversation && <button type="button" className="ghost" onClick={handleRestart} disabled={modelBusy || !modelDraft.trim()}>Save &amp; restart agent</button>}
-          <span id="model-launch-note">{conversation?.ownership === "external" ? "This model preference applies only to conversations launched by the app." : "Model changes apply on the next launch of this conversation, not immediately."}</span>
-          {modelMessage && <span role="status">{modelMessage}</span>}
-        </section>
-      </details>
+      {/* Model settings are a sheet, not an inline disclosure: they are touched
+          rarely, and a permanent row above the transcript is exactly the chrome
+          the phone cannot spare. Every control and note below is unchanged —
+          only where it is mounted. A sheet is also reachable from the `/model`
+          slash command, which opens the same state. */}
+      {modelSheetOpen && (
+        <ModalOverlay
+          onClose={() => setModelSheetOpen(false)}
+          aria-labelledby="model-sheet-title"
+          overlayProps={{ className: "modal-overlay model-sheet-overlay" }}
+        >
+          <section className="modal-content model-sheet" aria-labelledby="model-sheet-title">
+            <header className="model-sheet-head">
+              <h3 id="model-sheet-title" style={{ fontSize: "1rem" }}>Model settings</h3>
+              <button type="button" className="ghost" aria-label="Close model settings" onClick={() => setModelSheetOpen(false)}>✕</button>
+            </header>
+            <section className="model-controls" aria-label="Conversation model">
+              <label htmlFor="conversation-model">Preferred model for next launch</label>
+              <select id="conversation-model" value={modelCatalogState.status === "loaded" && modelCatalogState.models.includes(modelDraft) ? modelDraft : ""} onChange={(event) => { modelDraftTouchedRef.current = true; setModelDraft(event.target.value); }}>
+                <option value="">Choose a catalog model</option>
+                {modelCatalogState.status === "loaded" && modelCatalogState.models.map((model) => <option key={model} value={model}>{model}</option>)}
+              </select>
+              <label htmlFor="custom-model">Custom model ID</label>
+              <input id="custom-model" ref={modelInputRef} value={modelDraft} maxLength={128} onChange={(event) => { modelDraftTouchedRef.current = true; setModelDraft(event.target.value); }} placeholder="Enter any OMP model ID" aria-describedby="model-launch-note" />
+              {modelCatalogState.status === "loading" && <p role="status">Loading model catalog…</p>}
+              {modelCatalogState.status === "empty" && <p role="status">No models reported by OMP. Saved preference is unchanged.</p>}
+              {modelCatalogState.status === "unavailable" && <p role="status">Model catalog unavailable: {modelCatalogState.reason}. Saved preference is unchanged.</p>}
+              {modelCatalogState.status === "error" && <p role="alert">Could not load models: {modelCatalogState.message}. Saved preference is unchanged.</p>}
+              <p>{conversation?.ownership === "external" ? "Saved preference for app-launched chats:" : "Preferred for next launch:"} <strong>{conversation?.modelPreference || "not set"}</strong></p>
+              <p>Effective model reported now: <strong>{effectiveModel?.conversationId === conversationId ? effectiveModel.model ?? "not reported" : "not reported"}</strong></p>
+              {canManageConversation && <button type="button" onClick={handleSaveModel} disabled={modelBusy || !modelDraft.trim()}>Save model</button>}
+              {canManageConversation && <button type="button" className="ghost" onClick={handleRestart} disabled={modelBusy || !modelDraft.trim()}>Save &amp; restart agent</button>}
+              <span id="model-launch-note">{conversation?.ownership === "external" ? "This model preference applies only to conversations launched by the app." : "Model changes apply on the next launch of this conversation, not immediately."}</span>
+              {modelMessage && <span role="status">{modelMessage}</span>}
+            </section>
+          </section>
+        </ModalOverlay>
+      )}
       {(transcript.readOnly || linkAccess === "view") && <div className="banner unknown" role="status">Read-only view — prompts, approvals and Stop are unavailable.</div>}
       {viewAccessOffer && status === "unknown" && (
         <div className="banner unknown" role="status">
@@ -1846,22 +2101,12 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
           <span>State: unknown — Agent status cannot be determined</span>
         </div>
       )}
-      {/* Two live regions must not claim opposite things here. The record's
-          `starting` is the app-side process verdict for a conversation that has
-          never launched (no native session, no tmux); `status` describes the live
-          collab link. When the link is established the host is demonstrably
-          responsive — prompts are accepted — so the idle row is the true one and
-          the startup warning yields to it (see the gate below). */}
-      {status === "idle" && (
-        <div className="banner idle" role="status">
-          <span>Connected — no turn in flight</span>
-        </div>
-      )}
-      {status === "running" && (
-        <div className="banner running" role="status">
-          <span>Agent is working on a turn</span>
-        </div>
-      )}
+      {/* Neither `idle` nor `running` paints a bar here: the header's status line
+          is the single representation of both (§5.3). What stays is the state a
+          user must ACT on — disconnected, reconnecting, unknown, a retired room,
+          a failed link, an outstanding approval, a read-only link — because
+          hiding those would hide the only signal that something needs doing. The
+          header carries `role="status"`, so the change is still announced. */}
       {status === "connecting" && (
         <div className="banner connecting" role="status">
           <span>Connecting to the agent…</span>
@@ -2146,6 +2391,31 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
         <ActivityPanel
           conversationId={conversationId}
           onClose={() => setShowActivity(false)}
+        />
+      )}
+      {/* Advisor panel. Notes come from the session's own history; the enable
+          switch is not on this transport, and the panel says so rather than
+          offering a control that cannot move. */}
+      {showAdvisor && (
+        <AdvisorPanel
+          summary={advisorSummary}
+          onClose={() => setShowAdvisor(false)}
+        />
+      )}
+      {/* Vibe panel. State and transitions come from the live process through the
+          control bridge; a refused transition is shown as OMP's own reason. */}
+      {showVibe && (
+        <VibePanel
+          state={vibeState}
+          busy={vibeBusy}
+          error={vibeError}
+          readOnly={transcript.readOnly || linkAccess === "view" || !canManageConversation}
+          workers={agents}
+          onEnter={(directive) => runVibeAction("enter", directive)}
+          onExit={() => runVibeAction("exit")}
+          onKillWorker={killWorker}
+          onOpenWorkers={() => { setShowVibe(false); setShowSubagents(true); }}
+          onClose={() => setShowVibe(false)}
         />
       )}
     </div>

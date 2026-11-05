@@ -378,7 +378,10 @@ test.describe("Screenshot inventory & geometry verification", () => {
         await host.send({ ...welcomeFrame(false), state: { ...welcomeFrame(false).state, model: { id: "effective/model", name: "Effective model", provider: "test", contextWindow: 100000 } } });
         await expect(composer).toBeEnabled();
 
-        await page.getByText("Conversation model settings").click();
+        // R51: model settings are a sheet, opened from the overflow menu.
+        await page.getByRole("button", { name: "More actions" }).click();
+        await page.getByRole("button", { name: "Model settings" }).click();
+        await expect(page.locator(".model-sheet")).toBeVisible();
         const modelInput = page.locator("#conversation-model");
         await expect(modelInput).toBeVisible();
         const modelBox = await modelInput.boundingBox();
@@ -394,7 +397,11 @@ test.describe("Screenshot inventory & geometry verification", () => {
           await captureScreen(page, vp.name, "model-selector-populated");
           await modelInput.selectOption("preferred/model");
         }
-        await page.getByText("Conversation model settings").click();
+        // R51: model settings are a sheet (opened above), so it is closed before
+        // the inventory continues — an open modal deliberately blocks the page
+        // behind it, which is what the rest of this walkthrough would otherwise hit.
+        await page.getByRole("button", { name: "Close model settings" }).click();
+        await expect(page.locator(".model-sheet")).toHaveCount(0);
         // (e) a conversation with a short exchange
         const t1 = 1774435000000;
         await host.send({

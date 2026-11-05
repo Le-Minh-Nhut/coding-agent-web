@@ -6,6 +6,7 @@ import {CollabSocket,type HostFrame} from "@caw/collab-protocol";
 import {ConversationView} from "../../apps/web/src/components/ConversationView.js";
 import {App} from "../../apps/web/src/App.js";
 import {api} from "../../apps/web/src/api.js";
+import {openModelSheet} from "./model-sheet.js";
 vi.mock("../../apps/web/src/api.js",()=>({api:{getConversation:vi.fn(),getAttachInstructions:vi.fn(),getConversationLink:vi.fn(),setConversationModel:vi.fn(),restartConversation:vi.fn(),getModels:vi.fn(),getConversationHistory:vi.fn(),getMe:vi.fn(),getCapabilities:vi.fn(),listProjects:vi.fn(),listConversations:vi.fn(),listNativeSessions:vi.fn()}}));
 afterEach(()=>{cleanup();vi.restoreAllMocks();});
 const base:any={id:"c",projectId:"p",title:"Chat",state:"idle",ownership:"managed",modelPreference:"model-a",model:"model-a",nativeSessionId:"native-A"};
@@ -51,6 +52,8 @@ async function enterSaved(f:Awaited<ReturnType<typeof fixture>>,page:any){
 
 it.each([false,true])('V25 older Retry metadata must not repaint a newer Retry result (overlap=%s)',async overlap=>{
  const f=await fixture();await enterSaved(f,history('SAVED_TAIL'));
+ // R51: the model copy renders only inside the model sheet now.
+ openModelSheet();
  const first=deferred(),second=deferred();
  vi.mocked(api.getConversation).mockReturnValueOnce(first.promise as any).mockReturnValueOnce(second.promise as any);
  await act(async()=>fireEvent.click(screen.getByRole('button',{name:'Open live view'})));
@@ -77,7 +80,7 @@ it.each([false,true])('V25 terminal attach instructions must follow a successful
   vi.mocked(api.setConversationModel).mockResolvedValue({ok:true,data:{...base,tmuxSessionId:'$1'}});
   vi.mocked(api.restartConversation).mockResolvedValue({ok:true,data:{...base,tmuxSessionId:'$2'}});
   vi.mocked(api.getAttachInstructions).mockResolvedValue({ok:true,data:{available:true,command:newCommand}} as any);
-  fireEvent.click(screen.getByText('Conversation model settings'));
+  openModelSheet();
   await act(async()=>fireEvent.click(screen.getByRole('button',{name:'Save & restart agent'})));
   // F01: the returned row is genuinely live (`state:'idle'`), so the honest claim is
   // the restart one — but this test proves the *attach* refetch, so it waits on the

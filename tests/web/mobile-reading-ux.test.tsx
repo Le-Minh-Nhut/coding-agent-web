@@ -271,7 +271,11 @@ describe("mobile reading behavior", () => {
     fireEvent.click(getByRole("button", { name: "Send" }));
     expect(getByText(/Collab does not dispatch slash commands/)).toBeTruthy();
     fireEvent.click(getByRole("button", { name: "Open model controls" }));
-    expect((container.querySelector(".model-controls-disclosure") as HTMLDetailsElement).open).toBe(true);
+    // R51: the controls moved from an inline <details> to a sheet, so the claim
+    // is now "the sheet is showing with its controls", not "a details element is
+    // open". Same user-visible outcome, one less permanent row above the chat.
+    expect(container.querySelector(".model-sheet")).not.toBeNull();
+    expect(getByRole("combobox", { name: /Preferred model/ })).toBeTruthy();
     expect(promptFrames()).toHaveLength(0);
   });
   it("keeps prompts, approvals, and abort unavailable in read-only and restores controls", async () => {
@@ -312,6 +316,11 @@ describe("mobile reading behavior", () => {
     for (const { result, message } of cases) {
       vi.mocked(api.getModels).mockResolvedValue(result);
       const view = await mountConversation();
+      // R51: the catalog lives inside the model sheet now, so it is opened first.
+      // The assertions after that are unchanged — the same catalog states, the
+      // same saved-preference copy — only the container they render into moved.
+      fireEvent.click(view.getByRole("button", { name: "More actions" }));
+      fireEvent.click(view.getByRole("button", { name: "Model settings" }));
       await waitFor(() => expect(view.container.textContent).toContain(message));
       expect(view.container.textContent).toContain("Preferred for next launch: model-a");
       expect(view.container.textContent).toContain("Effective model reported now: not reported");
@@ -331,8 +340,12 @@ describe("mobile reading behavior", () => {
       } });
     });
     expect(container.querySelector(".banner.error[role='alert']")?.textContent).toBe("Scout: inspect (failed) · bash");
+    // R51: there is no idle banner to fall back on any more — the header carries
+    // the state — so the claim is the stronger one: a bus failure paints an
+    // alert and nothing paints a false connection banner beside it.
     expect(container.querySelector(".banner.disconnected")).toBeNull();
-    expect(container.querySelector(".banner.idle")).not.toBeNull();
+    expect(container.querySelector(".banner.idle")).toBeNull();
+    expect(container.querySelector(".header-status")?.textContent).toBe("idle");
   });
   it("renders host user, assistant, and collapsed tool-result rows", async () => {
     const { container } = await mountConversation();

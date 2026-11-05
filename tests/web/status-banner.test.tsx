@@ -4,6 +4,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, act, cleanup, waitFor } from "@testing-library/react";
 import { ConversationView } from "../../apps/web/src/components/ConversationView.js";
 import { api } from "../../apps/web/src/api.js";
+import { openModelSheet, withinModelSheet } from "./model-sheet.js";
 
 vi.mock("../../apps/web/src/api.js", () => ({
   api: {
@@ -95,9 +96,13 @@ describe("Connection status banners", () => {
       const { container } = render(<ConversationView conversationId="c-1" onBack={() => {}} />);
       viewContainer = container;
     });
-    expect(viewContainer?.textContent).toContain("Effective model reported now: not reported");
-    expect(viewContainer?.textContent).not.toContain("Effective model reported now: claude-3-5");
-    expect(viewContainer?.textContent).toContain("Model changes apply on the next launch of this conversation, not immediately.");
+    // R51: the model copy lives in the model sheet now, so it is opened first.
+    // Same assertions, scoped to the sheet so nothing outside it can satisfy them.
+    openModelSheet();
+    const sheet1 = withinModelSheet();
+    expect(sheet1.getByText(/Effective model reported now:/).textContent).toBe("Effective model reported now: not reported");
+    expect(sheet1.queryByText(/claude-3-5/)).toBeNull();
+    expect(sheet1.getByText("Model changes apply on the next launch of this conversation, not immediately.")).toBeTruthy();
   });
   it("renders the registry-recorded model for stopped conversations", async () => {
     mockGetConversation.mockResolvedValue({
@@ -116,9 +121,11 @@ describe("Connection status banners", () => {
       const { container } = render(<ConversationView conversationId="c-1" onBack={() => {}} />);
       viewContainer = container;
     });
-    expect(viewContainer?.textContent).toContain("Effective model reported now: not reported");
-    expect(viewContainer?.textContent).not.toContain("Effective model reported now: recorded-model");
-    expect(viewContainer?.textContent).toContain("Model changes apply on the next launch of this conversation, not immediately.");
+    openModelSheet();
+    const sheet2 = withinModelSheet();
+    expect(sheet2.getByText(/Effective model reported now:/).textContent).toBe("Effective model reported now: not reported");
+    expect(sheet2.queryByText(/recorded-model/)).toBeNull();
+    expect(sheet2.getByText("Model changes apply on the next launch of this conversation, not immediately.")).toBeTruthy();
   });
   it("renders a saved transcript, truncated note, and live-session conflict", async () => {
     mockGetConversationLink.mockResolvedValue({ ok: false, error: { code: "link_unavailable", message: "Unavailable" } });

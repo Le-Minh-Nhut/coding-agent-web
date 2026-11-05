@@ -12,6 +12,7 @@ import {resetProjectMutationState} from '../../apps/web/src/components/ProjectsV
 import {buildApp} from '../../apps/server/src/app.js';
 import {createMetadataStore} from '../../apps/server/src/store.js';
 import {createAuthenticationService} from '../../apps/server/src/auth.js';
+import {openModelSheetWhenReady} from './model-sheet.js';
 vi.mock('../../apps/server/src/config.js',async original=>({...await original<any>(),findRepoRoot:()=>process.cwd()}));
 afterEach(()=>{cleanup();setCsrfToken(null);resetMutationQueues();resetProjectMutationState();vi.restoreAllMocks();vi.unstubAllGlobals();});
 const deferred=()=>{let resolve!:()=>void;const promise=new Promise<void>(r=>resolve=r);return {resolve,promise};};
@@ -44,11 +45,11 @@ it.each([false,true])('V26 queued model intent cannot replay under a new login (
  vi.spyOn(api,'getModels').mockResolvedValue({ok:true,data:{models:[],source:'unavailable',reason:'No agent'}});
  vi.spyOn(api,'listNativeSessions').mockResolvedValue({ok:true,data:[]});
  vi.spyOn(api,'getRuntime').mockResolvedValue({ok:false,error:{code:'internal',message:'No runtime'}});
- const openChat=async()=>{fireEvent.click(await screen.findByRole('heading',{name:'Project A'}));fireEvent.click(await screen.findByText('Chat'));await screen.findByText('Preferred for next launch:');fireEvent.click(screen.getByText('Conversation model settings'));};
+ const openChat=async()=>{fireEvent.click(await screen.findByRole('heading',{name:'Project A'}));fireEvent.click(await screen.findByText('Chat'));await openModelSheetWhenReady();};
  const save=(model:string)=>{fireEvent.change(screen.getByLabelText('Custom model ID'),{target:{value:model}});fireEvent.click(screen.getByRole('button',{name:'Save model'}));};
  try{
   render(<App/>);await openChat();save('OLD_FIRST');await waitFor(()=>expect(arrivals).toHaveLength(1));
-  fireEvent.click(screen.getByTitle('Back'));fireEvent.click(await screen.findByText('Chat'));await screen.findByText('Preferred for next launch:');fireEvent.click(screen.getByText('Conversation model settings'));
+  fireEvent.click(screen.getByTitle('Back'));fireEvent.click(await screen.findByText('Chat'));await openModelSheetWhenReady();
   save('OLD_QUEUED');await act(async()=>{await Promise.resolve();});expect(arrivals).toHaveLength(1);
   if(rotate){
    fireEvent.click(screen.getByTitle('Back'));fireEvent.click(await screen.findByTitle('Back to projects'));fireEvent.click(await screen.findByTitle('Settings'));

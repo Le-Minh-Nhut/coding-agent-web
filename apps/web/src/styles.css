@@ -76,7 +76,11 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: calc(var(--safe-top) + 12px) calc(var(--safe-right) + 16px) 12px calc(var(--safe-left) + 16px);
+  /* Round 51: 12px → 6px vertical. The header's height was dominated by the two
+     44px touch targets it must keep, so the padding was pure cost — at 390x844
+     these 12px bought a full extra transcript row for free. Safe-area insets are
+     preserved, so a notched phone is unaffected. */
+  padding: calc(var(--safe-top) + 6px) calc(var(--safe-right) + 16px) 6px calc(var(--safe-left) + 16px);
   background-color: var(--surface);
   border-bottom: 1px solid var(--border);
   position: sticky;
@@ -297,7 +301,9 @@ textarea::placeholder {
 
 /* Status Banners */
 .banner {
-  padding: 10px 16px;
+  /* Round 51: a healthy link no longer paints one of these, so the ones left are
+     the bars a user must act on. 6px keeps them compact without shrinking text. */
+  padding: 6px 12px;
   font-size: 0.9rem;
   display: flex;
   align-items: center;
@@ -343,7 +349,10 @@ textarea::placeholder {
   height: 0;
   min-height: 0;
   overflow-y: auto;
-  padding: 16px calc(var(--safe-right) + 16px) calc(var(--safe-bottom) + 16px) calc(var(--safe-left) + 16px);
+  /* Round 51: 16px -> 10px. The 32px horizontal gutter was the same on a 320px
+     phone as on a desktop; 24px keeps text off the edge and returns width to the
+     content, which is what actually reduces wrapping on a narrow screen. */
+  padding: 10px calc(var(--safe-right) + 12px) calc(var(--safe-bottom) + 10px) calc(var(--safe-left) + 12px);
   display: flex;
   flex-direction: column;
   gap: 16px;
@@ -352,7 +361,9 @@ textarea::placeholder {
 .messages-content {
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  /* Round 51: 16px -> 10px between rows. Combined with the card padding below,
+     this is where most of the reclaimed vertical space comes from. */
+  gap: 10px;
   min-width: 0;
 }
 
@@ -382,7 +393,8 @@ textarea::placeholder {
   background-color: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  padding: 14px;
+  /* Round 51: 14px -> 10px. */
+  padding: 10px;
 }
 
 .message-card.user {
@@ -469,40 +481,40 @@ textarea::placeholder {
 }
 
 
-.model-controls-disclosure > summary {
-  min-height: 44px;
+/* Model settings sheet (round 51).
+   The controls used to be a collapsed <details> in the transcript flow, which
+   still reserved a permanent full-width row above the conversation on a phone.
+   They are a modal sheet now, so the transcript owns the full height and the
+   sheet inherits the focus trap and Escape handling from ModalOverlay. */
+.model-sheet-overlay {
+  align-items: flex-end;
+}
+
+.model-sheet {
+  width: 100%;
+  max-width: 520px;
+  max-height: 85dvh;
+  overflow-y: auto;
+  border-radius: var(--radius) var(--radius) 0 0;
+  padding: 12px calc(var(--safe-right) + 16px) calc(var(--safe-bottom) + 16px) calc(var(--safe-left) + 16px);
+}
+
+.model-sheet-head {
   display: flex;
   align-items: center;
-  padding: 6px calc(var(--safe-right) + 16px) 6px calc(var(--safe-left) + 16px);
-  background: var(--surface);
-  border-bottom: 1px solid var(--border);
-  cursor: pointer;
-  list-style: none;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
 }
 
-.model-controls-disclosure > summary::-webkit-details-marker {
-  display: none;
-}
-
-.model-controls-disclosure > summary::after {
-  content: "▾";
-  margin-left: auto;
-  color: var(--text-muted);
-}
-
-.model-controls-disclosure[open] > summary::after {
-  content: "▴";
+.model-sheet .model-controls {
+  border-bottom: 0;
 }
 
 .folder-browser-load-more {
   width: 100%;
   min-height: 44px;
   margin-top: 8px;
-}
-
-
-.model-controls-disclosure > .model-controls {
-  border-bottom: 1px solid var(--border);
 }
 
 .composer-suggestions,
@@ -1162,3 +1174,162 @@ details[open] summary {
   margin: 0 12px 12px;
   font-size: 0.8rem;
 }
+
+/* ── Mode chips + advisor card + native mode panels (round 51) ───────────────
+   Advisor and Vibe are one chip each on the status line rather than a row each
+   (§5.5). The chip is text-compact but NOT tap-compact: it keeps the full 44px
+   touch target. That costs no vertical space — the header row is already 44px
+   tall because of the back and menu buttons beside it — so a 20px chip would
+   have been a smaller tap target for free, which is the wrong trade on a phone. */
+.mode-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: var(--touch-min);
+  min-width: var(--touch-min);
+  padding: 0 8px;
+  margin-left: 6px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface-alt);
+  color: var(--text-muted);
+  font-size: 0.7rem;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.mode-chip--on {
+  border-color: #238636;
+  color: #3fb950;
+}
+
+/* A recorded blocker is the one case that earns a loud chip: it is a warning the
+   user must not have to hunt for. */
+.mode-chip--alert {
+  border-color: #da3633;
+  color: #f85149;
+}
+
+/* Advisor notes in the transcript: a compact row, not a bordered card per note. */
+.advisor-card {
+  border-left: 2px solid var(--border);
+  padding: 2px 0 2px 8px;
+  margin: 2px 0;
+}
+
+.advisor-card--concern { border-left-color: var(--warning); }
+.advisor-card--blocker { border-left-color: var(--danger-text); }
+
+.advisor-card-head {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  width: 100%;
+  min-height: 32px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.advisor-card-glyph { flex: none; }
+.advisor-card-label { flex: none; font-weight: 600; font-size: 0.8rem; }
+
+.advisor-card-preview {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--text-muted);
+  font-size: 0.85rem;
+}
+
+.advisor-card-chevron { flex: none; color: var(--text-muted); }
+
+/* A blocker's text stays readable even while the row is collapsed. */
+.advisor-card-blocker-text {
+  margin: 2px 0 0;
+  font-size: 0.85rem;
+  color: var(--danger-text);
+}
+
+.advisor-card-notes {
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.advisor-card-notes p { margin: 2px 0 0; }
+
+/* Advisor panel + vibe panel shared pieces. */
+.advisor-status {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+
+.advisor-status-detail { color: var(--text-muted); font-size: 0.85rem; margin: 0; }
+.advisor-section { margin-top: 14px; }
+.advisor-section h4 { margin-bottom: 6px; }
+.advisor-list, .advisor-notes, .vibe-workers { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.advisor-empty { color: var(--text-muted); font-size: 0.85rem; }
+
+.advisor-note-head {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  width: 100%;
+  min-height: 34px;
+  padding: 2px 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.advisor-note-owner { flex: none; color: var(--text-muted); font-size: 0.75rem; }
+
+.advisor-note-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.advisor-note-chevron { flex: none; color: var(--text-muted); }
+.advisor-note-body { padding: 4px 0 6px; }
+.advisor-note-meta { color: var(--text-muted); font-size: 0.75rem; margin: 2px 0 0; }
+
+.vibe-worker {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+}
+
+.vibe-worker-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* Panel buttons must still meet the touch minimum (the global `button` rule
+   covers height). The chips above are covered by their own rule, which keeps the
+   44px target; nothing in this round opts out of it. */
+.advisor-section button, .vibe-worker button { min-height: var(--touch-min); }
+.model-sheet button, .model-sheet select, .model-sheet input { min-height: var(--touch-min); }

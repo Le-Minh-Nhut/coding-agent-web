@@ -5,6 +5,7 @@ import {act,cleanup,fireEvent,render,waitFor} from "@testing-library/react";
 import {CollabSocket,type HostFrame} from "@caw/collab-protocol";
 import {ConversationView} from "../../apps/web/src/components/ConversationView.js";
 import {api} from "../../apps/web/src/api.js";
+import {openModelSheet} from "./model-sheet.js";
 vi.mock("../../apps/web/src/api.js",()=>({api:{getConversation:vi.fn(),getAttachInstructions:vi.fn(),getConversationLink:vi.fn(),getModels:vi.fn(),getConversationHistory:vi.fn(),setConversationModel:vi.fn(),restartConversation:vi.fn()}}));
 afterEach(()=>{cleanup();vi.restoreAllMocks();});
 const base:any={id:"c",projectId:"p",title:"Chat",state:"idle",ownership:"managed",modelPreference:"model-a",model:"model-a",nativeSessionId:"native-A"};
@@ -55,7 +56,7 @@ it.each([false,true])("V19 restart completion keeps model edits made while it wa
  let finishSave!:(value:any)=>void,finishRestart!:(value:any)=>void;
  vi.mocked(api.setConversationModel).mockReturnValue(new Promise(resolve=>finishSave=resolve));
  vi.mocked(api.restartConversation).mockReturnValue(new Promise(resolve=>finishRestart=resolve));
- fireEvent.click(f.view.getByText("Conversation model settings"));
+ openModelSheet(f.view);
  const input=f.view.getByLabelText("Custom model ID") as HTMLInputElement;
  fireEvent.change(input,{target:{value:"model-b"}});
  fireEvent.click(f.view.getByRole("button",{name:"Save & restart agent"}));
@@ -161,7 +162,7 @@ it("V19 an unacked prompt that matches a saved row does not duplicate it",async(
 
 it("V19 restart save-only success and failure keep the edited draft",async()=>{
  const f=await fixture();
- fireEvent.click(f.view.getByText("Conversation model settings"));
+ openModelSheet(f.view);
  const input=f.view.getByLabelText("Custom model ID") as HTMLInputElement;
  vi.mocked(api.setConversationModel).mockResolvedValue({ok:true,data:{...base,modelPreference:"model-b"}} as any);
  fireEvent.change(input,{target:{value:"model-b"}});
@@ -179,7 +180,7 @@ it("V19 restart submitted value is the edited draft, so unchanged completion is 
  let finishSave!:(value:any)=>void,finishRestart!:(value:any)=>void;
  const saveSpy=vi.mocked(api.setConversationModel).mockReturnValue(new Promise(resolve=>finishSave=resolve));
  vi.mocked(api.restartConversation).mockReturnValue(new Promise(resolve=>finishRestart=resolve));
- fireEvent.click(f.view.getByText("Conversation model settings"));
+ openModelSheet(f.view);
  const input=f.view.getByLabelText("Custom model ID") as HTMLInputElement;
  // Edit BEFORE clicking restart: the edited value is what gets submitted, so the
  // completion applying the server value back is consistent with the user's intent.
@@ -197,7 +198,7 @@ it("V19 dropdown edit during restart is preserved too",async()=>{
  let finishSave!:(value:any)=>void,finishRestart!:(value:any)=>void;
  vi.mocked(api.setConversationModel).mockReturnValue(new Promise(resolve=>finishSave=resolve));
  vi.mocked(api.restartConversation).mockReturnValue(new Promise(resolve=>finishRestart=resolve));
- fireEvent.click(f.view.getByText("Conversation model settings"));
+ openModelSheet(f.view);
  const input=f.view.getByLabelText("Custom model ID") as HTMLInputElement;
  const select=f.view.container.querySelector("#conversation-model") as HTMLSelectElement;
  fireEvent.change(input,{target:{value:"model-b"}});

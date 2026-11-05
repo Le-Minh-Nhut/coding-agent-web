@@ -46,10 +46,40 @@ function projectCard(page: Page, label: string) {
     .locator("xpath=ancestor::div[.//button[normalize-space(.)='Rename']][1]");
 }
 
-/** The one paragraph that reports the persisted model preference. */
-function preferenceLine(page: Page) {
+/**
+ * Reveal model settings, idempotently.
+ *
+ * The sheet is modal: while it is open the header behind it is deliberately not
+ * clickable. So a second "open" must be a no-op rather than a second pair of
+ * clicks that would time out on an obscured header.
+ */
+async function openModelSheet(page: Page) {
+  if (await page.locator(".model-sheet").count() > 0) return;
+  await page.getByRole("button", { name: "More actions" }).click();
+  await page.getByRole("button", { name: "Model settings" }).click();
+  await expect(page.locator(".model-sheet")).toBeVisible();
+}
+
+/** Close it, idempotently, so navigation behind it stays possible. */
+async function closeModelSheet(page: Page) {
+  if (await page.locator(".model-sheet").count() === 0) return;
+  await page.getByRole("button", { name: "Close model settings" }).click();
+  await expect(page.locator(".model-sheet")).toHaveCount(0);
+}
+
+/**
+ * The paragraph that reports the persisted model preference.
+ *
+ * Round 51 moved it into the model sheet, so a caller that just asserts on it must
+ * first reveal it. This helper does that: if the sheet is not open it opens it
+ * through the real menu path, then returns the line. Callers keep their assertion
+ * unchanged; only the reveal is added, and only when it is actually needed.
+ */
+async function preferenceLine(page: Page) {
+  await openModelSheet(page);
   return page.locator("p", { hasText: "Preferred for next launch:" });
 }
+
 
 async function pageWidth(page: Page) {
   return page.evaluate(() => ({ scrollWidth: document.scrollingElement!.scrollWidth, innerWidth: window.innerWidth }));
@@ -184,7 +214,9 @@ test("V25-02 a model save pending across Back/reopen settles on the model saved 
     await route.continue();
   });
 
-  await page.getByText("Conversation model settings").click();
+  // R51: model settings are a sheet opened from the overflow menu rather than
+  // an inline disclosure in the transcript, so the panel is revealed in two taps.
+  await openModelSheet(page);
   // The async hydration commit lands between fill()'s selectText and insertText
   // halves and clobbers the typed value; wait for it before filling.
   await expect(page.locator("#custom-model")).toHaveValue("preferred/model");
@@ -194,12 +226,17 @@ test("V25-02 a model save pending across Back/reopen settles on the model saved 
 
   // Back to the project, then reopen the conversation: the "FIRST" save is still
   // in flight while the reopened view submits "FINAL".
+  // R51: the model sheet is modal, so it is closed before navigating away — an
+  // open overlay deliberately blocks the header behind it.
+  await closeModelSheet(page);
   await page.getByRole("button", { name: "←" }).click();
   await expect(page.getByRole("heading", { name: "Conversations" })).toBeVisible();
   await page.getByRole("heading", { name: "Seeded conversation", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Seeded conversation", exact: true })).toBeVisible();
 
-  await page.getByText("Conversation model settings").click();
+  // R51: model settings are a sheet opened from the overflow menu rather than
+  // an inline disclosure in the transcript, so the panel is revealed in two taps.
+  await openModelSheet(page);
   // First PATCH still route-gated, so the server still holds the seeded value.
   await expect(page.locator("#custom-model")).toHaveValue("preferred/model");
   await page.locator("#custom-model").fill(finalModel);
@@ -212,20 +249,23 @@ test("V25-02 a model save pending across Back/reopen settles on the model saved 
   expect(bodies).toEqual([{ model: firstModel }, { model: finalModel }]);
 
   // Reopen once more: the screen must render what the server stored.
+  await closeModelSheet(page);
   await page.getByRole("button", { name: "←" }).click();
   await expect(page.getByRole("heading", { name: "Conversations" })).toBeVisible();
   await page.getByRole("heading", { name: "Seeded conversation", exact: true }).click();
-  await expect(preferenceLine(page)).toContainText(finalModel);
-  await expect(preferenceLine(page)).not.toContainText(firstModel);
+  await expect(await preferenceLine(page)).toContainText(finalModel);
+  await expect(await preferenceLine(page)).not.toContainText(firstModel);
 
   // One server, one seeded conversation: put the preference back the way the
   // screen-inventory spec expects it, through the same UI path a user would take
   // (a request from the test context is refused by the Origin/CSRF guards).
-  await page.getByText("Conversation model settings").click();
+  // R51: model settings are a sheet opened from the overflow menu rather than
+  // an inline disclosure in the transcript, so the panel is revealed in two taps.
+  await openModelSheet(page);
   await expect(page.locator("#custom-model")).toHaveValue(finalModel);
   await page.locator("#custom-model").fill("preferred/model");
   await page.getByRole("button", { name: "Save model" }).click();
-  await expect(preferenceLine(page)).toContainText("preferred/model");
+  await expect(await preferenceLine(page)).toContainText("preferred/model");
 
   await assertNoUnexpectedAppErrors(page);
 });
@@ -278,8 +318,8 @@ test("V25-04 an older Retry response cannot rewind a newer one", async ({ page }
   expect(released).toEqual([newerModel, olderModel]);
 
   // The late older response must not repaint the newer result.
-  await expect(preferenceLine(page)).toContainText(newerModel);
-  await expect(preferenceLine(page)).not.toContainText(olderModel);
+  await expect(await preferenceLine(page)).toContainText(newerModel);
+  await expect(await preferenceLine(page)).not.toContainText(olderModel);
 
   await assertNoUnexpectedAppErrors(page);
 });

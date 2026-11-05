@@ -25,6 +25,8 @@ Tài liệu dành cho người mới dùng Coding Agent Web (CAW) trên Ubuntu c
 19. [Khi không có diff](#19-khi-không-có-diff)
 20. [Nội dung bị ẩn, bị cắt, hay không có](#20-nội-dung-bị-ẩn-bị-cắt-hay-không-có)
 21. [Bàn phím và cuộn trên điện thoại](#21-bàn-phím-và-cuộn-trên-điện-thoại)
+22. [Advisor — mô hình review thứ hai](#22-advisor--mô-hình-review-thứ-hai)
+23. [Vibe mode — director và worker](#23-vibe-mode--director-và-worker)
 
 ## 1. Giới thiệu
 
@@ -380,23 +382,47 @@ Không. Chỉ session **do CAW quản lý** mới dùng được: writer phải 
 
 ## 14. Giao diện di động mới (thanh trên, menu, nút Latest)
 
-**Thanh trên gọn.** Phần đầu của conversation giờ chỉ còn: nút **←** quay lại, tên conversation, một dòng trạng thái nhỏ, và nút **⋯ More actions**. Dòng trạng thái gộp hai thông tin: trạng thái conversation mà CAW đang giữ (ví dụ `idle`, `running`, `stopped`) và trạng thái kết nối live (`connecting`, `live`/`idle`, `running`, `reconnecting`, `disconnected`, `unknown`). Chấm tròn đổi màu: xanh khi kết nối đang tốt, vàng khi đang kết nối lại, đỏ khi mất kết nối hoặc không xác định — nhờ vậy bạn thấy ngay "mất kết nối" mà không phải cuộn.
+**Thanh trên gọn.** Phần đầu của conversation chỉ còn: nút **←** quay lại, tên conversation, một dòng trạng thái nhỏ, và nút **⋯ More actions**.
+
+**Dòng trạng thái chỉ nói MỘT điều.** Trước đây dòng này in cả trạng thái conversation lẫn trạng thái kết nối, nên bạn thường thấy những dòng như `idle · idle` — cùng một sự thật in hai lần, chiếm chỗ mà một dòng transcript cần. Nay dòng đó chỉ hiện **trạng thái kết nối live** (`idle`, `running`, `connecting`, `reconnecting`, `disconnected`, `unknown`), vì đó là thứ bạn có thể hành động ngay (Retry, lấy link mới). Trạng thái mà CAW đang lưu cho conversation vẫn nằm trong **chi tiết session**.
+
+Chấm tròn đổi màu: xanh khi kết nối đang tốt, vàng khi đang kết nối lại, đỏ khi mất kết nối hoặc không xác định.
+
+**Không còn banner trạng thái lặp lại.** CAW **không** còn vẽ một dải ngang nói "đã kết nối, không có lượt nào đang chạy" hay "agent đang làm việc" — dòng trạng thái trên thanh trên đã nói điều đó. Những dải ngang **vẫn còn** khi chúng báo điều bạn phải xử lý: mất kết nối, đang kết nối lại, trạng thái không xác định, phòng đã đóng, lỗi link, link read-only, hoặc một yêu cầu phê duyệt đang chờ. Chúng không bị giấu đi, vì giấu chúng là giấu đúng tín hiệu duy nhất cho biết cần làm gì.
+
+**Hai chip chế độ trên dòng trạng thái.** Advisor và Vibe không chiếm mỗi thứ một hàng: chúng là hai chip nhỏ ngay cạnh dòng trạng thái.
+
+| Chip | Khi nào hiện | Chạm để làm gì |
+| --- | --- | --- |
+| `Adv ●` | Có ít nhất một ghi chú advisor trong lịch sử session | Mở panel Advisor |
+| `Adv ⛔` | Có ghi chú mức **blocker** | Mở panel Advisor (chip này đổi màu đỏ để bạn không bỏ sót) |
+| `Vibe ● n` | Chế độ Vibe đang **bật** (n = số worker) | Mở panel Vibe mode |
+
+Chip `Vibe` chỉ hiện khi chế độ đang bật — trạng thái "tắt" là mặc định nên không đáng chiếm chỗ. Cả hai panel luôn mở được từ menu **⋯** dù chip có hiện hay không (xem [chương 22](#22-advisor--mô-hình-review-thứ-hai) và [chương 23](#23-vibe-mode--director-và-worker)).
 
 **Menu ⋯ (More actions).** Các thao tác phụ nằm trong menu này, mỗi mục một lần chạm:
 
 | Mục | Việc nó làm |
 | --- | --- |
 | Activity | Mở timeline sự kiện hoạt động |
+| Advisor | Mở panel Advisor (xem [chương 22](#22-advisor--mô-hình-review-thứ-hai)) |
+| Vibe mode | Mở panel Vibe mode (xem [chương 23](#23-vibe-mode--director-và-worker)) |
 | Agents (n) | Mở panel agent con (chỉ hiện khi có agent) |
 | Handoff context | Nén ngữ cảnh tại chỗ (xem [chương 10](#10-lệnh-handoff--nén-ngữ-cảnh-tại-chỗ)) |
 | Stop OMP session | Kết thúc tiến trình OMP do CAW quản lý |
-| Model & session info | Mở phần model và thông tin session |
+| Model settings | Mở **sheet** cấu hình model (xem bên dưới) |
+
+**Cấu hình model giờ nằm trong một sheet, không nằm trong transcript.** Trước đây phần model settings là một khối có thể mở/đóng **nằm ngay trong dòng chảy transcript**, nên dù đóng nó vẫn chiếm một hàng ngang vĩnh viễn phía trên cuộc trò chuyện. Nay nó là một **sheet** (bảng trượt lên từ đáy màn hình), mở từ menu **⋯ → Model settings** hoặc bằng lệnh `/model` trong ô chat. Mọi thứ bên trong giữ nguyên: model ưu tiên cho lần chạy sau, model tuỳ chỉnh, nút **Save model** / **Save & restart agent**, model hiệu lực đang được báo, và các thông báo lỗi. Bản nháp bạn đang gõ trong sheet cũng không bị mất khi bạn đóng/mở lại.
+
+**Tiết kiệm không gian — đo được.** Ở màn 390×844, phần "chrome" cố định (thanh trên + dải trạng thái + ô nhập) giảm từ **180,6 px xuống 126 px**, và vùng transcript tăng từ **534 px lên 666,6 px** — tức **+132,6 px (~25%)** nội dung đọc được, trên mọi kích thước màn hình đã đo (320×568, 375×667, 390×844, 430×932, 768×1024, 1440×900). Khoảng cách giữa các tin nhắn và padding cũng được thu lại; cỡ chữ **không** bị giảm, và mọi nút bấm vẫn đạt tối thiểu **44×44 px**.
 
 **Stop generating nằm NGOÀI menu.** Khi agent đang chạy, nút **Stop generating** luôn hiện trực tiếp trên thanh trên — một lần chạm, không phải mở menu. Đây là chủ đích: lúc cần dừng gấp thì không được bắt bạn đi tìm.
 
 **Yêu cầu phê duyệt (approval) cũng không nằm trong menu.** Thẻ approval luôn nằm trong transcript, ngay tại chỗ nó được hỏi, để không bao giờ bị giấu sau một menu.
 
 **Nút Latest giờ là nút nổi.** **↓ Latest** chỉ hiện khi bạn đã cuộn lên khỏi cuối transcript, và biến mất khi bạn đã ở cuối. Nó nổi phía trên ô nhập, không chiếm chỗ trong bố cục và không che ô prompt. Quan trọng: khi bạn đang đọc tin cũ, tin mới đến **không** tự cuộn màn hình của bạn. Chỉ khi bạn chạm **↓ Latest** (hoặc tự cuộn xuống cuối) thì CAW mới bám theo tin mới.
+
+**Thông báo thường ngày không còn chiếm thẻ riêng.** Các sự kiện nội bộ như đổi model, đổi mức suy nghĩ (thinking level), collab kết nối, agent trở về idle — được hiển thị dưới dạng dòng gọn trong transcript hoặc trong **Activity**, kèm chi tiết và mốc thời gian khi bạn mở rộng. Không có sự kiện nào bị xoá khỏi lịch sử; chúng chỉ không còn chiếm một thẻ lớn.
 
 ## 15. Nhóm hoạt động tool (agent activity)
 
@@ -560,3 +586,144 @@ Cách xử lý: tìm đường dẫn/thư mục cha bị hỏng (symlink vòng, 
 - Đang đọc tin cũ thì tin mới đến **không** kéo màn hình của bạn xuống. Chạm **↓ Latest** khi bạn muốn quay lại cuối.
 - Nếu bạn bật "giảm chuyển động" (Reduce Motion) trong iOS, các hiệu ứng quay/chuyển động được tắt.
 
+
+## 22. Advisor — mô hình review thứ hai
+
+**Advisor là gì.** Advisor (OMP gọi là *advisor/watchdog*) là một **model thứ hai** ngồi cạnh agent chính. Nó đọc phần transcript mới của agent chính, tự điều tra trong workspace bằng bộ công cụ riêng (`read`, `grep`, `glob`, và `recall` nếu có memory backend), rồi **chèn nhận xét** trở lại phiên chính. Advisor **không** phê duyệt hành động và **không** tự sửa state của phiên chính — nó chỉ nói.
+
+Ba mức nghiêm trọng (severity) — đây là điều quyết định nó hiện to hay nhỏ trong CAW:
+
+| Mức | Ý nghĩa | Cách CAW hiển thị |
+| --- | --- | --- |
+| `nit` | Góp ý nhỏ: dọn dẹp, đơn giản hoá | Một dòng gọn `⚠ Advisor · nit` |
+| `concern` | Rủi ro thật, hướng đi có thể sai | Một dòng gọn kèm nhãn **Concern** |
+| `blocker` | Làm tiếp là chắc chắn hỏng/hoang phí | Dòng **màu đỏ**, và **nội dung được in ra dù bạn chưa mở** |
+
+**Trong transcript.** Mỗi lần advisor có nhận xét, CAW vẽ **một dòng gọn** ngay tại vị trí đó trong cuộc trò chuyện, không phải một thẻ lớn:
+
+```
+⚠ Advisor · Concern                     ›
+   Kiểm tra giả định về race condition
+```
+
+Chạm vào dòng đó để mở toàn bộ nội dung, tên advisor đã nói, và số lượt trước đó (`from N turns ago`). Với mức `blocker`, CAW **không** giấu nội dung sau một cú chạm: nó in thẳng ra, vì một cảnh báo bạn không đọc được thì không phải cảnh báo.
+
+Các ghi chú advisor **không bị mất** khi lịch sử được phát lại (replay) hay khi context bị nén (compaction): chúng là một dòng transcript như mọi dòng khác, nên vẫn còn trong **History** và khi xem lại phiên đã lưu.
+
+**Chip `Adv` trên thanh trên.** Chip `Adv ●` xuất hiện khi phiên này đã có ít nhất một ghi chú advisor; chip chuyển thành `Adv ⛔` (đỏ) khi có ít nhất một `blocker`. Chạm chip để mở panel Advisor.
+
+**Panel Advisor** (menu **⋯ → Advisor**) cho bạn:
+
+- **Số lượng ghi chú** đã ghi nhận trong phiên này (bằng chứng advisor **đã chạy**).
+- **Danh sách advisor** đã từng nói trong phiên (khi có nhiều advisor trong roster).
+- **Danh sách ghi chú gần đây**, sắp theo mức nghiêm trọng, mở ra xem đầy đủ.
+- **Nơi điều khiển advisor** — xem phần dưới.
+
+### Điều khiển advisor: cái nào làm được trong CAW, cái nào phải ra terminal
+
+Đây là phần dễ hiểu sai nhất, nên nói thẳng.
+
+| Việc | Làm được trong CAW? | Ghi chú |
+| --- | --- | --- |
+| **Đọc** ghi chú advisor trong chat và trong panel | **Có** | Đọc từ chính lịch sử phiên |
+| **Bật/tắt** advisor (`/advisor on` / `/advisor off`) | **Không** | Phải chạy trong **terminal của phiên** |
+| **Xem trạng thái chi tiết** (`/advisor status`: từng advisor, model, token, chi phí) | **Không** | Terminal |
+| **Xem toàn bộ transcript của advisor** (`/advisor dump`, `/advisor dump raw`) | **Không** | Terminal |
+| **Cấu hình advisor** (`/advisor configure` — model, roster, nhịp review) | **Không** | Terminal (đây là trình soạn thảo tương tác) |
+
+**Vì sao?** Lệnh `/advisor` chạy **bên trong tiến trình OMP** và gọi vào runtime advisor của chính phiên đó. Kênh điều khiển mà CAW đang giữ (OMP Collab) chỉ truyền khung hội thoại — **không có khung nào cho advisor**. Nếu bạn gõ `/advisor off` vào ô chat của CAW, nó sẽ được gửi như **một prompt bình thường cho model**, tức là hoàn toàn không tắt advisor. CAW **không** làm điều đó và cũng **không** hiện một công tắc giả để bạn tưởng nó đã tắt.
+
+**Cách bật/tắt thật:** mở terminal của phiên (trên Ubuntu: `tmux attach` vào session đó, hoặc dùng nút **Attach instructions** trong CAW để lấy lệnh) rồi gõ:
+
+```
+/advisor            # bật/tắt cho phiên hiện tại
+/advisor on         # bật
+/advisor off        # tắt
+/advisor status     # xem trạng thái, model, token, chi phí
+/advisor dump       # xem transcript advisor (bản gọn)
+/advisor dump raw   # xem bản đầy đủ (kèm system prompt, thinking, tool call)
+/advisor configure  # mở trình cấu hình (chỉ trong TUI)
+```
+
+**Phân biệt hai loại "bật".** `/advisor on|off` chỉ đổi **cho phiên đang chạy**, không ghi vào file cấu hình. Còn `advisor.enabled` trong cấu hình là mức **mặc định** cho các phiên mới. Vì vậy tắt advisor hôm nay **không** có nghĩa là phiên sau sẽ tắt.
+
+**Khi advisor báo `no_model`.** Nếu advisor được bật nhưng **không có model nào** giải được cho role `advisor`, OMP báo advisor ở trạng thái `no_model` — tức là **đang bật nhưng không chạy**. CAW sẽ không hiện model nào trong trường hợp này, thay vì bịa ra một model. Cần đặt model, ví dụ trong overlay/cấu hình:
+
+```yaml
+modelRoles:
+   advisor: anthropic/claude-sonnet-4-5:medium
+advisor:
+   enabled: true
+```
+
+**Advisor chạy độc lập về chi phí.** Advisor là **lượt gọi model riêng**, nên nó tốn token và tiền riêng; đừng bật nó rồi quên. Transcript của advisor được ghi vào file riêng trong thư mục phiên (`__advisor.jsonl`, hoặc `__advisor.<tên>.jsonl` khi có roster), nên `omp stats` vẫn tính được chi phí đó.
+
+## 23. Vibe mode — director và worker
+
+**Vibe mode là gì.** Vibe mode biến **phiên chính thành một "director"**: nó **không tự sửa tệp hay chạy lệnh nữa**, mà giao việc cho các **worker** là những phiên con **sống lâu, có transcript riêng**. Bộ công cụ của director bị thu về `read` (+ `todo` nếu có) và năm công cụ điều khiển worker. Worker là bên tìm kiếm, sửa, chạy, build; director kiểm chứng lại bằng cách đọc đúng những tệp đã bị chạm.
+
+> Đừng nhầm Vibe mode với "phong cách viết code thoải mái". Đây là một **chế độ vận hành** thật của phiên, đổi cả bộ công cụ lẫn cách phân công việc.
+
+**Hai tầng worker.** Mỗi worker là một subagent thật, có transcript riêng:
+
+| Tầng | Agent đi kèm | Nhịp dùng |
+| --- | --- | --- |
+| `fast` | `sonic` | Việc cơ học, bản nháp, khối lượng lớn |
+| `good` | `task` | Thiết kế, phán đoán, và soát lại kết quả của `fast` |
+
+Model của từng worker do **OMP** quyết định theo cấu hình routing (role `smol`/`task` và các override). CAW **không** hard-code model và **không** đổi cấu hình model toàn cục chỉ vì bạn bật Vibe.
+
+**Năm công cụ director dùng** (bạn sẽ thấy chúng trong transcript khi director làm việc):
+
+| Công cụ | Việc nó làm |
+| --- | --- |
+| `vibe_spawn` | Tạo worker mới (tầng `fast`/`good` + brief đầy đủ) |
+| `vibe_send` | Gửi tiếp chỉ dẫn cho một worker |
+| `vibe_wait` | Chờ worker đầu tiên xong lượt |
+| `vibe_kill` | Kết thúc một worker (giữ lại transcript) |
+| `vibe_list` | Liệt kê worker kèm trạng thái, model, hoạt động gần nhất |
+
+**Panel Vibe** (menu **⋯ → Vibe mode**, hoặc chip `Vibe ● n`):
+
+- **Trạng thái thật** của chế độ, đọc từ **tiến trình OMP đang chạy**: `● On`, `Off`, hay `Unknown`.
+- Khi **Off**: ô nhập **directive đầu tiên** (tuỳ chọn) và nút **Enable Vibe**.
+- Khi **On**: danh sách **worker** kèm trạng thái (`running`/`idle`/…), nút **View workers** mở panel Agents, và nút **Exit Vibe**.
+- **Bộ công cụ director** hiện tại và model director — lấy từ tiến trình, không phải phỏng đoán.
+
+**Bật Vibe — hai bước, theo đúng thứ tự.** Chạm **Enable Vibe** thì CAW làm hai việc: (1) gửi yêu cầu **đổi chế độ** tới tiến trình OMP, (2) **chỉ khi OMP xác nhận đã bật**, mới gửi directive của bạn như một prompt bình thường. Nếu bước (1) bị từ chối, **không** directive nào được gửi — nếu không thì bạn sẽ thấy một prompt đi vào phiên chưa hề ở Vibe mode. (Lệnh native `/vibe <prompt>` làm cả hai trong một lần gõ, nhưng nó **chỉ có trong TUI**, nên CAW làm tương đương bằng hai bước nó thực sự có.)
+
+**Ba trạng thái, đừng lẫn:**
+
+| Hiện trên panel | Nghĩa |
+| --- | --- |
+| `● On` | OMP xác nhận chế độ đang **bật** (đọc từ tiến trình) |
+| `Off` | OMP xác nhận chế độ **tắt** |
+| `Unknown` | **Không hỏi được** tiến trình (chưa có bridge, hoặc listener đã dừng) |
+
+`Unknown` **không** phải `Off`. Khi ở `Unknown`, CAW **không** hiện công tắc nào — một chế độ chưa từng đọc được thì không phải là chế độ đang tắt.
+
+**Xung đột với plan/goal.** Vibe mode **xung khắc** với chế độ plan và goal, kể cả khi chúng đang **tạm dừng (paused)**. Panel đọc trạng thái thật và nói rõ chế độ nào đang chặn, thay vì đưa ra một nút bấm rồi bị từ chối:
+
+> Vibe mode cannot start while plan mode is active or paused. Exit it first.
+
+**Bốn thao tác "dừng" KHÁC NHAU — đây là chỗ dễ gây mất việc nhất:**
+
+| Thao tác | Nó dừng cái gì | Giữ lại gì |
+| --- | --- | --- |
+| **Stop generating** | Chỉ **lượt đang chạy** của phiên chính | Toàn bộ, kể cả worker đang chạy |
+| **Kill** (trong panel Vibe) | **Một worker** đang chạy | Transcript của worker đó vẫn đọc được |
+| **Exit Vibe** | **Cả Vibe mode**, huỷ các lượt worker đang chạy | Transcript từng worker vẫn còn; bộ công cụ được khôi phục |
+| **Stop OMP session** (menu ⋯) | **Cả tiến trình OMP** do CAW quản lý | Journal và lịch sử vẫn còn trên đĩa |
+
+Vì **Exit Vibe** huỷ các lượt worker đang chạy, CAW **hỏi xác nhận trước**, và nói rõ đang huỷ bao nhiêu worker:
+
+> Exiting Vibe mode will cancel 2 active worker turns. Each worker's transcript is kept and stays readable afterwards.
+
+Nút **Kill** chỉ xuất hiện cho worker **đang thật sự chạy** — huỷ một worker đang rảnh sẽ khiến bạn tưởng nó vừa dừng một việc gì đó.
+
+**Sau khi khởi động lại / resume.** Resume một phiên đang ở chế độ `vibe` sẽ **dựng lại** các worker đã hoàn tất dưới dạng phiên **idle/parked** kèm transcript con của chúng. Một lượt bị **ngắt do tiến trình restart thì KHÔNG tự chạy lại**. Worker đã bị kill hoặc đã bị Exit thì ở trạng thái kết thúc vĩnh viễn.
+
+**Bridge điều khiển.** CAW điều khiển Vibe qua một **bridge chạy bên trong chính tiến trình OMP** (một extension nhỏ, chỉ lắng nghe trên loopback, xác thực bằng token riêng cho từng phiên). Điều này có hai hệ quả bạn cần biết:
+
+- Phiên **được khởi chạy từ CAW sau khi cập nhật này** mới có bridge.
+- Phiên **đang chạy sẵn từ trước** thì **chưa** có bridge. Panel sẽ báo `Unknown` kèm lý do, và CAW nói rõ: cần **khởi động lại agent** để gắn bridge. CAW **không** giả vờ điều khiển được phiên đó.

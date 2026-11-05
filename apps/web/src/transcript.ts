@@ -39,6 +39,14 @@ export interface TranscriptMessage {
    * renderer must then say so rather than inventing an outcome.
    */
   toolResult?: ToolResultLike;
+  /**
+   * The `customType` of the entry this row came from, when it was a custom
+   * message. Kept because a few host types need dedicated rendering — an advisor
+   * card carries structured note/severity data that the flattened text loses.
+   */
+  customType?: string;
+  /** The entry's `details` payload, verbatim, for those same renderers. */
+  customDetails?: unknown;
 }
 
 /** Structural mirror of the guest renderer's `ToolResultLike` (no host import). */
@@ -215,9 +223,28 @@ function displayMessage(entry: SessionEntry): TranscriptMessage | null {
     // journals really do omit the field.
     const prompt = entry.customType === "collab-prompt";
     if (!prompt && !entry.display) return null;
+    // An advisor card is the one custom message whose payload the UI renders
+    // structurally (severity, advisor name, note text), so its type and details
+    // ride along on the row. Everything else keeps the flattened-text behaviour
+    // it had; the fields are additive and ignored by rows that do not read them.
+    const isAdvisor = entry.customType === "advisor";
     const details = entry.details === undefined ? "" : `\n${JSON.stringify(entry.details, null, 2)}`;
-    const text = prompt ? textFromContent(entry.content) : `${entry.customType}: ${textFromContent(entry.content)}${details}`;
-    return { id: entry.id, identity: entry.id, role: prompt ? "user" : "notice", text, blocks: transcriptBlocksFromContent(entry.content), source: "entry" };
+    const text = isAdvisor
+      // The advisor's own structured details are not repeated as JSON here: the
+      // compact card prints the notes themselves, and the raw payload is still
+      // reachable through the card's own disclosure.
+      ? textFromContent(entry.content)
+      : prompt ? textFromContent(entry.content) : `${entry.customType}: ${textFromContent(entry.content)}${details}`;
+    return {
+      id: entry.id,
+      identity: entry.id,
+      role: prompt ? "user" : "notice",
+      text,
+      blocks: transcriptBlocksFromContent(entry.content),
+      source: "entry",
+      customType: entry.customType,
+      ...(entry.details === undefined ? {} : { customDetails: entry.details }),
+    };
   }
   if (entry.type === "compaction") return {
     id: entry.id,

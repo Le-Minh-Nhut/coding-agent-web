@@ -41,6 +41,25 @@ export type { CollabRegistryOptions } from "./collab-registry.js";
 
 export { DefaultModelCatalogService, parseOmpModelsOutput } from "./model-catalog.js";
 export type { ModelCatalogOptions } from "./model-catalog.js";
+
+export { BridgeClient } from "./bridge/client.js";
+export type {
+  BridgeClientOptions,
+  BridgeModeOutcome,
+  BridgeModeResult,
+  BridgeModeState,
+  BridgeReadResult,
+  BridgeState,
+} from "./bridge/client.js";
+export {
+  allocateLoopbackPort,
+  BRIDGE_CONFIG_ENV,
+  bridgeExtensionPath,
+  bridgeConfigPath,
+  prepareBridge,
+  readBridgeConfig,
+} from "./bridge/config.js";
+export type { BridgeConfig, PrepareBridgeResult } from "./bridge/config.js";
 export {
   AdapterError,
   RegistryUnreadableError,

@@ -6,6 +6,7 @@ import {CollabSocket,type HostFrame} from "@caw/collab-protocol";
 import {ConversationView} from "../../apps/web/src/components/ConversationView.js";
 import {App} from "../../apps/web/src/App.js";
 import {api} from "../../apps/web/src/api.js";
+import {openModelSheet} from "./model-sheet.js";
 vi.mock("../../apps/web/src/api.js",()=>({api:{getConversation:vi.fn(),getAttachInstructions:vi.fn(),getConversationLink:vi.fn(),setConversationModel:vi.fn(),restartConversation:vi.fn(),getModels:vi.fn(),getConversationHistory:vi.fn(),getMe:vi.fn(),getCapabilities:vi.fn(),listProjects:vi.fn(),listConversations:vi.fn(),listNativeSessions:vi.fn()}}));
 afterEach(()=>{cleanup();vi.restoreAllMocks();});
 const base:any={id:"c",projectId:"p",title:"Chat",state:"idle",ownership:"managed",modelPreference:"model-a",model:"model-a",nativeSessionId:"native-A"};
@@ -51,7 +52,7 @@ async function enterSaved(f:Awaited<ReturnType<typeof fixture>>,page:any){
 
 it.each([false,true])("V21 late initial metadata must preserve a model draft already edited (edit=%s)",async(edit)=>{
  const d=deferred();const f=await fixture(0,false,d.promise);
- fireEvent.click(screen.getByText("Conversation model settings"));
+ openModelSheet();
  const input=screen.getByLabelText("Custom model ID") as HTMLInputElement;
  if(edit)fireEvent.change(input,{target:{value:"NEW_UNSAVED_MODEL"}});
  await act(async()=>d.resolve({ok:true,data:{...base,modelPreference:"OLD_SAVED_MODEL"}}));
@@ -77,7 +78,7 @@ it.each([false,true])("V21 old saved pagination cannot reappear after live resta
  vi.mocked(api.setConversationModel).mockResolvedValue({ok:true,data:{...base}});
  vi.mocked(api.restartConversation).mockResolvedValue({ok:true,data:{...base}});
  vi.mocked(api.getConversationLink).mockResolvedValue({ok:true,data:{url:"ws://127.0.0.1:7466/r/0123456789abcdef.AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE",access:"full",instanceId:"host-B",generation:2}});
- fireEvent.click(screen.getByText("Conversation model settings"));
+ openModelSheet();
  await act(async()=>fireEvent.click(screen.getByRole("button",{name:"Save & restart agent"})));
  await waitFor(()=>expect(f.sockets).toHaveLength(2));await f.emit(welcome(0));
  if(late)await act(async()=>d.resolve(history("STALE_OLDER")));

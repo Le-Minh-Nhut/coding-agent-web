@@ -6,6 +6,7 @@ import { ConversationView } from "../../apps/web/src/components/ConversationView
 import { api } from "../../apps/web/src/api.js";
 import { MUTATION_CANCELLED } from "../../apps/web/src/mutation-order.js";
 import { CollabSocket, type HostFrame } from "@caw/collab-protocol";
+import { openModelSheet, openModelSheetWhenReady } from "./model-sheet.js";
 
 vi.mock("../../apps/web/src/api.js", () => ({
   api: {
@@ -81,7 +82,7 @@ async function restartWith(returnedState: string, deliverWelcome: boolean) {
   await act(async () => {
     render(<ConversationView conversationId="c-1" onBack={() => {}} />);
   });
-  fireEvent.click(await screen.findByText("Conversation model settings"));
+  await openModelSheetWhenReady();
   await act(async () => {
     fireEvent.click(screen.getByRole("button", { name: "Save & restart agent" }));
   });
@@ -132,7 +133,7 @@ describe("F01 restart honesty", () => {
     vi.mocked(api.restartConversation).mockResolvedValue({ ok: true, data: { ...base, modelPreference: "model-b", state: "running" } } as never);
     vi.spyOn(window, "confirm").mockReturnValue(true);
     render(<ConversationView conversationId="c-1" onBack={() => {}} />);
-    fireEvent.click(await screen.findByText("Conversation model settings"));
+    await openModelSheetWhenReady();
     fireEvent.change(screen.getByLabelText("Custom model ID"), { target: { value: "model-b" } });
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Save & restart agent" })); });
     expect(api.setConversationModel).toHaveBeenCalledWith("c-1", "model-b");
@@ -155,7 +156,7 @@ describe("F01 restart honesty", () => {
     vi.spyOn(CollabSocket.prototype, "connect").mockImplementation(function (this: CollabSocket) { socket = this; this.onOpen?.(); });
     vi.spyOn(window, "confirm").mockReturnValue(true);
     const view = render(<ConversationView conversationId="c-1" onBack={() => {}} />);
-    await screen.findByText("Conversation model settings");
+    await openModelSheetWhenReady();
     const input = screen.getByLabelText("Custom model ID");
     fireEvent.change(input, { target: { value: "model-b" } });
     fireEvent.click(screen.getByRole("button", { name: "Save & restart agent" }));
@@ -171,7 +172,7 @@ describe("F01 restart honesty", () => {
     vi.mocked(api.setConversationModel).mockResolvedValue({ ok: false, error: { code: "internal", message: "Save refused" } } as never);
     vi.spyOn(window, "confirm").mockReturnValue(true);
     render(<ConversationView conversationId="c-1" onBack={() => {}} />);
-    await screen.findByText("Conversation model settings");
+    await openModelSheetWhenReady();
     fireEvent.change(screen.getByLabelText("Custom model ID"), { target: { value: "model-b" } });
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Save & restart agent" })); });
     expect(api.restartConversation).not.toHaveBeenCalled();
@@ -187,7 +188,7 @@ describe("F01 restart honesty", () => {
     vi.mocked(api.restartConversation).mockResolvedValue({ ok: true, data: { ...base, modelPreference: "model-b", state: "starting" } } as never);
     vi.spyOn(window, "confirm").mockReturnValue(true);
     const view = render(<ConversationView conversationId="c-1" onBack={() => {}} />);
-    await screen.findByText("Conversation model settings");
+    await openModelSheetWhenReady();
     fireEvent.change(screen.getByLabelText("Custom model ID"), { target: { value: "model-b" } });
     fireEvent.click(screen.getByRole("button", { name: "Save & restart agent" }));
     view.rerender(<ConversationView conversationId="c-2" onBack={() => {}} />);
@@ -203,7 +204,7 @@ describe("F01 restart honesty", () => {
     vi.mocked(api.setConversationModel).mockResolvedValue(MUTATION_CANCELLED as never);
     vi.spyOn(window, "confirm").mockReturnValue(true);
     render(<ConversationView conversationId="c-1" onBack={() => {}} />);
-    await screen.findByText("Conversation model settings");
+    await openModelSheetWhenReady();
     fireEvent.change(screen.getByLabelText("Custom model ID"), { target: { value: "model-b" } });
     await waitFor(() => expect((screen.getByRole("button", { name: "Save & restart agent" }) as HTMLButtonElement).disabled).toBe(false));
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Save & restart agent" })); });
@@ -217,7 +218,7 @@ describe("F01 restart honesty", () => {
     vi.mocked(api.restartConversation).mockResolvedValue({ ok: false, error: { code: "internal", message: "Restart refused" } } as never);
     vi.spyOn(window, "confirm").mockReturnValue(true);
     render(<ConversationView conversationId="c-1" onBack={() => {}} />);
-    fireEvent.click(screen.getByText("Conversation model settings"));
+    openModelSheet();
     fireEvent.change(screen.getByLabelText("Custom model ID"), { target: { value: "model-b" } });
     await waitFor(() => expect((screen.getByRole("button", { name: "Save & restart agent" }) as HTMLButtonElement).disabled).toBe(false));
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Save & restart agent" })); });

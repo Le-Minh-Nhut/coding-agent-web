@@ -19,11 +19,14 @@ import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join, resolve } from "node:path";
 import {
+  BRIDGE_CONFIG_ENV,
+  bridgeExtensionPath,
   DefaultCapabilityService,
   DefaultCollabRegistryService,
   DefaultModelCatalogService,
   DefaultNativeSessionCatalog,
   DefaultSessionLeaseProbe,
+  prepareBridge,
   StaleGenerationError,
 } from "@caw/omp-adapter";
 import { createSupervisor, RuntimeError } from "@caw/runtime";
@@ -56,36 +59,54 @@ export function relayCapability(config: { publicOrigin?: string; port: number })
   };
 }
 
-export function renderOverlay(port: number, webUrl?: string): string {
+export function renderOverlay(port: number, webUrl?: string, bridgeExtensionPath?: string): string {
   const lines = ["collab:", "  autoStart: control", `  relayUrl: ws://127.0.0.1:${port}`];
   if (webUrl) {
     lines.push(`  webUrl: ${webUrl}`);
   }
   lines.push("");
+  if (bridgeExtensionPath) {
+    // The extension is what puts a listener inside the live TUI process, which is
+    // the only place `ctx.sessionModes` exists. Listing it is the whole reason the
+    // bridge can be reached at all.
+    lines.push("extensions:", `  - ${bridgeExtensionPath}`, "");
+  }
   return lines.join("\n");
 }
 
-export async function writeOverlay(overlayDir: string, conversationId: string, port: number, webUrl?: string): Promise<string> {
+export async function writeOverlay(
+  overlayDir: string,
+  conversationId: string,
+  port: number,
+  webUrl?: string,
+  bridgeExtensionPath?: string,
+): Promise<string> {
   const path = join(overlayDir, `${conversationId.replace(/[^a-zA-Z0-9-]/g, "")}.yml`);
-  await writeFile(path, renderOverlay(port, webUrl), { mode: 0o600 });
+  await writeFile(path, renderOverlay(port, webUrl, bridgeExtensionPath), { mode: 0o600 });
   return path;
 }
 
 export async function launchWithOverlay<T>(
   input: { overlayDir: string; conversationId: string; configPath?: string; relayPort: number; webUrl?: string },
-  launch: (configPath: string) => Promise<T>,
+  launch: (configPath: string, env: Record<string, string>) => Promise<T>,
   write: typeof writeOverlay = writeOverlay,
 ): Promise<T> {
   let configPath = input.configPath;
+  let env: Record<string, string> = {};
   if (!configPath) {
     try {
-      configPath = await write(input.overlayDir, input.conversationId, input.relayPort, input.webUrl);
+      const extensionPath = bridgeExtensionPath();
+      configPath = await write(input.overlayDir, input.conversationId, input.relayPort, input.webUrl, extensionPath);
+      // The port and token live in a sidecar file, and only its *path* travels to
+      // the agent: an `-e KEY=value` would put the bearer token in
+      // /proc/<pid>/cmdline for as long as the tmux client call runs.
+      env = (await prepareBridge(input.overlayDir, input.conversationId)).env;
     } catch (error) {
       const code = error && typeof error === "object" && "code" in error && typeof error.code === "string" ? error.code : "unknown";
       throw new RuntimeError("agent_launch_failed", `Could not write the agent overlay required for Collab hosting (${code}).`);
     }
   }
-  return launch(configPath);
+  return launch(configPath, env);
 }
 
 export function createRuntimeSpec(deps: {
@@ -461,13 +482,15 @@ const supervisor = createSupervisor({
     },
     launch: async (spec) => launchWithOverlay(
       { overlayDir, conversationId: spec.conversationId, configPath: spec.configPath, relayPort: config.relayPort, webUrl: config.publicOrigin },
-      async (configPath) => {
+      async (configPath, env) => {
         const session = await tmux.launch({
           name: spec.name,
           cwd: spec.cwd,
           configPath,
           model: spec.model,
-          env: spec.env,
+          // The bridge's own env is the launch's; a caller-supplied value under the
+          // same key would be a second answer to the same question, so it wins.
+          env: { ...env, ...spec.env },
           args: spec.resumeSessionPath ? ["--resume", spec.resumeSessionPath] : [],
         });
         return {
@@ -588,6 +611,9 @@ const app = buildApp({
   // the marker's ambiguity instead of waiting out the age backstop. A count, not
   // a verdict: the route compares it against the baseline taken before the paste.
   countHandoffRefusals: (sessionId) => tmux.countHandoffRefusals(sessionId),
+  // The same directory the launch writes each conversation's overlay and bridge
+  // config into, so a route can find the bridge it did not allocate itself.
+  bridgeConfigDir: overlayDir,
 });
 await app.ready();
 app.log.info({ configFile: config.configFile ?? "built-in defaults", allowedRoots: config.allowedRoots, publicOrigin: config.publicOrigin, host: config.host, port: config.port, relayPort: config.relayPort }, "configuration loaded");

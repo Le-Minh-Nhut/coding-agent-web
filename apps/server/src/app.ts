@@ -14,6 +14,7 @@ import { resolve } from "node:path";
 import { findRepoRoot, resolveDistDir, type ServerConfig } from "./config.js";
 import { registerStaticWeb } from "./static-web.js";
 import { createLogger, redactEventPayload, redactLogValue } from "./logger.js";
+import { registerBridgeRoutes } from "./bridge-routes.js";
 import { PathPolicyError, WorkspacePathPolicy } from "./path-policy.js";
 import { DuplicateProjectPathError, type MetadataStore } from "./store.js";
 
@@ -76,6 +77,13 @@ export interface AppDependencies {
    * "I could not look" can never be mistaken for "nothing was refused".
    */
   countHandoffRefusals?: (sessionId: string) => Promise<number>;
+  /**
+   * Directory holding the per-conversation bridge configs (the same overlay dir
+   * the launch writes). Unset means this server cannot reach any control bridge,
+   * which the vibe routes report as `bridge_unavailable` rather than guessing a
+   * mode from absent evidence.
+   */
+  bridgeConfigDir?: string;
 }
 
 const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
@@ -1143,6 +1151,13 @@ export function buildApp(deps: AppDependencies): FastifyInstance<HttpServer> {
       ? await deps.modelCatalog.listModelsDetailed()
       : { models: [], source: "unavailable" as const, reason: "OMP model catalog is not configured." };
     return ok(result);
+  });
+
+  registerBridgeRoutes(app, {
+    store: deps.store,
+    ...(deps.tmuxServerIdentity ? { tmuxServerIdentity: deps.tmuxServerIdentity } : {}),
+    ...(deps.bridgeConfigDir ? { bridgeConfigDir: deps.bridgeConfigDir } : {}),
+    preHandler: protectedHook,
   });
 
   app.get("/api/runtime", { preHandler: protectedHook }, async () => {

@@ -387,9 +387,32 @@ export async function readBrowse(page: Page, path?: string): Promise<DirectoryLi
   };
 }
 
-/** The status banner(s) the conversation screen renders for a connection state. */
+/**
+ * The status BANNER(s): the full-width bars, not the header's status line.
+ *
+ * Round 51 moved `idle`/`running` out of banners and into the header, but those
+ * two states stay OUT of this locator on purpose. Several tests assert a state is
+ * *hidden* here — "settling is never announced as idle", "an offline session is
+ * not reported as idle" — and folding the header in would make the header's own
+ * `idle` text satisfy that locator, so a `toBeHidden()` could never pass and the
+ * safety claim would be untestable rather than tested.
+ *
+ * Two separate elements, two separate claims: the banner carries the states a
+ * user must act on, the header carries the current state. A test that wants the
+ * header queries `.header-status` directly.
+ */
 export function statusBanner(page: Page) {
-  return page.getByRole("status");
+  return page.locator(".banner[role='status'], .banner[role='alert']");
+}
+
+/**
+ * The header's single status line (the live link state, round 51).
+ *
+ * Kept next to `statusBanner` so a reader sees both halves of the split and
+ * cannot mistake one for the other.
+ */
+export function headerStatus(page: Page) {
+  return page.locator(".header-status");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

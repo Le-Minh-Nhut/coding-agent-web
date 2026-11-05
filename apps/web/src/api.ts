@@ -13,9 +13,11 @@ import type {
   DirectoryListing,
   GlobalSessionPage,
   HandoffResponse,
+  NativeModeResult,
   NativeSessionSummary,
   ProjectWithStats,
   RuntimeSnapshot,
+  VibeStateResponse,
 } from "@caw/contracts";
 
 export interface ModelCatalog {
@@ -278,5 +280,27 @@ export const api = {
   },
   async attachLiveSession(projectId: string, sessionId: string): Promise<ApiResult<Conversation>> {
     return request<Conversation>(`/api/projects/${encodeURIComponent(projectId)}/sessions/${encodeURIComponent(sessionId)}/attach-live`, { method: "POST" });
+  },
+  /**
+   * Native vibe-mode state, read from the live OMP process through the control bridge.
+   *
+   * `available: false` in the payload means the bridge could not be asked — it is
+   * not an "off". A transport failure is a failure, never a fabricated state.
+   */
+  async getVibe(id: string): Promise<ApiResult<VibeStateResponse>> {
+    return request<VibeStateResponse>(`/api/conversations/${encodeURIComponent(id)}/vibe`);
+  },
+  /**
+   * Ask the live OMP process to enter or leave vibe mode.
+   *
+   * OMP's own refusal (`busy`, `conflict`, `disabled`) comes back as a successful
+   * exchange carrying `ok: false`, so callers must render the code and message
+   * rather than treating a resolved promise as a mode change.
+   */
+  async setVibe(id: string, action: "enter" | "exit"): Promise<ApiResult<NativeModeResult>> {
+    return request<NativeModeResult>(`/api/conversations/${encodeURIComponent(id)}/vibe`, {
+      method: "POST",
+      body: JSON.stringify({ action }),
+    });
   },
 };

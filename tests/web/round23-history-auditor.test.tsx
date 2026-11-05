@@ -6,6 +6,7 @@ import {CollabSocket,type HostFrame} from "@caw/collab-protocol";
 import {ConversationView} from "../../apps/web/src/components/ConversationView.js";
 import {App} from "../../apps/web/src/App.js";
 import {api} from "../../apps/web/src/api.js";
+import {openModelSheet} from "./model-sheet.js";
 vi.mock("../../apps/web/src/api.js",()=>({api:{getConversation:vi.fn(),getAttachInstructions:vi.fn(),getConversationLink:vi.fn(),setConversationModel:vi.fn(),restartConversation:vi.fn(),getModels:vi.fn(),getConversationHistory:vi.fn(),getMe:vi.fn(),getCapabilities:vi.fn(),listProjects:vi.fn(),listConversations:vi.fn(),listNativeSessions:vi.fn()}}));
 afterEach(()=>{cleanup();vi.restoreAllMocks();});
 const base:any={id:"c",projectId:"p",title:"Chat",state:"idle",ownership:"managed",modelPreference:"model-a",model:"model-a",nativeSessionId:"native-A"};
@@ -65,7 +66,7 @@ it.each(["ok","not_found","internal","path_forbidden"] as const)("V22 a fresh hi
 
 it.each([false,true])('V23 a retry metadata read cannot rewind a successful model save (late=%s)',async late=>{
  const f=await fixture();await enterSaved(f,history('SAVED_TAIL'));
- fireEvent.click(screen.getByText('Conversation model settings'));
+ openModelSheet();
  const d=deferred();
  if(late){
   vi.mocked(api.getConversation).mockReturnValueOnce(d.promise as any);
@@ -96,7 +97,7 @@ it('V23 a writer-status-unverifiable history response is not proof that a live h
 
 async function savedWithLateRead(){
  const f=await fixture();await enterSaved(f,history('SAVED_TAIL'));
- fireEvent.click(screen.getByText('Conversation model settings'));
+ openModelSheet();
  const d=deferred();
  vi.mocked(api.getConversation).mockReturnValueOnce(d.promise as any);
  await act(async()=>fireEvent.click(screen.getByRole('button',{name:'Open live view'})));
@@ -132,7 +133,7 @@ it('V23 a read started AFTER a successful save still applies the fresh server va
 it('V23 a late read from a previous conversation cannot repaint the current one',async()=>{
  const d=deferred();
  const f=await fixture(0,false,d.promise);
- fireEvent.click(screen.getByText('Conversation model settings'));
+ openModelSheet();
  // Switch conversations while the first read is still in flight.
  // base is the file's untyped fixture (same style as the round-21 probes).
  const other={...base,id:'c2',title:'Other',modelPreference:'MODEL_B'};
@@ -148,7 +149,7 @@ it('V23 a late read from a previous conversation cannot repaint the current one'
 it('V23 a late read resolving after Back/unmount is dropped without error',async()=>{
  const d=deferred();
  const f=await fixture(0,false,d.promise);
- fireEvent.click(screen.getByText('Conversation model settings'));
+ openModelSheet();
  f.view.unmount();
  await act(async()=>{d.resolve({ok:true,data:{...base,modelPreference:'MODEL_A'}});});
  console.log('AUDIT23 late read after unmount',JSON.stringify({rendered:document.body.textContent?.length??0}));

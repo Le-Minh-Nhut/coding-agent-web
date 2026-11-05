@@ -53,7 +53,11 @@ test("slash suggestions do not push composer below a narrow viewport", async ({ 
   await host.send(welcomeFrame(false));
 
   await page.setViewportSize({ width: 375, height: 600 });
-  await page.getByText("Conversation model settings").click();
+  // R51: model settings are a sheet opened from the overflow menu rather than
+  // an inline disclosure in the transcript, so the panel is revealed in two taps.
+  await page.getByRole("button", { name: "More actions" }).click();
+  await page.getByRole("button", { name: "Model settings" }).click();
+  await expect(page.locator(".model-sheet")).toBeVisible();
   const modelInput = page.locator("#conversation-model");
   await expect(modelInput).toBeVisible();
   const modelHeight = await modelInput.evaluate((element) => element.getBoundingClientRect().height);

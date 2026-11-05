@@ -27,6 +27,14 @@ export const ERROR_CODES = [
   "terminal_attached",
   "draft_unconfirmed",
   "handoff_in_flight",
+  /**
+   * No control bridge answered for this conversation. Distinct from a refusal:
+   * "I could not ask" must never read as "the answer is no" — a session launched
+   * before the bridge existed, or whose listener died, lands here.
+   */
+  "bridge_unavailable",
+  /** The bridge answered, and the native runtime refused the transition (busy, conflict, disabled). */
+  "bridge_refused",
   "internal",
 ] as const;
 export type ErrorCode = (typeof ERROR_CODES)[number];
@@ -432,6 +440,51 @@ export interface HandoffResponse {
    * generating, so the client may offer an immediate retry.
    */
   refused?: boolean;
+}
+
+/**
+ * Native mode state as OMP reports it (`ctx.sessionModes.getState()`,
+ * `packages/coding-agent/src/extensibility/extensions/types.ts:1464-1469`).
+ *
+ * `null` for the whole object means the bridge could not be asked — the panel
+ * must render that as unknown, never as "all inactive".
+ */
+export interface NativeModeState {
+  plan: { status: "inactive" | "active" | "paused" };
+  vibe: { status: "inactive" | "active" };
+  goal: { status: "inactive" | "active" | "paused" };
+  loop: { status: "inactive" | "active" | "paused" };
+}
+
+/**
+ * Result of a native mode transition, mirroring OMP's own
+ * `SessionModeResult` (`extensibility/extensions/types.ts:1478-1485`).
+ *
+ * `ok: false` is a first-class answer — `busy`, `conflict`, `disabled`,
+ * `invalid_request` — and carries the state at the moment of refusal, so the UI
+ * can explain why without a second round trip.
+ */
+export interface NativeModeResult {
+  ok: boolean;
+  code: "busy" | "conflict" | "disabled" | "invalid_request" | null;
+  message: string | null;
+  state: NativeModeState | null;
+}
+
+/** What the bridge could observe about this session's native modes. */
+export interface VibeStateResponse {
+  /**
+   * True only when the bridge answered. `false` means `modes` is `null` and the
+   * reason says why; a caller must not read it as "vibe is off".
+   */
+  available: boolean;
+  /** Why the bridge was unavailable; `null` when it answered. */
+  reason: string | null;
+  modes: NativeModeState | null;
+  /** Active tool names, when the bridge could report them. */
+  tools: string[] | null;
+  model: string | null;
+  thinkingLevel: string | null;
 }
 
 export interface ConversationEvent<T = unknown> {

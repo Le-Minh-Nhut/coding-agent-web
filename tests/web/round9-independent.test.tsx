@@ -7,6 +7,7 @@ import { webcrypto } from "node:crypto";
 import { api } from "../../apps/web/src/api.js";
 import { ConversationView, autosizeComposer } from "../../apps/web/src/components/ConversationView.js";
 import { MarkdownCodeBlock, renderMarkdown } from "../../apps/web/src/sanitize.js";
+import { openModelSheet } from "./model-sheet.js";
 
 vi.mock("../../apps/web/src/api.js", () => ({
   api: { setConversationModel: vi.fn(), restartConversation: vi.fn(), getConversation: vi.fn(), getAttachInstructions: vi.fn(), getConversationLink: vi.fn(), getConversationHistory: vi.fn().mockResolvedValue({ ok: false, error: { code: "not_found", message: "No history" } }), getModels: vi.fn().mockResolvedValue({ ok: true, data: { models: [], source: "omp", reason: null } }) },
@@ -122,6 +123,8 @@ describe("mobile reading behavior", () => {
     vi.mocked(api.restartConversation).mockImplementation(()=>new Promise(resolve=>{finish=resolve}));
     const view=await mountConversation();
     const connects=vi.mocked(CollabSocket.prototype.connect);
+    // R51: the restart control lives in the model sheet, so it is opened first.
+    openModelSheet(view);
     fireEvent.click(view.getByText("Save & restart agent"));
     await waitFor(()=>expect(finish).toBeTypeOf("function"));
     view.unmount();
@@ -139,6 +142,8 @@ describe("mobile reading behavior", () => {
     if(frame.t!=="welcome") throw new Error("unexpected frame");
     frame.state.model={id:"actual-model",name:"Actual model",provider:"provider",contextWindow:100000};
     await act(async()=>{socket!.onFrame?.(frame);});
+    // R51: the effective-model copy renders inside the model sheet now.
+    openModelSheet(view);
     const label=view.getByText(/Effective model reported now/);
     console.log("AUDIT effective model",label.textContent);
     expect(label.textContent).toContain("actual-model");
@@ -215,6 +220,7 @@ describe("mobile reading behavior", () => {
     if (first.t !== "welcome") throw new Error("unexpected frame");
     first.state.model = { id: "first-model", name: "First", provider: "test", contextWindow: 100000 };
     await act(async () => { firstSocket!.onFrame?.(first); });
+    openModelSheet(view);
     expect(view.getByText(/Effective model reported now/).textContent).toContain("first-model");
 
     view.rerender(<ConversationView conversationId="c-2" onBack={() => {}} />);
@@ -229,7 +235,7 @@ describe("mobile reading behavior", () => {
     vi.mocked(api.getConversation).mockResolvedValue({ ok: true, data: { ...result.data, ownership: "external" } });
     const view = await mountConversation(true);
     await act(async () => { socket?.onFrame?.(welcome(true)); });
-    fireEvent.click(view.getByText("Conversation model settings"));
+    openModelSheet(view);
     expect(view.queryByRole("button", { name: "Stop generating" })).toBeNull();
     expect(view.queryByRole("button", { name: "Save & restart agent" })).toBeNull();
     expect(view.queryByRole("button", { name: "Save model" })).toBeNull();

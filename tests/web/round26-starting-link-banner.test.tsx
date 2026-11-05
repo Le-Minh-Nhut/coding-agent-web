@@ -57,10 +57,18 @@ async function mount(recordState: "starting" | "idle", publishWelcome: boolean) 
 }
 
 describe("V26 starting record vs live link", () => {
-  it("a connected idle link shows the idle banner, not the record's startup warning", async () => {
+  it("a connected idle link shows no second status row — the header carries it", async () => {
+    // R51: the idle banner said the same thing as the header's `● idle` and cost
+    // a full-width row on a phone. The claim under test is unchanged — a healthy
+    // link must never show the record's startup warning — but the healthy case is
+    // now silence in the banner area plus the header's single status line.
     const view = await mount("starting", true);
-    expect(await screen.findByText("Connected — no turn in flight")).toBeTruthy();
     expect(view.queryByText("Host is starting up; prompting may be refused.")).toBeNull();
+    expect(view.queryByText("Connected — no turn in flight")).toBeNull();
+    // The header is where the state now lives, exactly once.
+    const header = view.container.querySelector(".header-status");
+    expect(header).not.toBeNull();
+    expect(header!.textContent).toBe("idle");
     expect(await screen.findByText("Connected to this conversation's agent.")).toBeTruthy();
     expect(view.queryByText("The host is starting up. Prompting may be refused until it finishes.")).toBeNull();
   });
@@ -72,6 +80,8 @@ describe("V26 starting record vs live link", () => {
     // The empty-transcript copy switches back to the warning too.
     expect(await screen.findByText("The host is starting up. Prompting may be refused until it finishes.")).toBeTruthy();
     expect(screen.queryByText("Connected to this conversation's agent.")).toBeNull();
+    // A link that is not healthy must show its own state, not the record's idle.
+    expect(view.container.querySelector(".header-status")!.textContent).toBe("connecting");
   });
 
   it("an idle record with no live link never claims a connection", async () => {
@@ -83,7 +93,11 @@ describe("V26 starting record vs live link", () => {
   it("a running turn outranks the record's startup warning too", async () => {
     const view = await mount("starting", true);
     await act(async () => { socket?.onFrame?.({ t: "state", state: { isStreaming: true, queuedMessageCount: 0, cwd: "/", participants: [] } } as HostFrame, 0); });
-    expect(await screen.findByText("Agent is working on a turn")).toBeTruthy();
+    // R51: the running state is the header's status line now, not a banner row —
+    // the same single representation the idle case uses. The claim is unchanged:
+    // a live turn must never be reported as a stale startup warning.
+    await waitFor(() => expect(view.container.querySelector(".header-status")!.textContent).toBe("running"));
     expect(view.queryByText("Host is starting up; prompting may be refused.")).toBeNull();
+    expect(view.queryByText("Agent is working on a turn")).toBeNull();
   });
 });
