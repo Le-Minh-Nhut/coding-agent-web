@@ -1,30 +1,61 @@
+/* ── Design tokens (round 54) ─────────────────────────────────────────────────
+   The palette the reference implies: near-black canvas, layered greys, and
+   colour spent only on state (green = running/ok, red = danger/actionable,
+   amber = warning). Every text token below is recorded with its measured
+   contrast against the surface it is actually painted on, because that is the
+   discipline this file has always followed — a token that reads well on
+   `--app-bg` and 3.6:1 on a card is a bug, not a taste call.
+
+   Two deliberate departures from the brief's starting values, both measured:
+   `--text-muted` is #909090 rather than #777777 (3.85:1 on #1b1b1b — below AA
+   for the body-size copy that uses it; #909090 is 5.4:1 and still reads muted),
+   and `--danger` as a FILL is #dc2626 rather than #ef4444 (white on #ef4444 is
+   3.76:1, on #dc2626 4.83:1). #777777 survives as `--text-faint`, restricted to
+   non-text ornament (dots, hairlines) where AA does not apply. */
 :root {
-  --bg: #0f1115;
-  --surface: #181b22;
-  --surface-alt: #222631;
-  --surface-hover: #2a2f3d;
-  --border: #303646;
-  --text: #e6edf3;
-  --text-muted: #8b949e;
-  --primary: #2f81f7;
-  --primary-hover: #388bfd;
+  --app-bg: #050505;
+  --surface-primary: #1b1b1b;
+  --surface-secondary: #242424;
+  --surface-elevated: #292929;
+  --text-primary: #f5f5f5;
+  --text-secondary: #a5a5a5;
+  --text-muted: #909090;
+  /* Ornament only: never a text colour. */
+  --text-faint: #777777;
+  --border-subtle: #292929;
+  --border-strong: #3a3a3a;
+  --success: #22c55e;
+  --danger: #dc2626;
+  --warning: #f59e0b;
+
+  /* Legacy token names, kept as aliases: every existing rule keeps working, so
+     the redesign changes what the tokens *are*, not what every component means. */
+  --bg: var(--app-bg);
+  --surface: var(--surface-primary);
+  --surface-alt: var(--surface-secondary);
+  --surface-hover: #2f2f2f;
+  --border: var(--border-subtle);
+  --text: var(--text-primary);
+  --primary: #4d94ff;
+  --primary-hover: #6ba6ff;
   /* Filled primary buttons carry white text, and white on #2f81f7 is only 3.75:1 —
      below AA, so an enabled Send/New Project reads as disabled. #1f6feb is the
      nearest tone on the same blue with white ≥ 4.5:1 (4.63), and its hover is a
      shade darker rather than lighter so the label stays legible in both states.
      `--primary` itself is still the text/border accent on dark surfaces, where it
-     measures 4.6:1 and #1f6feb would not. */
+     measures 5.17:1 and #1f6feb would not. */
   --primary-action: #1f6feb;
   --primary-action-hover: #1a6ce0;
-  --success: #238636;
-  --danger: #da3633;
-  /* `--danger` is a FILL (white on it is 4.61:1). As TEXT on a dark card it is only
-     3.74:1, and as text on its own 10%-tint panel 3.82:1 — both below AA for the
-     Delete/error labels that use it. #f85149 is the same red family at 5.14:1 on
-     the card and 5.26:1 on the tinted panel. */
-  --danger-text: #f85149;
-  --warning: #d29922;
+  /* As TEXT on a dark card, #ef4444 measures 4.13:1 on `--surface-alt` — below AA
+     for the Delete/error labels that use it. #f87171 is the same red family at
+     5.61:1 there. `--danger` above is the FILL, where white is what has to pass. */
+  --danger-text: #f87171;
   --radius: 8px;
+  /* Round 54 scale: cards 16, message bubbles 18, composer 16, controls 10. */
+  --radius-card: 16px;
+  --radius-message: 18px;
+  --radius-composer: 16px;
+  --radius-control: 10px;
   --safe-top: env(safe-area-inset-top, 0px);
   --safe-right: env(safe-area-inset-right, 0px);
   --safe-bottom: env(safe-area-inset-bottom, 0px);
@@ -67,6 +98,321 @@ body {
 #root:has(.conversation-screen) {
   height: 100vh;
   height: 100dvh;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* ── Round 54: conversation column, dashboard, recovery summary, notices ──────
+   Layout of the screen is now: conversation-column (header, dashboard, banners,
+   transcript, composer) filling the viewport, with the agents layer fixed on top.
+   The dashboard row is the only new permanently visible row, and it is bounded by
+   construction (fixed row height, one line of text per card). */
+
+.conversation-column {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+}
+
+/* The header's title/copy block plus its chips: the copy shrinks and ellipsises,
+   the chips never do, and the row cannot widen the document at 320px. */
+.header-chips {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+}
+
+.conversation-header-copy h3 {
+  font-size: 1rem;
+  line-height: 1.25;
+}
+
+/* The model only appears when the host reported one; it is metadata, so it is
+   quieter than the state word it follows and truncates before the state does. */
+.header-status-model {
+  color: var(--text-muted);
+  font-weight: 400;
+}
+
+/* Three navigation summaries, ~56px tall, each a real touch target. Horizontal
+   padding matches the transcript's gutter so the cards line up with the rows. */
+.dashboard-row {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  flex: none;
+  padding: 8px calc(var(--safe-right) + 12px) 0 calc(var(--safe-left) + 12px);
+}
+
+button.dashboard-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 2px;
+  /* Bounded by construction: two single-line spans inside a min-height box. */
+  min-height: 56px;
+  height: 56px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-card);
+  background-color: var(--surface-secondary);
+  color: var(--text-primary);
+  text-align: left;
+  overflow: hidden;
+}
+
+button.dashboard-card:hover:not(:disabled) {
+  background-color: var(--surface-hover);
+}
+
+.dashboard-value {
+  font-size: 0.8rem;
+  font-weight: 600;
+  line-height: 1.2;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dashboard-sub {
+  font-size: 0.72rem;
+  line-height: 1.2;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Below ~360px a grid with three padded columns would either wrap the third card
+   onto its own row (a 128px row, not a bounded one) or crush the labels. Keeping
+   three columns and giving up the horizontal padding instead keeps the row at its
+   fixed 56px and every label on one line — measured at 320px: three 96px cards,
+   row height 64px including its top gutter. */
+@media (max-width: 420px) {
+  .dashboard-row {
+    gap: 6px;
+    padding: 8px calc(var(--safe-right) + 8px) 0 calc(var(--safe-left) + 8px);
+  }
+
+  button.dashboard-card {
+    padding: 8px;
+  }
+
+  .dashboard-value {
+    font-size: 0.75rem;
+  }
+
+  .dashboard-sub {
+    font-size: 0.68rem;
+  }
+}
+
+/* The recovery summary: ONE bounded row for N records, never their text (P1-A).
+   Fixed height keeps it out of the transcript's way; it is not sticky, so it
+   scrolls away with the transcript and the menu entry remains the durable path. */
+button.recovery-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: auto;
+  flex: none;
+  min-height: 44px;
+  height: 44px;
+  margin: 8px calc(var(--safe-right) + 12px) 0 calc(var(--safe-left) + 12px);
+  padding: 0 12px;
+  border: 1px solid var(--warning);
+  border-radius: var(--radius-control);
+  background-color: rgba(245, 158, 11, 0.12);
+  color: var(--text-primary);
+  font-size: 0.85rem;
+  font-weight: 500;
+}
+
+.recovery-summary-glyph {
+  flex: none;
+  color: var(--warning);
+}
+
+.recovery-summary-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+}
+
+.recovery-summary-action {
+  flex: none;
+  color: var(--warning);
+}
+
+/* One protocol notice, bounded by level. `line-clamp` is what makes the bounding
+   possible without deleting text: the span keeps its full text in the DOM, and
+   `scrollHeight` still reports the unclipped height so the expander knows whether
+   it is needed. `-webkit-line-clamp` is the only widely-implemented form of it. */
+.notice-row {
+  flex: none;
+}
+
+.notice-text {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+
+.notice-text--1 {
+  -webkit-line-clamp: 1;
+  line-clamp: 1;
+}
+
+.notice-text--2 {
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+}
+
+/* Routine chatter: no colour, no border, one muted line. It is still a notice and
+   still reported by the host — it just no longer looks like an alert. */
+.notice-banner--info {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  padding: 4px calc(var(--safe-right) + 12px) 4px calc(var(--safe-left) + 12px);
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  font-weight: 400;
+}
+
+.notice-banner {
+  min-width: 0;
+}
+
+.notice-toggle {
+  min-height: 32px;
+  padding: 0 12px;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+
+/* The send control is an icon, so it owns less of the composer row than the
+   textarea it sits beside. The global `button` rule already guarantees the 44px
+   minimum in both axes; only the width is narrowed here. */
+button.composer-send {
+  min-width: var(--touch-min);
+  width: var(--touch-min);
+  padding: 0;
+  font-size: 1.1rem;
+  line-height: 1;
+}
+
+/* ── Recovery sheet ───────────────────────────────────────────────────────────
+   Bottom-anchored like the model sheet, own scroll container, and each record's
+   text is `pre-wrap` so the COMPLETE prompt is readable and copyable. */
+/* m3: qualified with `.modal-overlay` so it wins by SPECIFICITY, not by source
+   order — `.modal-overlay{align-items:center}` is declared later in this file and
+   at equal specificity was overriding this, centring the sheet (and orphaning its
+   16px top radius). */
+.modal-overlay.recovery-sheet-overlay {
+  align-items: flex-end;
+}
+
+/* m3 (second half): `.modal-content` is declared LATER in this file with
+   `max-width: 500px`, `border-radius: var(--radius)` and `padding: 20px` at equal
+   specificity, so it was overriding the width, the top-only radius and the
+   safe-area padding below. Qualified with `.modal-content` so the intent wins by
+   specificity rather than by source order. */
+.modal-content.recovery-sheet {
+  width: 100%;
+  max-width: 560px;
+  max-height: 85dvh;
+  overflow-y: auto;
+  border-radius: var(--radius-card) var(--radius-card) 0 0;
+  padding: 12px calc(var(--safe-right) + 16px) calc(var(--safe-bottom) + 16px) calc(var(--safe-left) + 16px);
+}
+
+.recovery-sheet-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.recovery-sheet-note {
+  margin: 0 0 12px;
+  font-size: 0.82rem;
+  color: var(--text-muted);
+}
+
+.recovery-sheet-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.recovery-record {
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-control);
+  padding: 10px 12px;
+  background-color: var(--surface-elevated);
+}
+
+.recovery-record-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 6px;
+}
+
+.recovery-record-detail {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+
+/* No clamp, no max-height: this is the only full copy of the prompt once the
+   composer holds newer text, so it is shown whole and wraps rather than clipping. */
+.recovery-record-text {
+  margin: 0;
+  padding: 8px 10px;
+  max-height: none;
+  overflow: visible;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 0.8rem;
+}
+
+.recovery-record-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+/* ── The agents layer (P1-B) ──────────────────────────────────────────────────
+   A genuine screen, not a flex child of the conversation column: fixed to the
+   viewport, painted from the app background, and its own scroll container, so the
+   composer is not on screen while it is open and the conversation's layout is
+   completely unaffected by it. */
+.agents-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  background: var(--app-bg);
+  display: flex;
+  flex-direction: column;
   min-height: 0;
   overflow: hidden;
 }
@@ -317,7 +663,8 @@ textarea::placeholder {
 .banner.idle { background-color: #162032; color: #58a6ff; border-bottom: 1px solid #1f6feb; }
 .banner.running { background-color: rgba(35, 134, 54, 0.15); color: #3fb950; border-bottom: 1px solid #238636; }
 .banner.connecting { background-color: #21262d; color: #8b949e; border-bottom: 1px solid #30363d; }
-.banner.info { background-color: #162032; color: #58a6ff; border-bottom: 1px solid #1f6feb; }
+/* m6: `.banner.info` deleted — NoticeRow owns info presentation now (a quiet muted
+   line, so a routine collab join cannot paint a bright blue full-width bar). */
 .banner.warning { background-color: #3a2b10; color: #d29922; border-bottom: 1px solid #9e6a03; }
 .banner.error { background-color: #3b181a; color: #f85149; border-bottom: 1px solid #da3633; }
 
@@ -397,29 +744,51 @@ textarea::placeholder {
   padding: 10px;
 }
 
+/* User: a right-aligned rounded bubble (18px), bounded to 85% so the column it
+   sits in still reads as a conversation rather than a full-width block. */
 .message-card.user {
-  background-color: var(--surface-alt);
+  background-color: var(--surface-secondary);
+  border-color: transparent;
+  border-radius: var(--radius-message);
   align-self: flex-end;
   max-width: 85%;
 }
 
+/* Assistant: minimal chrome. No box, no border, no card padding — just the reply
+   at full width, separated from the user bubble by layout gap alone. A bordered
+   card around every reply is the single largest source of visual noise in a long
+   transcript, and it buys nothing the alignment does not already say. The
+   `.message-content` markdown/code/table styles are untouched. */
 .message-card.assistant {
-  background-color: var(--surface);
+  background-color: transparent;
+  border-color: transparent;
+  padding: 0;
   align-self: flex-start;
   max-width: 100%;
   width: 100%;
 }
 
+/* A tool row that reaches the card path (not folded into an activity group). */
 .message-card.tool {
-  background-color: #12151c;
-  border-color: #262c3a;
+  background-color: #121212;
+  border-color: var(--border-subtle);
   font-size: 0.9rem;
 }
+
+/* A notice row is inline metadata, not a bubble. */
 .message-card.notice {
+  background-color: transparent;
+  border-color: transparent;
   align-self: stretch;
-  padding: 8px 12px;
+  padding: 0;
   color: var(--text-muted);
   font-size: 0.85rem;
+}
+
+.message-role {
+  font-size: 0.75rem;
+  margin-bottom: 4px;
+  text-transform: capitalize;
 }
 
 .message-content {
@@ -486,11 +855,16 @@ textarea::placeholder {
    still reserved a permanent full-width row above the conversation on a phone.
    They are a modal sheet now, so the transcript owns the full height and the
    sheet inherits the focus trap and Escape handling from ModalOverlay. */
-.model-sheet-overlay {
+/* m3: same specificity fix as the recovery sheet — `.modal-overlay` is declared
+   later and was centring this sheet. */
+.modal-overlay.model-sheet-overlay {
   align-items: flex-end;
 }
 
-.model-sheet {
+/* m3 (second half): same specificity fix as the recovery sheet — `.modal-content`
+   is declared later and was overriding this sheet's width, top-only radius and
+   safe-area padding. */
+.modal-content.model-sheet {
   width: 100%;
   max-width: 520px;
   max-height: 85dvh;
@@ -604,9 +978,9 @@ textarea::placeholder {
 .composer-container {
   position: sticky;
   bottom: 0;
-  background-color: var(--surface);
-  border-top: 1px solid var(--border);
-  padding: 12px calc(var(--safe-right) + 16px) calc(var(--safe-bottom) + 12px) calc(var(--safe-left) + 16px);
+  background-color: var(--surface-primary);
+  border-top: 1px solid var(--border-subtle);
+  padding: 10px calc(var(--safe-right) + 12px) calc(var(--safe-bottom) + 10px) calc(var(--safe-left) + 12px);
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
@@ -628,12 +1002,15 @@ textarea::placeholder {
   min-height: 44px;
   max-height: 140px;
   resize: none;
+  border-radius: var(--radius-composer);
+  background-color: var(--surface-secondary);
+  border-color: var(--border-subtle);
 }
 
 /* Code Blocks */
 pre {
-  background-color: #0b0d11;
-  border: 1px solid var(--border);
+  background-color: #121212;
+  border: 1px solid var(--border-subtle);
   border-radius: 6px;
   padding: 12px;
   margin: 10px 0;

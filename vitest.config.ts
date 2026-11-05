@@ -29,6 +29,11 @@ export default defineConfig({
       "apps/*/src/**/*.test.ts",
     ],
     exclude: ["**/node_modules/**", "**/dist/**", "packages/guest/**", "tests/e2e/**"],
+    // The app persists retained recovery records in sessionStorage (the fix for a
+    // reload destroying the only copy of an unacknowledged prompt). One vitest
+    // worker shares one storage, so without this a record written by one test
+    // hydrates into the next one's App. See tests/web/setup-session-storage.ts.
+    setupFiles: ["tests/web/setup-session-storage.ts"],
     testTimeout: 30_000,
     hookTimeout: 30_000,
   },

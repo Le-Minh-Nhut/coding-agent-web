@@ -5,17 +5,28 @@
 .agent-detail {
   gap: 12px;
   overflow-y: auto;
+  /* Full height of the layer that hosts them, with their own scroll container, so
+     the agents screen — not the conversation — owns the viewport while open. */
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: calc(var(--safe-top) + 8px) calc(var(--safe-right) + 12px) calc(var(--safe-bottom) + 16px) calc(var(--safe-left) + 12px);
 }
 
 .agents-head {
   display: flex;
   align-items: center;
   gap: 8px;
+  flex: none;
+  min-width: 0;
 }
 
 .agents-head h2 {
   font-size: 1.1rem;
   font-weight: 600;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .agents-chips {
@@ -54,8 +65,11 @@ button.agent-row {
   min-height: var(--touch-min);
   padding: 10px 12px;
   text-align: left;
-  background-color: var(--surface-alt);
-  border: 1px solid var(--border);
+  /* A solid surface tone rather than a hairline: a card on near-black reads as a
+     surface without spending a border on every row. */
+  background-color: var(--surface-secondary);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-card);
 }
 
 .agent-row-main {

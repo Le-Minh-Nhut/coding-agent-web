@@ -6,6 +6,7 @@ import {CollabSocket,type HostFrame} from "@caw/collab-protocol";
 import {ConversationView} from "../../apps/web/src/components/ConversationView.js";
 import {App} from "../../apps/web/src/App.js";
 import {api} from "../../apps/web/src/api.js";
+import {recoveryText} from "./recovery-sheet.js";
 vi.mock("../../apps/web/src/api.js",()=>({api:{getConversation:vi.fn(),getAttachInstructions:vi.fn(),getConversationLink:vi.fn(),getModels:vi.fn(),getConversationHistory:vi.fn(),getMe:vi.fn(),getCapabilities:vi.fn(),listProjects:vi.fn(),listConversations:vi.fn(),listNativeSessions:vi.fn()}}));
 afterEach(()=>{cleanup();vi.restoreAllMocks();});
 const base:any={id:"c",projectId:"p",title:"Chat",state:"idle",ownership:"managed",modelPreference:"model-a",model:"model-a",nativeSessionId:"native-A"};
@@ -36,8 +37,13 @@ async function fixture(entryCount=0,realApp=false){
  const input=()=>view.container.querySelector("textarea")!;
  const type=(text:string)=>fireEvent.change(input(),{target:{value:text}});
  const send=async(text:string)=>{type(text);await act(async()=>fireEvent.click(view.getByRole("button",{name:"Send"})));};
- const recovery=()=>[...view.container.querySelectorAll(".refused-prompt")].map(e=>e.textContent).join("\n");
- return {view,emit,input,type,send,recovery,sockets};
+ // R54: records are in the review sheet now, revealed through the summary row.
+ // The joined text keeps the exact "Status — text" shape these auditors assert on.
+ // Opening is idempotent (the sheet is a boolean), so repeated clicks are safe.
+ const openSheet=()=>{if(view.queryByRole("button",{name:"Close prompt review"}))return true;const summary=view.queryByRole("button",{name:/prompts? need(s)? review/i});if(summary)fireEvent.click(summary);return summary!==null;};
+ const closeSheet=()=>{const close=view.queryByRole("button",{name:"Close prompt review"});if(close)fireEvent.click(close);};
+ const recovery=()=>{if(!openSheet())return "";const text=recoveryText(view.container);closeSheet();return text;};
+ return {view,emit,input,type,send,recovery,openSheet,closeSheet,sockets};
 }
 
 it.each([false,true])("V20 one real collab-prompt echo acknowledges only one same-text bootstrap send (historical twin=%s)",async(historical)=>{
@@ -67,8 +73,9 @@ it("V20 an unacknowledged send survives Back/reopen before any refusal can arriv
  fireEvent.click(await screen.findByText("Chat"));
  await waitFor(()=>expect(f.sockets).toHaveLength(2));
  await f.emit(welcome(0));
- const present=f.view.container.textContent!.includes("UNCONFIRMED_PROMPT_A")||f.input().value.includes("UNCONFIRMED_PROMPT_A");
- console.log("AUDIT20 unconfirmed navigation",JSON.stringify({draft:f.input().value,unconfirmedRecoverable:present,recovery:f.recovery()}));
+ const records=f.recovery();
+ const present=records.includes("UNCONFIRMED_PROMPT_A")||f.input().value.includes("UNCONFIRMED_PROMPT_A");
+ console.log("AUDIT20 unconfirmed navigation",JSON.stringify({draft:f.input().value,unconfirmedRecoverable:present,recovery:records}));
  expect(f.input().value).toBe("UNSENT_DRAFT_B");
  expect(present).toBe(true);
 });
@@ -91,8 +98,10 @@ it("V20 recovery remains copyable when a refused host disappears and Retry canno
  vi.mocked(api.getConversationHistory).mockResolvedValue({ok:true,data:{header:{sessionId:"native-A",cwd:"/work",timestamp:null,version:3,title:"History"},entries:[],hasOlder:false,nextCursor:null,truncated:false,truncatedByBytes:false,truncatedByEntries:false,skippedOversized:false}});
  await act(async()=>fireEvent.click(f.view.getByRole("button",{name:"Retry"})));
  await f.view.findByText(/Saved transcript —/);
+ f.openSheet();
  const copyButtons=f.view.queryAllByRole("button",{name:"Copy"}).length;
- console.log("AUDIT20 offline recovery",JSON.stringify({recovery:f.recovery(),copyButtons}));
+ const records=f.recovery();
+ console.log("AUDIT20 offline recovery",JSON.stringify({recovery:records,copyButtons}));
  // Copy reads a local value; a live/full-capability room is not needed.
  expect(copyButtons).toBeGreaterThan(0);
 });
@@ -161,7 +170,7 @@ it("V20 a real collab-prompt echo settles its optimistic attempt and keeps recov
  await f.emit({t:"entry",entry:collabRow("echo-collab-real","UNCONFIRMED_PROMPT_A")});
  await waitFor(()=>expect(f.view.container.querySelectorAll(".message-card.user")).toHaveLength(1));
  expect(f.recovery().match(/Echoed — UNCONFIRMED_PROMPT_A/g)).toHaveLength(1);
- expect(screen.getByRole("button",{name:"Recover to draft"})).toBeTruthy();
+ f.openSheet();expect(screen.getByRole("button",{name:"Recover to draft"})).toBeTruthy();
  fireEvent.click(screen.getByTitle("Back"));
  fireEvent.click(await screen.findByText("Chat"));
  await waitFor(()=>expect(f.sockets).toHaveLength(2));
@@ -181,7 +190,7 @@ it("V32 one live echo settles one of two same-text pending attempts",async()=>{
  await waitFor(()=>expect(f.sockets).toHaveLength(2));
  await f.emit(welcome(0));
  expect(f.recovery().match(/Echoed — SAME_PENDING_TEXT/g)).toHaveLength(1);
- expect(f.recovery()).toContain("Unconfirmed — host receipt unknown; may already have executed — SAME_PENDING_TEXT");
+ expect(f.recovery()).toContain("Unconfirmed — SAME_PENDING_TEXT");
 });
 it("V32 repeated recovery keeps occupied draft once; same text with different id recovers independently",async()=>{
  const f=await fixture(0,true);
@@ -189,20 +198,20 @@ it("V32 repeated recovery keeps occupied draft once; same text with different id
  f.type("NEW_DRAFT_B");
  await f.emit(refusal);
  await waitFor(()=>expect(f.recovery()).toContain("Refused — REFUSAL_A"));
- fireEvent.click(screen.getByRole("button",{name:"Recover to draft"}));
- fireEvent.click(screen.getByRole("button",{name:"Recover to draft"}));
+ f.openSheet();fireEvent.click(screen.getAllByRole("button",{name:"Recover to draft"})[0]!);
+ f.openSheet();fireEvent.click(screen.getAllByRole("button",{name:"Recover to draft"})[0]!);
  expect(f.input().value.match(/REFUSAL_A/g)).toHaveLength(1);
  expect(f.input().value).toContain("NEW_DRAFT_B");
  expect(f.recovery()).toContain("Refused — REFUSAL_A");
  f.type("EDITED_DRAFT_B");
- fireEvent.click(screen.getByRole("button",{name:"Recover to draft"}));
+ f.openSheet();fireEvent.click(screen.getAllByRole("button",{name:"Recover to draft"})[0]!);
  expect(f.input().value.match(/REFUSAL_A/g)).toHaveLength(1);
  expect(f.input().value).toContain("EDITED_DRAFT_B");
  await f.send("REFUSAL_A");
  f.type("NEW_DRAFT_C");
  await f.emit(refusal);
- await waitFor(()=>expect(screen.getAllByRole("button",{name:"Recover to draft"})).toHaveLength(2));
- fireEvent.click(screen.getAllByRole("button",{name:"Recover to draft"})[1]!);
+ f.openSheet();await waitFor(()=>expect(screen.getAllByRole("button",{name:"Recover to draft"})).toHaveLength(2));
+ f.openSheet();fireEvent.click(screen.getAllByRole("button",{name:"Recover to draft"})[1]!);
  expect(f.input().value.match(/REFUSAL_A/g)).toHaveLength(1);
  expect(f.input().value).toContain("NEW_DRAFT_C");
 });
@@ -212,7 +221,7 @@ it("V32 dismissed records are removed by id and refused rows expose Dismiss",asy
  f.type("NEW_DRAFT_B");
  await f.emit(refusal);
  await waitFor(()=>expect(f.recovery()).toContain("Refused — REFUSAL_A"));
- fireEvent.click(screen.getByRole("button",{name:"Dismiss"}));
+ f.openSheet();fireEvent.click(screen.getByRole("button",{name:"Dismiss"}));
  expect(f.recovery()).toBe("");
 });
 
@@ -247,7 +256,7 @@ it("V20 saved mode keeps Copy but hides Recover, so draft staging cannot stomp t
  f.type("KEEP_MY_DRAFT");
  await f.emit(refusal);
  expect(f.recovery()).toContain("REFUSED_IN_SAVED");
- expect(screen.getByRole("button",{name:"Recover to draft"})).not.toBeNull();
+ f.openSheet();expect(screen.getByRole("button",{name:"Recover to draft"})).not.toBeNull();
  // Host gone: saved mode, composer hidden. Recover would call updateDraft and
  // stomp the App-owned draft (the only copy of the user's newer text).
  await act(async()=>f.sockets.at(-1)!.onClose?.("closed",false));
@@ -255,7 +264,7 @@ it("V20 saved mode keeps Copy but hides Recover, so draft staging cannot stomp t
  vi.mocked(api.getConversationHistory).mockResolvedValue({ok:true,data:{header:{sessionId:"native-A",cwd:"/work",timestamp:null,version:3,title:"History"},entries:[],hasOlder:false,nextCursor:null,truncated:false,truncatedByBytes:false,truncatedByEntries:false,skippedOversized:false}});
  await act(async()=>fireEvent.click(screen.getByRole("button",{name:"Retry"})));
  await screen.findByText(/Saved transcript —/);
- await act(async()=>fireEvent.click(screen.getByRole("button",{name:"Copy"})));
+ f.openSheet();await act(async()=>fireEvent.click(screen.getByRole("button",{name:"Copy"})));
  const recoverHidden=screen.queryByRole("button",{name:"Recover to draft"})===null;
  const copyPresent=screen.queryAllByRole("button",{name:/Copy|Copied|Copy failed/}).length>0;
  const composerHidden=f.view.container.querySelector("textarea.composer-input")===null;

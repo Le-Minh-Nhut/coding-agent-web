@@ -4,12 +4,23 @@ import { api, setCsrfToken } from "./api.js";
 import { LoginView } from "./components/LoginView.js";
 import { ProjectsView } from "./components/ProjectsView.js";
 import { ProjectDetailView } from "./components/ProjectDetailView.js";
-import { ConversationView, type RefusedRecovery } from "./components/ConversationView.js";
+import { ConversationView } from "./components/ConversationView.js";
 import { SettingsView } from "./components/SettingsView.js";
 import { resetMutationQueues } from "./mutation-order.js";
 import { resetProjectMutationState } from "./components/ProjectsView.js";
+import { readRecoveryStore, tabStorage, writeRecoveryStore, type RecoveryRecord } from "./prompt-recovery.js";
 
 type View = "projects" | "project-detail" | "conversation" | "settings" | "history";
+
+/**
+ * A tab-scoped copy of the recovery list.
+ *
+ * Hydrated once, synchronously, before the first render: the records are the only
+ * copy of prompts the host never acknowledged, and a reload used to destroy them
+ * (see `prompt-recovery.ts`). Read here rather than in an effect so a reload lands
+ * on a screen that already has them; `useState`'s initializer runs exactly once.
+ */
+const recoveryStorage = tabStorage();
 
 /**
  * Every place the app transitions to unauthenticated goes through here: the
@@ -36,7 +47,14 @@ export function App() {
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [selectedConversationId, setSelectedConversationId] = useState<string | null>(null);
   const [conversationDrafts, setConversationDrafts] = useState<Record<string, string>>({});
-  const [refusedRecoveries, setRefusedRecoveries] = useState<Record<string, RefusedRecovery[]>>({});
+  const [refusedRecoveries, setRefusedRecoveries] = useState<Record<string, RecoveryRecord[]>>(() => readRecoveryStore(recoveryStorage));
+
+  // Mirrored to the tab on every change, and nowhere else: the records outlive a
+  // reload, a link never does. Written here rather than inside the setter's callers
+  // so no future write path can forget the persistence step.
+  useEffect(() => {
+    writeRecoveryStore(recoveryStorage, refusedRecoveries);
+  }, [refusedRecoveries]);
 
   useEffect(() => {
     let cancelled = false;

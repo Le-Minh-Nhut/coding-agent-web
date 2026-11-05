@@ -91,6 +91,17 @@ export interface TranscriptState {
   sessionEnded: boolean;
   readOnly: boolean;
   error: string | null;
+  /**
+   * The one live protocol notice, as the host sent it.
+   *
+   * Single-slot by design (a newer notice displaces the older one): this is the
+   * same reducer field it has always been, and no second store is introduced.
+   * How it *renders* is the level's business, not the reducer's — `error` keeps a
+   * bounded alert row, `warning` a bounded warning row, and `info` (which carries
+   * routine participant chatter like "… joined the collab session") a quiet muted
+   * line, so a join can no longer occupy a bright full-width bar. The text is
+   * never truncated: a long notice is clamped visually and expands on tap.
+   */
   notice: { level: "info" | "warning" | "error"; message: string } | null;
   /**
    * Live agent activity, keyed by agent id — the structured replacement for the

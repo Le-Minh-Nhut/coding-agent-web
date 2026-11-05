@@ -5,6 +5,7 @@ import {act,cleanup,fireEvent,render,screen,waitFor} from "@testing-library/reac
 import {CollabSocket,type HostFrame} from "@caw/collab-protocol";
 import {ConversationView} from "../../apps/web/src/components/ConversationView.js";
 import {App} from "../../apps/web/src/App.js";
+import {recoverySummary,recoveryText} from "./recovery-sheet.js";
 import {api} from "../../apps/web/src/api.js";
 vi.mock("../../apps/web/src/api.js",()=>({api:{getConversation:vi.fn(),getAttachInstructions:vi.fn(),getConversationLink:vi.fn(),getModels:vi.fn(),getMe:vi.fn(),getCapabilities:vi.fn(),listProjects:vi.fn(),listConversations:vi.fn(),listNativeSessions:vi.fn()},setCsrfToken:vi.fn()}));
 afterEach(()=>{cleanup();vi.restoreAllMocks();});
@@ -31,26 +32,36 @@ async function fixture(realApp=false){
  const type=(value:string)=>fireEvent.change(input(),{target:{value}});
  const send=async()=>{await act(async()=>fireEvent.submit(input().closest("form")!));};
  const refuse=async()=>{await act(async()=>socket!.onFrame?.(refusal,0));};
- return {view,input,type,send,refuse,socket:()=>socket,welcome:async()=>{await act(async()=>socket!.onFrame?.(welcome,0));}};
+ // R54: a refused record is behind the review summary row now, so "is it
+ // recoverable" means: in the composer, or in the retained record the sheet shows.
+ const recoverable=(text:string)=>{
+   const summary=recoverySummary(view);
+   if(summary)fireEvent.click(summary);
+   return view.container.textContent!.includes(text)||recoveryText(view.container).includes(text)||input().value.includes(text);
+ };
+ // R54: the records live in the review sheet; opening it is the user path now.
+ const openSheet=()=>{const summary=recoverySummary(view);if(summary)fireEvent.click(summary);return summary!==null;};
+ return {view,input,type,send,refuse,recoverable,openSheet,socket:()=>socket,welcome:async()=>{await act(async()=>socket!.onFrame?.(welcome,0));}};
 }
 it("V18 refused text survives actual App Back/reopen navigation along with its newer draft",async()=>{
- const f=await fixture(true);f.type("REFUSED_B");await f.send();f.type("DRAFT_C");await f.refuse();expect(f.view.container.textContent).toContain("REFUSED_B");
+ const f=await fixture(true);f.type("REFUSED_B");await f.send();f.type("DRAFT_C");await f.refuse();expect(f.recoverable("REFUSED_B")).toBe(true);
  const old=f.socket();fireEvent.click(screen.getByTitle("Back"));fireEvent.click(await screen.findByText("Chat"));
  await waitFor(()=>expect(f.socket()).not.toBe(old));await f.welcome();
- const recoverable=f.view.container.textContent!.includes("REFUSED_B");
+ const recoverable=f.recoverable("REFUSED_B");
  console.log("AUDIT18 refusal reopen",JSON.stringify({draft:f.input().value,refusedRecoverable:recoverable}));
  expect(f.input().value).toBe("DRAFT_C");expect(recoverable).toBe(true);
 });
 it("V18 manual Recover preserves an occupied draft and keeps refused text recoverable",async()=>{
  const f=await fixture();f.type("REFUSED_A");await f.send();f.type("DRAFT_B");await f.refuse();
+ f.openSheet();
  fireEvent.click(f.view.getByRole("button",{name:"Recover to draft"}));
  expect(f.input().value).toBe("DRAFT_B\n\nREFUSED_A");
- expect(f.view.container.textContent).toContain("REFUSED_A");
+ expect(f.recoverable("REFUSED_A")).toBe(true);
 });
 it("V18 a second refused prompt cannot silently replace the only recovery copy of the first",async()=>{
- const f=await fixture();f.type("REFUSED_B");await f.send();f.type("REFUSED_C");await f.refuse();expect(f.view.container.textContent).toContain("REFUSED_B");
+ const f=await fixture();f.type("REFUSED_B");await f.send();f.type("REFUSED_C");await f.refuse();expect(f.recoverable("REFUSED_B")).toBe(true);
  await f.send();f.type("DRAFT_D");await f.refuse();
- const b=f.view.container.textContent!.includes("REFUSED_B"),c=f.view.container.textContent!.includes("REFUSED_C");
+ const b=f.recoverable("REFUSED_B"),c=f.recoverable("REFUSED_C");
  console.log("AUDIT18 refusal replacement",JSON.stringify({draft:f.input().value,recoverableB:b,recoverableC:c}));
  expect(f.input().value).toBe("DRAFT_D");expect(b).toBe(true);expect(c).toBe(true);
 });
@@ -73,11 +84,12 @@ it("V18 refused recovery is keyed by conversation: A's strip never appears in B 
  await waitFor(()=>expect(sockets).toHaveLength(1));
  await act(async()=>sockets[0]!.onFrame?.(welcome,0));
  const input=()=>view.container.querySelector("textarea")!;
+ const runRecoverable=(text:string)=>{const s=recoverySummary({queryByRole:view.queryByRole.bind(view),getByRole:view.getByRole.bind(view)});if(!s)return false;fireEvent.click(s);return recoveryText(view.container).includes(text);};
  fireEvent.change(input(),{target:{value:"A_REFUSED"}});
  await act(async()=>fireEvent.submit(input().closest("form")!));
  fireEvent.change(input(),{target:{value:"A_DRAFT"}});
  await act(async()=>sockets[0]!.onFrame?.(refusal,0));
- expect(view.container.textContent).toContain("A_REFUSED");
+ expect(runRecoverable("A_REFUSED")).toBe(true);
  fireEvent.click(screen.getByTitle("Back"));
  fireEvent.click(await screen.findByText("Other"));
  await waitFor(()=>expect(sockets).toHaveLength(2));
@@ -87,25 +99,29 @@ it("V18 refused recovery is keyed by conversation: A's strip never appears in B 
  fireEvent.click(await screen.findByText("Chat"));
  await waitFor(()=>expect(sockets).toHaveLength(3));
  await act(async()=>sockets[2]!.onFrame?.(welcome,0));
- const backInA=view.container.textContent!.includes("A_REFUSED");
+ const backInA=runRecoverable("A_REFUSED");
  console.log("AUDIT18 refusal cross-conversation",JSON.stringify({leakedIntoB,backInA}));
  expect(leakedIntoB).toBe(false);
  expect(backInA).toBe(true);
 });
 it("repro: App remount forgets same-record Recover dedupe",async()=>{
  const f=await fixture(true);f.type("DRAFT_B");f.type("UNCERTAIN_A");await f.send();f.type("DRAFT_B");await f.refuse();
- fireEvent.click(f.view.getByRole("button",{name:"Recover to draft"}));
+ f.openSheet();
+ fireEvent.click(f.view.getAllByRole("button",{name:"Recover to draft"})[0]!);
  expect(f.input().value).toBe("DRAFT_B\n\nUNCERTAIN_A");
  fireEvent.click(screen.getByTitle("Back"));fireEvent.click(await screen.findByText("Chat"));
  await waitFor(()=>expect(f.socket()).not.toBeNull());await f.welcome();
- fireEvent.click(f.view.getByRole("button",{name:"Recover to draft"}));
+ f.openSheet();
+ fireEvent.click(f.view.getAllByRole("button",{name:"Recover to draft"})[0]!);
  expect(f.input().value).toBe("DRAFT_B\n\nUNCERTAIN_A");
 });
 it("recovery identity uses exact multiline whole-line blocks, not substrings",async()=>{
  const f=await fixture();f.type("BLOCK_BUG\nTAIL");await f.send();f.type("DRAFT");await f.refuse();
+ f.openSheet();
  fireEvent.click(f.view.getByRole("button",{name:"Recover to draft"}));
  expect(f.input().value).toBe("DRAFT\n\nBLOCK_BUG\nTAIL");
  f.type("debug\nTAIL");
+ f.openSheet();
  fireEvent.click(f.view.getByRole("button",{name:"Recover to draft"}));
  expect(f.input().value).toBe("debug\nTAIL\n\nBLOCK_BUG\nTAIL");
 });

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 // Regressions for the round-17 web fixes, covering the branches the auditor
-// probes do not: the refused-prompt strip's recover/copy/replacement/clearing
+// probes do not: the recovery records' recover/copy/replacement/clearing (before the review sheet, an inline strip)
 // paths, rename single-flight coalescing across dialogs, projects and failures,
 // folder loader ownership after the generation bump was narrowed to real
 // reloads, and every logout outcome plus the CSRF token surviving a failed
@@ -20,6 +20,7 @@ import { FolderBrowser } from "../../apps/web/src/components/FolderBrowser.js";
 import { ProjectsView } from "../../apps/web/src/components/ProjectsView.js";
 import { SettingsView } from "../../apps/web/src/components/SettingsView.js";
 import { createMetadataStore } from "../../apps/server/src/store.js";
+import { openRecoverySheet, recoveryRecords, recoverySummary, recoveryText } from "./recovery-sheet.js";
 
 vi.mock("../../apps/web/src/api.js", async () => {
   const actual = await vi.importActual<typeof apiModule>("../../apps/web/src/api.js");
@@ -94,18 +95,23 @@ describe("V17-02 refused prompt recovery", () => {
     await refuseTypingDraft(composer);
     expect(composer().value).toBe("DRAFT_C");
     expect(view.container.querySelectorAll(".message-card.user")).toHaveLength(0);
-    expect(view.container.querySelector(".refused-prompt")?.textContent).toContain("PROMPT_B");
+    // R54: the records are no longer inline banners (a long prompt displaced the
+    // transcript); they live behind the summary row in a bounded sheet. The claim
+    // is unchanged — the record is reachable and holds the whole prompt.
+    openRecoverySheet(view);
+    expect(recoveryText(view.container)).toContain("PROMPT_B");
     fireEvent.click(screen.getByRole("button", { name: "Recover to draft" }));
     expect(composer().value).toBe("DRAFT_C\n\nPROMPT_B");
     expect(onDraftChange).toHaveBeenLastCalledWith("DRAFT_C\n\nPROMPT_B");
-    expect(view.container.querySelector(".refused-prompt")?.textContent).toContain("PROMPT_B");
+    expect(recoveryText(view.container)).toContain("PROMPT_B");
   });
 
   it("recovers the refused prompt after the user clears the newer draft", async () => {
     const { view, composer } = await mountConversation();
     await refuseTypingDraft(composer);
     fireEvent.change(composer(), { target: { value: "" } });
-    expect(view.container.querySelector(".refused-prompt")).not.toBeNull();
+    expect(recoverySummary(view)).not.toBeNull();
+    openRecoverySheet(view);
     fireEvent.click(screen.getByRole("button", { name: "Recover to draft" }));
     expect(composer().value).toBe("PROMPT_B");
   });
@@ -113,8 +119,9 @@ describe("V17-02 refused prompt recovery", () => {
   it("copies the refused text through the same clipboard contract as code blocks", async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     vi.stubGlobal("navigator", { ...navigator, clipboard: { writeText } });
-    const { composer } = await mountConversation();
+    const { view, composer } = await mountConversation();
     await refuseTypingDraft(composer);
+    openRecoverySheet(view);
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Copy" })); });
     expect(writeText).toHaveBeenCalledWith("PROMPT_B");
     expect(screen.getByRole("button", { name: "Copied" })).not.toBeNull();
@@ -124,8 +131,9 @@ describe("V17-02 refused prompt recovery", () => {
 
   it("reports a missing clipboard instead of silently doing nothing", async () => {
     vi.stubGlobal("navigator", { ...navigator, clipboard: undefined });
-    const { composer } = await mountConversation();
+    const { view, composer } = await mountConversation();
     await refuseTypingDraft(composer);
+    openRecoverySheet(view);
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Copy" })); });
     expect(screen.getByRole("button", { name: "Copy failed" })).not.toBeNull();
   });
@@ -133,7 +141,11 @@ describe("V17-02 refused prompt recovery", () => {
   it("keeps every refused prompt when a second refusal arrives", async () => {
     const { view, composer } = await mountConversation();
     await refuseTypingDraft(composer);
-    expect(view.container.querySelector(".refused-prompt")?.textContent).toContain("PROMPT_B");
+    // P1-A: with the sheet closed the prompt text is NOT in the conversation
+    // column at all — only the count is. That is what keeps a long refused prompt
+    // from displacing the transcript.
+    expect(recoverySummary(view)).not.toBeNull();
+    expect(view.container.textContent).not.toContain("PROMPT_B");
     // Send the draft: it is accepted, the composer clears, then it too is refused
     // while newer content is typed. A later refusal appends; it never replaces the
     // recovery copy of an earlier one.
@@ -141,18 +153,19 @@ describe("V17-02 refused prompt recovery", () => {
     fireEvent.change(composer(), { target: { value: "DRAFT_D" } });
     await act(async () => { socket!.onFrame?.({ t: "error", message: REFUSAL }, 0); });
     expect(composer().value).toBe("DRAFT_D");
-    const strips = [...view.container.querySelectorAll(".refused-prompt")].map((strip) => strip.textContent ?? "");
-    expect(strips.join("\n")).toContain("PROMPT_B");
-    expect(strips.join("\n")).toContain("DRAFT_C");
-    expect(strips).toHaveLength(2);
+    openRecoverySheet(view);
+    const records = recoveryText(view.container);
+    expect(records).toContain("PROMPT_B");
+    expect(records).toContain("DRAFT_C");
+    expect(recoveryRecords(view.container)).toHaveLength(2);
   });
 
   it("drops a stale refusal when the conversation changes", async () => {
     const { view, composer } = await mountConversation("c-1");
     await refuseTypingDraft(composer);
-    expect(view.container.querySelector(".refused-prompt")).not.toBeNull();
+    expect(recoverySummary(view)).not.toBeNull();
     view.rerender(<ConversationView conversationId="c-2" draft="" onDraftChange={() => {}} onBack={() => {}} />);
-    expect(view.container.querySelector(".refused-prompt")).toBeNull();
+    expect(recoverySummary(view)).toBeNull();
     expect(view.container.textContent).not.toContain("PROMPT_B");
   });
 
@@ -162,7 +175,7 @@ describe("V17-02 refused prompt recovery", () => {
     await act(async () => { fireEvent.submit(composer().closest("form")!); });
     await act(async () => { socket!.onFrame?.({ t: "error", message: REFUSAL }, 0); });
     expect(composer().value).toBe("PROMPT_B");
-    expect(view.container.querySelector(".refused-prompt")).toBeNull();
+    expect(recoverySummary(view)).toBeNull();
   });
 });
 

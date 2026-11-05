@@ -31,7 +31,7 @@ import {
  * conversations at all.
  */
 
-const COMPOSER = /Send instructions to agent|Turn in flight/;
+const COMPOSER = /Send a follow-up…|Turn in flight — send a follow-up…|Read-only/;
 const REFUSAL = "prompting is unavailable until the host finishes starting up";
 
 /** Bunched so a failure names the viewport it happened at: the three phone widths the ticket names, plus a desktop. */
@@ -98,16 +98,22 @@ for (const viewport of VIEWPORTS) {
     await host.send({ t: "error", message: REFUSAL });
 
     // Neither draft is destroyed: the newer draft stays in the composer and the
-    // refused text lives behind an explicit strip.
-    const strip = page.locator(".refused-prompt");
-    await expect(strip).toBeVisible();
-    await expect(strip).toContainText("PROMPT_B_MUST_BE_RECOVERABLE");
+    // refused text is retained behind the review summary row (R54: a full-text
+    // banner in this column displaced the transcript, so the record lives in the
+    // bounded sheet one tap away).
+    const summary = page.locator(".recovery-summary");
+    await expect(summary).toBeVisible();
+    await expect(summary).toContainText("1 prompt needs review");
     await expect(composer).toHaveValue("DRAFT_C_STILL_TYPING");
 
-    // Recover merges the refused text after the newer draft and keeps the record available.
-    await strip.getByRole("button", { name: "Recover" }).click();
+    // The complete prompt is in the sheet, and Recover merges it after the newer
+    // draft while keeping the record available.
+    await summary.click();
+    const sheet = page.locator(".recovery-sheet");
+    await expect(sheet).toContainText("PROMPT_B_MUST_BE_RECOVERABLE");
+    await sheet.getByRole("button", { name: "Recover to draft" }).click();
     await expect(composer).toHaveValue("DRAFT_C_STILL_TYPING\n\nPROMPT_B_MUST_BE_RECOVERABLE");
-    await expect(strip).toBeVisible();
+    await expect(sheet).toBeVisible();
 
     await assertNoUnexpectedAppErrors(page);
   });

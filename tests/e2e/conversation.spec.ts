@@ -13,7 +13,7 @@ import { harnessFixture, installMockCollabHost, mockConversationLink, openSeeded
  * than reloading (a reload would return to the project list).
  */
 
-const COMPOSER = /Send instructions to agent|Turn in flight/;
+const COMPOSER = /Send a follow-up…|Turn in flight — send a follow-up…|Read-only/;
 
 /** Open a conversation with the given link response already in place. */
 async function openWithLink(page: Page, response: unknown, status: number): Promise<void> {

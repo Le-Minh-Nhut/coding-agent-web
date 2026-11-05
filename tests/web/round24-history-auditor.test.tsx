@@ -35,7 +35,7 @@ async function fixture(entryCount=0,realApp=false,initialRead:any=null){
  const input=()=>view.container.querySelector("textarea")!;
  const type=(text:string)=>fireEvent.change(input(),{target:{value:text}});
  const send=async(text:string)=>{type(text);await act(async()=>fireEvent.click(view.getByRole("button",{name:"Send"})));};
- const recovery=()=>[...view.container.querySelectorAll(".refused-prompt")].map(e=>e.textContent).join("\n");
+ const recovery=()=>{const summary=view.queryByRole("button",{name:/prompts? need(s)? review/i});if(summary)fireEvent.click(summary);return [...view.container.querySelectorAll(".recovery-record")].map(e=>e.textContent).join("\n");};
  return {view,emit,input,type,send,recovery,sockets};
 }
 

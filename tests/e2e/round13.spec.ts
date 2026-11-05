@@ -88,7 +88,9 @@ test("V13-07 conversation and activity failures render errors, not empty states"
   declareInjectedFault(page, { urlPattern: /\/api\/conversations\/[^/]+\/events/, status: 500 });
   await page.route(`**/api/conversations/${fixture.seededConversationId}/events**`, (route) =>
     route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ ok: false, error: { code: "internal_error", message: "Injected activity failure" } }) }));
-  await page.getByRole("button", { name: "←" }).click();
+  // This is the project screen's own `← Back` (unchanged); the conversation
+  // header's control, whose accessible name is now the word, is a different one.
+  await page.getByRole("button", { name: "← Back" }).click();
   await page.getByRole("heading", { name: "Seeded Fixture", exact: true }).click();
   // Opening the seeded conversation hits the real backend for its history (404, no
   // nativeSessionId) and link (409, no live writer); both are the expected states.
@@ -96,8 +98,11 @@ test("V13-07 conversation and activity failures render errors, not empty states"
   declareInjectedFault(page, { urlPattern: /\/api\/conversations\/[^/]+\/link/, status: 409 });
   await page.getByRole("heading", { name: "Seeded conversation", exact: true }).click();
   // Activity is a secondary action: it lives in the header's overflow disclosure.
+  // R54 gave the dashboard row a card whose accessible name also starts with
+  // "Activity", so this query is scoped to the menu it actually means. The card is
+  // a different control with a different entry point and must not be deleted.
   await page.getByRole("button", { name: "More actions" }).click();
-  await page.getByRole("button", { name: "Activity" }).click();
+  await page.locator("#conversation-actions-menu").getByRole("button", { name: "Activity", exact: true }).click();
   await expect(page.getByRole("alert")).toBeVisible();
   await expect(page.getByText("No activity recorded for this conversation yet.")).toHaveCount(0);
   // Both 500s were injected; what must not appear is an error the app did not ask for.
@@ -225,13 +230,15 @@ test("V13-04 late new chat response leaves current project selected", async ({ p
     await route.fulfill({ response });
   });
   await page.getByRole("button", { name: "+ New chat" }).click();
-  await page.getByRole("button", { name: "←" }).click();
+  // The create POST is still in flight, so the app is on the project screen; both
+  // of these are that screen's own `← Back`.
+  await page.getByRole("button", { name: "← Back" }).click();
   await page.getByRole("heading", { name: "Projects", exact: true }).waitFor();
   await page.getByRole("heading", { name: "Seeded Fixture", exact: true }).click();
   const seededProjectDetail = page.getByRole("heading", { name: "Conversations", exact: true });
   await expect(seededProjectDetail).toBeVisible();
   // Select another project while the create response remains in flight.
-  await page.getByRole("button", { name: "←" }).click();
+  await page.getByRole("button", { name: "← Back" }).click();
   const otherProject = page.getByRole("heading").filter({ hasText: /^(?!Seeded Fixture$).+/ }).first();
   const otherLabel = await otherProject.innerText();
   await otherProject.click();

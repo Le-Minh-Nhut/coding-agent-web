@@ -4,6 +4,7 @@ import {afterEach,expect,it,vi} from "vitest";
 import {act,cleanup,fireEvent,render,waitFor} from "@testing-library/react";
 import {CollabSocket,type HostFrame} from "@caw/collab-protocol";
 import {ConversationView} from "../../apps/web/src/components/ConversationView.js";
+import {recoveryText} from "./recovery-sheet.js";
 import {api} from "../../apps/web/src/api.js";
 import {openModelSheet} from "./model-sheet.js";
 vi.mock("../../apps/web/src/api.js",()=>({api:{getConversation:vi.fn(),getAttachInstructions:vi.fn(),getConversationLink:vi.fn(),getModels:vi.fn(),getConversationHistory:vi.fn(),setConversationModel:vi.fn(),restartConversation:vi.fn()}}));
@@ -21,7 +22,11 @@ async function fixture(entryCount=0){
  vi.spyOn(CollabSocket.prototype,"send").mockResolvedValue(true);
  const view=render(<ConversationView conversationId="c" onBack={()=>{}}/>);
  await waitFor(()=>expect(socket).not.toBeNull());await act(async()=>socket!.onFrame?.(welcome(entryCount),0));
- return {view,emit:async(frame:HostFrame)=>{await act(async()=>socket!.onFrame?.(frame,0));},disconnect:async()=>{await act(async()=>socket!.onClose?.("network closed",false));}};
+ // R54: refused records moved from inline banners into the bounded review sheet,
+ // opened through the summary row. `recovery()` returns the same joined text the
+ // tests always read, from the sheet's records.
+ const recovery=()=>{const summary=view.queryByRole("button",{name:/prompts? need(s)? review/i});if(summary)fireEvent.click(summary);return recoveryText(view.container);};
+ return {view,recovery,emit:async(frame:HostFrame)=>{await act(async()=>socket!.onFrame?.(frame,0));},disconnect:async()=>{await act(async()=>socket!.onClose?.("network closed",false));}};
 }
 it.each([false,true])("V19 historical snapshot text cannot acknowledge a newly sent prompt (same text=%s)",async(sameText)=>{
  const f=await fixture(1);const composer=f.view.container.querySelector("textarea")!;
@@ -31,7 +36,7 @@ it.each([false,true])("V19 historical snapshot text cannot acknowledge a newly s
  const entry:any={type:"message",id:"old-entry",parentId:null,timestamp:"2026-01-01T00:00:00Z",message:{role:"user",content:sameText?"continue":"an unrelated old instruction",timestamp:1}};
  await f.emit({t:"snapshot-chunk",entries:[entry],final:true});
  await f.emit({t:"error",message:"prompting is unavailable until the host finishes starting up"});
- const recovery=f.view.container.querySelector(".refused-prompt")?.textContent??"";
+ const recovery=f.recovery();
  const recoverable=composer.value==="continue"||recovery.includes("continue");
  console.log("AUDIT19 snapshot false ack",JSON.stringify({sameText,draft:composer.value,recovery,recoverable}));
  expect(recoverable).toBe(true);
@@ -77,7 +82,7 @@ it("V19 restart via Enter-key send during bootstrap still recovers the refused p
  const entry:any={type:"message",id:"old-key",parentId:null,timestamp:"2026-01-01T00:00:00Z",message:{role:"user",content:"continue",timestamp:1}};
  await f.emit({t:"snapshot-chunk",entries:[entry],final:true});
  await f.emit({t:"error",message:"prompting is unavailable until the host finishes starting up"});
- const recovery=f.view.container.querySelector(".refused-prompt")?.textContent??"";
+ const recovery=f.recovery();
  console.log("AUDIT19 enter key bootstrap",JSON.stringify({draft:composer.value,recovery}));
  expect(composer.value==="continue"||recovery.includes("continue")).toBe(true);
 });
@@ -89,9 +94,9 @@ it("V19 a post-snapshot send is acknowledged by its own echo as before",async()=
  await act(async()=>fireEvent.click(f.view.getByRole("button",{name:"Send"})));
  await f.emit({t:"event",event:{type:"message_end",message:{role:"user",content:"hi",timestamp:1}}});
  await f.emit({t:"error",message:"prompting is unavailable until the host finishes starting up"});
- const recovery=f.view.container.querySelector(".refused-prompt")?.textContent??"";
+ const recovery=f.recovery();
  console.log("AUDIT19 post snapshot receipt",JSON.stringify({draft:composer.value,recovery,userRows:f.view.container.querySelectorAll(".message-card.user").length}));
- expect(recovery).toContain("Echoed — hi");
+ expect(recovery).toContain("Echoed");expect(recovery).toContain("hi");
  expect(composer.value).toBe("");
 });
 
@@ -103,7 +108,7 @@ it("V19 a pre-snapshot prompt whose snapshot text differs still refuses into rec
  const entry:any={type:"message",id:"old-other",parentId:null,timestamp:"2026-01-01T00:00:00Z",message:{role:"user",content:"an unrelated old instruction",timestamp:1}};
  await f.emit({t:"snapshot-chunk",entries:[entry],final:true});
  await f.emit({t:"error",message:"prompting is unavailable until the host finishes starting up"});
- const recovery=f.view.container.querySelector(".refused-prompt")?.textContent??"";
+ const recovery=f.recovery();
  console.log("AUDIT19 differing snapshot control",JSON.stringify({draft:composer.value,recovery}));
  // The composer was never retyped, so the direct-restore path is correct here:
  // the refused text is back in the composer (or, if a strip exists, in the strip).
@@ -250,11 +255,11 @@ it.each(["entry","message_end","collab"] as const)("V19-fix1 a live echo during 
  await act(async()=>{await Promise.resolve();});
  fireEvent.change(composer,{target:{value:"my newer draft"}});
  await f.emit({t:"error",message:"prompting is unavailable until the host finishes starting up"});
- await waitFor(()=>expect([...f.view.container.querySelectorAll(".refused-prompt")].map((item)=>item.textContent).join("\n")).toContain("B_REFUSED"));
- const recovery=[...f.view.container.querySelectorAll(".refused-prompt")].map((item)=>item.textContent).join("\n");
+ await waitFor(()=>expect(f.recovery()).toContain("B_REFUSED"));
+ const recovery=f.recovery();
  console.log("AUDIT19-fix1 refusal attribution",JSON.stringify({kind,recovery,draft:composer.value,aRows:f.view.getAllByText("A_ACCEPTED").length}));
  expect(recovery).toContain("B_REFUSED");
- expect(recovery).toContain("Echoed — A_ACCEPTED");
+ expect(recovery).toContain("Echoed");expect(recovery).toContain("A_ACCEPTED");
  expect(composer.value).toBe("my newer draft");
 });
 
@@ -270,7 +275,7 @@ it.each([1,Number.MAX_SAFE_INTEGER])("V19 snapshot dump timestamp %s cannot ackn
  fireEvent.change(composer,{target:{value:"B_PENDING"}});
  await act(async()=>fireEvent.click(f.view.getByRole("button",{name:"Send"})));
  await f.emit({t:"error",message:"prompting is unavailable until the host finishes starting up"});
- expect(f.view.container.querySelector(".refused-prompt")).toBeNull();
+ expect(f.view.queryByRole("button",{name:/prompts? need(s)? review/i})).toBeNull();
  fireEvent.click(f.view.getByTitle("Back"));
  expect(f.view.container.textContent).toContain("A_DUMPED");
  expect(f.view.container.textContent).toContain("B_PENDING");

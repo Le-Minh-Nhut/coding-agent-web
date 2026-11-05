@@ -175,7 +175,7 @@ describe("Approval handling & FIFO queueing", () => {
 
     const composer = container.querySelector("textarea.composer-input") as HTMLTextAreaElement;
     fireEvent.change(composer, { target: { value: "keep this prompt" } });
-    fireEvent.click(Array.from(container.querySelectorAll("button")).find((button) => button.textContent?.trim() === "Send")!);
+    fireEvent.click(container.querySelector('button[aria-label="Send"]')!);
     await act(async () => { await Promise.resolve(); });
 
     expect(composer.value).toBe("keep this prompt");

@@ -229,7 +229,7 @@ test("V25-02 a model save pending across Back/reopen settles on the model saved 
   // R51: the model sheet is modal, so it is closed before navigating away — an
   // open overlay deliberately blocks the header behind it.
   await closeModelSheet(page);
-  await page.getByRole("button", { name: "←" }).click();
+  await page.getByRole("button", { name: "Back", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Conversations" })).toBeVisible();
   await page.getByRole("heading", { name: "Seeded conversation", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Seeded conversation", exact: true })).toBeVisible();
@@ -250,7 +250,7 @@ test("V25-02 a model save pending across Back/reopen settles on the model saved 
 
   // Reopen once more: the screen must render what the server stored.
   await closeModelSheet(page);
-  await page.getByRole("button", { name: "←" }).click();
+  await page.getByRole("button", { name: "Back", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Conversations" })).toBeVisible();
   await page.getByRole("heading", { name: "Seeded conversation", exact: true }).click();
   await expect(await preferenceLine(page)).toContainText(finalModel);

@@ -5,6 +5,9 @@ import { MarkdownCodeBlock, parseInline, renderMarkdown } from "../sanitize.js";
 import { ActivityPanel } from "./ActivityPanel.js";
 import { AdvisorPanel } from "./AdvisorPanel.js";
 import { ModalOverlay } from "./ModalOverlay.js";
+import { RecoverySheet } from "./RecoverySheet.js";
+import { NoticeRow } from "./NoticeRow.js";
+import { DashboardCards } from "./DashboardCards.js";
 import { AgentsCenter } from "./AgentsCenter.js";
 import { AgentDetail } from "./AgentDetail.js";
 import { CollapsibleMessage } from "./CollapsibleMessage.js";
@@ -22,16 +25,17 @@ import {
 import { clearTranscriptRequests, createTranscriptState, forgetTranscriptRequest, reduceHostFrame, setConnectionStatus, textFromContent, trackTranscriptRequest, transcriptMessagesFromEntries, type TranscriptBlock, type TranscriptMessage, type TranscriptReply, type TranscriptState, type ToolResultLike } from "../transcript.js";
 import { findSlashCommand, slashCommands, type SlashCommand } from "../commands.js";
 import { ActivityGroupRow } from "./ToolActivity.js";
-import { groupActivity, pairToolArguments } from "../tool-activity.js";
+import { groupActivity, pairToolArguments, summarizeFileChanges } from "../tool-activity.js";
+import { canRetain, type RecoveryRecord } from "../prompt-recovery.js";
 import type { AttachInstructions, Conversation, NativeModeResult, VibeStateResponse } from "@caw/contracts";
-/** A settled prompt record kept until explicit dismissal. */
-export interface RefusedRecovery {
-  id: number;
-  text: string;
-  unconfirmed?: boolean;
-  echoed?: boolean;
-  recoveredText?: string;
-}
+
+/**
+ * A settled prompt record kept until explicit dismissal.
+ *
+ * Defined in `prompt-recovery.ts` because that module also persists it, so the
+ * stored shape and the rendered shape cannot drift apart.
+ */
+export type RefusedRecovery = RecoveryRecord;
 
 interface ConversationViewProps {
   conversationId: string;
@@ -202,12 +206,27 @@ export const MessageRow = memo(function MessageRow({ message }: { message: Displ
   const [expanded, setExpanded] = useState(false);
   const blocks = "blocks" in message ? message.blocks : undefined;
   const copy = async (text: string) => { try { await navigator.clipboard.writeText(text); } catch { /* Clipboard permission is optional; content remains selectable. */ } };
+  /**
+   * The role label is chrome, and it is only worth its line when it carries
+   * something the row's shape does not already say.
+   *
+   * `user`/`assistant` are told apart by alignment and bubble, so a bare role
+   * label there is noise — but a tool row's name, an error, and the
+   * "sent while active; awaiting host" caveat are facts nothing else reports, and
+   * those keep their line verbatim.
+   */
+  const caveat = "awaitingHost" in message && message.awaitingHost ? " · sent while active; awaiting host" : "";
+  const roleLabel = message.role === "tool"
+    ? `tool${message.toolName ? ` (${message.toolName})` : ""}`
+    : `${message.role}${message.isError ? " · error" : ""}`;
+  const showRoleLabel = message.role === "tool" || message.role === "notice" || message.isError === true || caveat !== "";
   return (
     <div className={`message-card ${message.role}${message.isError ? " error" : ""}`}>
-      <div style={{ fontSize: "0.75rem", color: message.isError ? "var(--danger-text)" : "var(--text-muted)", marginBottom: "4px", textTransform: "capitalize" }}>
-        {message.role} {message.toolName ? `(${message.toolName})` : ""}{message.isError ? " · error" : ""}
-        {"awaitingHost" in message && message.awaitingHost ? " · sent while active; awaiting host" : ""}
-      </div>
+      {showRoleLabel && (
+        <div className="message-role" style={{ color: message.isError ? "var(--danger-text)" : "var(--text-muted)" }}>
+          {roleLabel}{caveat}
+        </div>
+      )}
       {/* An advisor card is a transcript row, so it survives replay and is never
           folded into a group: an advisor warning hidden inside a collapsed
           activity row is a warning the user will not see. */}
@@ -339,6 +358,16 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
    * index, so a roster change cannot silently re-point the view at another agent.
    */
   const [agentNav, setAgentNav] = useState<{ open: boolean; selectedId: string | null }>({ open: false, selectedId: null });
+  /**
+   * The recovery sheet is a modal, not an inline strip.
+   *
+   * A record about a refused prompt used to render its COMPLETE text in the
+   * conversation column, where a long prompt displaced the transcript (P1-A) in a
+   * screen that is `height: 100dvh; overflow: hidden`. The records are still kept
+   * whole — the sheet shows every one of them verbatim — but they no longer
+   * compete with the surface the user opened the app for.
+   */
+  const [recoverySheetOpen, setRecoverySheetOpen] = useState(false);
   const [showActivity, setShowActivity] = useState(false);
   const [showAdvisor, setShowAdvisor] = useState(false);
   const [showVibe, setShowVibe] = useState(false);
@@ -396,13 +425,43 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
   const refusedRecoveriesRef = useRef(refusedRecoveries);
   refusedRecoveriesRef.current = refusedRecoveries;
   const refusedIdRef = useRef(0);
-  const appendRefusedRecovery = (text: string, unconfirmed = false): void => {
+  /**
+   * Capacity, in the user's terms.
+   *
+   * The same ceiling the guest client enforces on retention (256 records / 1 MiB
+   * of text) applies here. Hitting it refuses to RETAIN a new record — it never
+   * blocks the send, and it never evicts a record the user has neither dismissed
+   * nor recovered, because that eviction is the data loss this list exists to
+   * prevent. The refusal is reported the same way a refusal already is: in the
+   * composer's own status line, which is where the user is looking.
+   */
+  const [recoveryCapacityNote, setRecoveryCapacityNote] = useState<string | null>(null);
+  /**
+   * Retain a prompt, or refuse the retention.
+   *
+   * @param mustRetain the text being passed in is the ONLY remaining copy — the
+   * caller is about to clear `pendingPromptRef` for it. The ceiling must not
+   * evict a record the user has neither dismissed nor recovered, and refusing
+   * here would destroy exactly that: at the ceiling, a late refusal would drop a
+   * prompt that lives nowhere else. So this path retains past the ceiling. The
+   * ceiling still refuses an ordinary voluntary retention (the send path), where
+   * the text is still in the composer and nothing is lost.
+   *
+   * @returns whether the record is now retained.
+   */
+  const appendRefusedRecovery = (text: string, unconfirmed = false, mustRetain = false): boolean => {
     const list = refusedRecoveriesRef.current;
+    const verdict = canRetain(list, text);
+    if (!verdict.ok && !mustRetain) {
+      setRecoveryCapacityNote(`Not retained: ${verdict.reason}. Copy or dismiss a prompt in Review to make room — the prompt stays in the composer.`);
+      return false;
+    }
     // Seed from the list so a caller-supplied list keeps unique ids across remounts.
     if (refusedIdRef.current === 0) refusedIdRef.current = list.reduce((max, item) => Math.max(max, item.id), 0);
     const next = [...list, { id: ++refusedIdRef.current, text, ...(unconfirmed ? { unconfirmed: true } : {}) }];
     refusedRecoveriesRef.current = next;
     setRefusedRecoveries(next);
+    return true;
   };
   const removeRefusedRecovery = (id: number): void => {
     const next = refusedRecoveriesRef.current.filter((item) => item.id !== id);
@@ -424,8 +483,17 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     // recoverRefusedPrompt always removes the prompt after appending/restoring, so
     // a prompt cannot be appended twice.
     const pending = [...pendingPromptRef.current];
-    for (const prompt of pending) appendRefusedRecovery(prompt.submitted, !prompt.refusalMessage);
-    if (pending.length > 0) pendingPromptRef.current = [];
+    const retained: typeof pending = [];
+    for (const prompt of pending) {
+      // B1: these prompts are about to leave the queue, so the ceiling may only
+      // refuse the retention when the text still has another home — and the one
+      // such home is the composer. If the box still holds exactly this text, the
+      // user has not lost it and the capacity note tells them why it was not kept;
+      // otherwise this is the last copy and it is retained past the ceiling.
+      const stillInComposer = inputValueRef.current.trim() === prompt.submitted.trim();
+      if (appendRefusedRecovery(prompt.submitted, !prompt.refusalMessage, !stillInComposer)) retained.push(prompt);
+    }
+    if (retained.length > 0) pendingPromptRef.current = pendingPromptRef.current.filter((prompt) => !retained.includes(prompt));
   };
   /** Live echoes have no sender identity; settle only one ordinal match and retain it for inspection. */
   const acknowledgeUnconfirmed = (text: string): void => {
@@ -443,7 +511,8 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     if (!prompt.sent) return;
     pendingPromptRef.current.splice(index, 1);
     if (prompt.optimisticId) setOptimisticMessages((previous) => previous.filter((message) => message.id !== prompt.optimisticId));
-    appendRefusedRecovery(prompt.submitted);
+    // Spliced out of the pending queue just above: this is now the only copy (B1).
+    appendRefusedRecovery(prompt.submitted, false, true);
     const next = refusedRecoveriesRef.current.map((entry) => entry.id === refusedIdRef.current ? { ...entry, echoed: true } : entry);
     refusedRecoveriesRef.current = next;
     setRefusedRecoveries(next);
@@ -518,6 +587,17 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
    */
   useEffect(() => {
     setAgentNav({ open: false, selectedId: null });
+    // M2: the layer's pushed history entry is retired here, in the same effect that
+    // closes it. Closing without retiring left a `cawAgents` entry in the session
+    // history that a later Back would consume — re-opening conversation B's agents
+    // layer with conversation A's `selectedId`.
+    if (typeof window !== "undefined" && window.history?.state !== null && typeof window.history?.state === "object" && "cawAgents" in (window.history.state as object)) {
+      window.history.replaceState(null, "");
+    }
+    setRecoverySheetOpen(false);
+    // M1: a capacity warning belongs to the conversation it was raised in; leaving it
+    // set would show conversation A's refusal over conversation B's composer.
+    setRecoveryCapacityNote(null);
     setVibeState(null);
     setVibeWorkerIdsFromServer([]);
     setVibeError(null);
@@ -614,6 +694,17 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
    */
   const agentVibes = useMemo(() => agentViews(agents, vibeWorkerIds(vibeWorkerIdsFromServer)), [agents, vibeWorkerIdsFromServer]);
   const workerCounts = useMemo(() => agentCounts(agentVibes), [agentVibes]);
+  /**
+   * The model the host authoritatively reported for THIS conversation, or `null`.
+   *
+   * `effectiveModel` is only ever set from a `welcome`/`state` frame's own
+   * `state.model` (`updateTranscript`), and it is stamped with the conversation it
+   * was read for — so a frame from conversation A can never print its model
+   * beside conversation B's title. The record's `model`/`modelPreference` is a
+   * saved launch preference, NOT a report of what is running, so it is
+   * deliberately not consulted here.
+   */
+  const reportedModel = effectiveModel !== null && effectiveModel.conversationId === conversationId ? effectiveModel.model : null;
   const transcripts = transcript.transcripts;
   const canManageConversation = conversation?.id === conversationId && conversation.ownership === "managed";
   /**
@@ -769,14 +860,40 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     });
   }, [transcript.messages]);
 
+  /**
+   * File-change totals for the dashboard card, and only from real tool rows.
+   *
+   * `TranscriptList` reads the same rows through `groupActivity`, but the card
+   * needs the summary without rendering them, so the same pure module is called
+   * directly over the rows currently on screen (live or saved). `summarizeFileChanges`
+   * returns `null` when no row carries verified diff data — shown as `View changes`
+   * rather than a zero nothing proved. Assistant prose is never consulted: a
+   * sentence saying "I changed three files" is not a change record.
+   */
+  const dashboardFileChanges = useMemo(
+    () => summarizeFileChanges(isShowingSavedHistory ? savedRows : messages),
+    [isShowingSavedHistory, savedRows, messages],
+  );
+  const dashboardCounts = useMemo(
+    () => ({
+      agents: { total: workerCounts.total, running: workerCounts.runningWorkers + workerCounts.runningSubagents },
+      files: dashboardFileChanges === null
+        ? null
+        : { uniqueFiles: dashboardFileChanges.uniqueFiles, additions: dashboardFileChanges.additions, deletions: dashboardFileChanges.deletions },
+    }),
+    [workerCounts, dashboardFileChanges],
+  );
+
   const recoverRefusedPrompt = (prompt: PendingPrompt): void => {
     pendingPromptRef.current = pendingPromptRef.current.filter((pending) => pending !== prompt);
     if (prompt.optimisticId) setOptimisticMessages((previous) => previous.filter((message) => message.id !== prompt.optimisticId));
     if (sendVersionRef.current !== prompt.draftVersion) {
       // The user has typed newer content since sending: overwriting it would destroy
       // that work and dropping the refused prompt would lose it entirely. Append the
-      // refused text behind an explicit affordance instead of the composer.
-      appendRefusedRecovery(prompt.text);
+      // refused text behind an explicit affordance instead of the composer. This
+      // prompt is being removed from the pending queue just below, so this retention
+      // must not be refused at the ceiling (B1).
+      appendRefusedRecovery(prompt.text, false, true);
       return;
     }
     inputValueRef.current = prompt.text;
@@ -1359,7 +1476,9 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
         pendingPrompt.sent = true;
         if (pendingPrompt.echoed) {
           pendingPromptRef.current = pendingPromptRef.current.filter((prompt) => prompt !== pendingPrompt);
-          appendRefusedRecovery(pendingPrompt.submitted);
+          // The prompt is leaving the pending queue here, so this copy is the only
+          // one left: retain past the ceiling rather than lose it (B1).
+          appendRefusedRecovery(pendingPrompt.submitted, false, true);
           pendingPrompt.optimisticId = null;
           return;
         }
@@ -1374,6 +1493,11 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
           hostEchoCount: echoAllowance,
         }]);
         setSendError("Sent to socket; host receipt is unconfirmed until conversation echo arrives.");
+        // M1: this path clears the draft directly (it cannot go through `updateDraft`,
+        // which would also bump the draft version and cancel the send in flight), so it
+        // must clear the capacity note itself — the note described the previous refusal
+        // and the send is exactly what makes it stale.
+        setRecoveryCapacityNote(null);
         if (sendVersionRef.current === draftVersion && inputValueRef.current === text) {
           inputValueRef.current = "";
           setInputText("");
@@ -1400,6 +1524,7 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     setInputText(value);
     sendGuardRef.current = null;
     setSendError(null);
+    setRecoveryCapacityNote(null);
     setInterceptedCommand(null);
     onDraftChange?.(value);
   };
@@ -1894,10 +2019,13 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
       // the early return; everything else is correctly dropped.
       if (conversationIdRef.current !== target) {
         if (directive !== undefined && directive !== "") {
-          setRefusedRecoveries([
-            ...refusedRecoveriesRef.current,
-            { id: Date.now(), text: directive, unconfirmed: true },
-          ]);
+          // m1: routed through the retention helper, which allocates the id from the
+          // monotonic source and applies the ceiling. A `Date.now()` id collided for
+          // two same-millisecond insertions, and a colliding id deletes BOTH records
+          // (`key={record.id}` and `removeRefusedRecovery` both filter by id).
+          // The directive is not in the composer — the UI state below belongs to a
+          // conversation nobody is looking at — so it must not be refused (B1).
+          appendRefusedRecovery(directive, true, true);
         }
         return;
       }
@@ -1925,10 +2053,9 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
           // the host never acknowledged — so it is visible, copyable and one tap
           // from a resend, rather than silently lost or silently resent.
           setVibeError("Vibe mode is on, but the first directive was not sent — the link was not accepting prompts. It is kept below to resend.");
-          setRefusedRecoveries([
-            ...refusedRecoveriesRef.current,
-            { id: Date.now(), text: directive, unconfirmed: true },
-          ]);
+          // m1: same helper, same monotonic ids, same ceiling. The composer no longer
+          // holds this text, so it is retained even at the ceiling (B1).
+          appendRefusedRecovery(directive, true, true);
         }
       }
     });
@@ -1957,27 +2084,169 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     transcriptRequestsRef.current.clear();
     transcriptRef.current = clearTranscriptRequests(transcriptRef.current);
     setTranscript(transcriptRef.current);
-    setAgentNav({ open: false, selectedId: null });
+    leaveAgentsLayer({ open: false, selectedId: null });
   };
+
+  /**
+   * Scroll the transcript to its verified file-change rows.
+   *
+   * The card is a navigation summary, so its destination is the change data the
+   * screenshot came from — the tool rows themselves, not a new view. When nothing
+   * verified exists the card already says `View changes`, and the tap lands on the
+   * tail of the transcript, where the newest activity is.
+   */
+  const openFiles = (): void => {
+    const container = messagesScrollRef.current;
+    const content = messagesContentRef.current;
+    const targets = content?.querySelectorAll(".activity-group, .tv-file-changes") ?? [];
+    const last = targets[targets.length - 1];
+    // Nit: compute the offset RELATIVE to the scroll container instead of calling
+    // `scrollIntoView`, which also scrolls ancestors (the page itself on desktop)
+    // and could move the whole screen to reach a row inside the transcript.
+    if (container instanceof HTMLElement && last instanceof HTMLElement) {
+      const row = last.getBoundingClientRect();
+      const view = container.getBoundingClientRect();
+      container.scrollTop += row.top - view.top - (view.height - row.height) / 2;
+      return;
+    }
+    goToLatest();
+  };
+
+  /**
+   * The agents layer sits ON TOP of the conversation, and it participates in the
+   * browser's Back stack.
+   *
+   * Three things are deliberate here:
+   *
+   *  - the state is applied SYNCHRONOUSLY before any `history.back()`, so an
+   *    in-app Back control behaves exactly as it did when this was plain state
+   *    (tests and users both get the transition in the same tick), and the
+   *    history entry is then retired in the background;
+   *  - the `popstate` listener is installed once and removed on unmount, so
+   *    repeated navigation cannot accumulate listeners;
+   *  - nothing here touches the socket, the transcript, or the draft. The
+   *    conversation stays mounted underneath (`inert`, never unmounted), so
+   *    coming back is instant and its scroll position is where it was.
+   */
+  /**
+   * The control that opened the agents layer.
+   *
+   * M3: `ModalOverlay` already returns focus to its opener on close; the agents
+   * layer must do the same, or a Back gesture/Press drops a keyboard user at
+   * `document.body` with no way back into the header.
+   */
+  const agentsOpenerRef = useRef<Element | null>(null);
+
+  const openAgents = useCallback((): void => {
+    agentsOpenerRef.current = document.activeElement;
+    setAgentNav({ open: true, selectedId: null });
+    // M2: the pushed entry names the conversation it belongs to, so `onPopState`
+    // can refuse a stale entry that survived a conversation switch.
+    window.history.pushState({ cawAgents: "list", conversationId: conversationIdRef.current }, "");
+  }, []);
+
+  const openAgentDetail = useCallback((id: string): void => {
+    agentsOpenerRef.current = document.activeElement;
+    setAgentNav({ open: true, selectedId: id });
+    window.history.pushState({ cawAgents: "detail", id, conversationId: conversationIdRef.current }, "");
+  }, []);
+
+  /**
+   * Leave the agents layer, retiring our own history entry when one is current.
+   *
+   * `history.state` is read before popping: if this view never pushed an entry
+   * (a Back that already consumed ours, or a host that refused `pushState`), there
+   * is nothing of ours to retire and calling `back()` would navigate the user away
+   * from the app entirely.
+   */
+  const leaveAgentsLayer = useCallback((next: { open: boolean; selectedId: string | null }): void => {
+    const ours = typeof window !== "undefined" && window.history?.state !== null && typeof window.history?.state === "object" && "cawAgents" in (window.history.state as object);
+    setAgentNav(next);
+    if (ours) window.history.back();
+  }, []);
+
+  /**
+   * M3: return focus to the opener when the layer closes.
+   *
+   * An effect on the layer's own state rather than a line in `leaveAgentsLayer`,
+   * because closing has three paths — the Back button, a browser Back (which goes
+   * through `onPopState` and never touches `leaveAgentsLayer`), and unmount. Only
+   * the effect sees all of them, and `ModalOverlay` behaves the same way for the
+   * recovery sheet.
+   */
+  useEffect(() => {
+    if (agentNav.open) return;
+    const opener = agentsOpenerRef.current;
+    if (opener === null) return;
+    agentsOpenerRef.current = null;
+    // The captured opener is often a menu item, and the menu closes when the layer
+    // opens — so the element is genuinely gone by now. Fall back to the header menu
+    // trigger, which is persistent: focus must land somewhere real, never on body.
+    const target = opener instanceof HTMLElement && opener.isConnected
+      ? opener
+      : document.querySelector<HTMLElement>(".header-menu-button");
+    target?.focus();
+  }, [agentNav.open]);
+
+  useEffect(() => {
+    const onPopState = (event: PopStateEvent): void => {
+      const state = event.state as { cawAgents?: string; id?: string; conversationId?: string } | null;
+      if (state !== null && typeof state === "object" && "cawAgents" in state) {
+        // M2: an entry pushed by a different conversation is not ours to honour —
+        // acting on it would show conversation A's selected agent against B's roster.
+        if (typeof state.conversationId === "string" && state.conversationId !== conversationIdRef.current) return;
+        setAgentNav({ open: true, selectedId: state.cawAgents === "detail" && typeof state.id === "string" ? state.id : null });
+        return;
+      }
+      // Back past our own entries: the conversation is the screen underneath.
+      setAgentNav({ open: false, selectedId: null });
+    };
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, []);
+
+  /**
+   * M2 (unmount): retire a layer entry this view pushed before it goes away.
+   *
+   * Without this, closing the conversation with the layer open leaves a `cawAgents`
+   * entry in the session history; the next Back anyone performs consumes it and
+   * re-opens an agents layer for a conversation that is no longer mounted.
+   */
+  useEffect(() => () => {
+    if (typeof window !== "undefined" && window.history?.state !== null && typeof window.history?.state === "object" && "cawAgents" in (window.history.state as object)) {
+      window.history.replaceState(null, "");
+    }
+  }, []);
 
   return (
     <div className="conversation-screen">
-      {/* Header */}
+      {/* The conversation column is made `inert` while the agents layer is open:
+          one viewport, one interactive screen. `inert` (not `aria-hidden`) removes
+          the covered subtree from the accessibility tree AND from tab order, which
+          is what a full-viewport overlay actually means. */}
+      <div className="conversation-column" inert={agentNav.open}>
+      {/* Header: one row. Back, title, one status line, Stop while running, and
+          the overflow menu. Everything secondary lives in the menu. */}
       <div className="app-header">
         <div className="conversation-header-title">
-          <button type="button" className="ghost header-icon-button" onClick={onBack} title="Back">
+          <button type="button" className="ghost header-icon-button" onClick={onBack} title="Back" aria-label="Back">
             ←
           </button>
           <div className="conversation-header-copy">
-            <h3 style={{ fontSize: "1rem" }}>{conversation?.title ?? "Conversation"}</h3>
+            <h3>{conversation?.title ?? "Conversation"}</h3>
             {/* One status line, one fact: the live link's state.
                 The record's `state` and the link disagree only while one is
                 stale, and the link is the one that can be verified right now — a
                 healthy link proves the host is answering, which supersedes a
                 stored `starting`. Printing both produced `idle · idle`: the same
                 fact twice, in the width a transcript row needs. The record's own
-                state stays available in Session details, and a saved transcript
-                states its own case in the transcript banner. */}
+                state stays available in the overflow menu, and a saved transcript
+                states its own case in the transcript banner.
+                The model is appended ONLY when the host authoritatively reported
+                one for THIS conversation (`effectiveModel`, set from the welcome
+                frame's own `state.model`). A model name is never assumed from the
+                record's saved preference, and when it is unknown nothing is
+                printed — an invented model is worse than a missing one. */}
             <span
               className={`header-status header-status--${status}`}
               title={`Live link: ${status} · stored record: ${conversation?.state ?? "unknown"}`}
@@ -1989,46 +2258,45 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
             >
               <span className="header-status-dot" aria-hidden="true" />
               {status}
+              {reportedModel !== null && <span className="header-status-model"> · {reportedModel}</span>}
             </span>
-              {/* Mode chips, on the same line as the status (§5.5): one small
-                  control each, with the full name in the accessible label. They
-                  replace the rows these states used to occupy, and an advisor with
-                  a recorded blocker is the only case that gets a loud colour —
-                  everything else stays quiet until tapped. */}
-              {/* B09: this chip reports **recorded notes**, nothing about the
-                  advisor's runtime. It used to paint `⛔` from historical blockers,
-                  which reads as "the advisor is alarming right now" — a claim this
-                  data cannot support, because nothing on this transport reports the
-                  advisor's enable state. So the label counts notes (`3`), the tone
-                  marks a blocker as *recorded* (a triangle, not an alarm), and the
-                  accessible name says exactly that. */}
-              {advisorSummary.notes.length > 0 && (
-                <button
-                  type="button"
-                  className={`mode-chip${advisorSummary.hasBlocker ? " mode-chip--alert" : ""}`}
-                  aria-label={`Advisor: ${advisorSummary.notes.length} recorded note${advisorSummary.notes.length === 1 ? "" : "s"}${advisorSummary.hasBlocker ? ", including a blocker" : ""}. Open the advisor panel.`}
-                  title={`Recorded advisor notes: ${advisorSummary.notes.length}`}
-                  onClick={() => setShowAdvisor(true)}
-                >
-                  Adv {advisorSummary.notes.length}{advisorSummary.hasBlocker ? " ⚠" : ""}
-                </button>
-              )}
-              {/* Rendered only when the mode is known ON, or when the bridge could
-                  not be asked while the panel has been opened at least once. An
-                  "off" mode is not worth a permanent chip — it is the default. */}
-              {vibeState?.available === true && vibeState.modes?.vibe.status === "active" && (
-                <button
-                  type="button"
-                  className="mode-chip mode-chip--on"
-                  // B11: counts **verified workers**, not the whole agent roster.
-                  // The old label called every agent a worker, which is how a
-                  // single subagent came to read as "1 worker".
-                  aria-label={`Vibe mode is on${workerCounts.workers > 0 ? `, ${workerCounts.workers} verified worker${workerCounts.workers === 1 ? "" : "s"}` : ""}. Open the vibe panel.`}
-                  onClick={() => setShowVibe(true)}
-                >
-                  Vibe ●{workerCounts.workers > 0 ? ` ${workerCounts.workers}` : ""}
-                </button>
-              )}
+          </div>
+          {/* Mode chips: kept as the quiet entry points the brief preserves, and
+              they hold no claim of their own. */}
+          <div className="header-chips">
+            {/* B09: this chip reports **recorded notes**, nothing about the
+                advisor's runtime. It used to paint `⛔` from historical blockers,
+                which reads as "the advisor is alarming right now" — a claim this
+                data cannot support, because nothing on this transport reports the
+                advisor's enable state. So the label counts notes (`3`), the tone
+                marks a blocker as *recorded* (a triangle, not an alarm), and the
+                accessible name says exactly that. */}
+            {advisorSummary.notes.length > 0 && (
+              <button
+                type="button"
+                className={`mode-chip${advisorSummary.hasBlocker ? " mode-chip--alert" : ""}`}
+                aria-label={`Advisor: ${advisorSummary.notes.length} recorded note${advisorSummary.notes.length === 1 ? "" : "s"}${advisorSummary.hasBlocker ? ", including a blocker" : ""}. Open the advisor panel.`}
+                title={`Recorded advisor notes: ${advisorSummary.notes.length}`}
+                onClick={() => setShowAdvisor(true)}
+              >
+                Adv {advisorSummary.notes.length}{advisorSummary.hasBlocker ? " ⚠" : ""}
+              </button>
+            )}
+            {/* Rendered only when the mode is known ON. An "off" mode is not worth
+                a permanent chip — it is the default. */}
+            {vibeState?.available === true && vibeState.modes?.vibe.status === "active" && (
+              <button
+                type="button"
+                className="mode-chip mode-chip--on"
+                // B11: counts **verified workers**, not the whole agent roster.
+                // The old label called every agent a worker, which is how a
+                // single subagent came to read as "1 worker".
+                aria-label={`Vibe mode is on${workerCounts.workers > 0 ? `, ${workerCounts.workers} verified worker${workerCounts.workers === 1 ? "" : "s"}` : ""}. Open the vibe panel.`}
+                onClick={() => setShowVibe(true)}
+              >
+                Vibe ●{workerCounts.workers > 0 ? ` ${workerCounts.workers}` : ""}
+              </button>
+            )}
           </div>
         </div>
 
@@ -2070,6 +2338,13 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
               <button type="button" onClick={() => { setShowMenu(false); setShowActivity(true); }}>
                 Activity
               </button>
+              {/* The three dashboard cards are the primary way to these places, but
+                  they scroll away with the transcript and collapse to two columns on
+                  the narrowest phones — so each destination also lives here, where it
+                  is reachable at any scroll position and any width. */}
+              <button type="button" onClick={() => { setShowMenu(false); openFiles(); }}>
+                Files
+              </button>
               {/* Advisor and Vibe are always reachable from the menu, not only
                   through a header chip: the chips appear only when there is
                   something to show (a recorded note, an active mode), so without
@@ -2081,9 +2356,12 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
               <button type="button" onClick={() => { setShowMenu(false); setShowVibe(true); }}>
                 Vibe mode
               </button>
-              {agents.length > 0 && (
-                <button type="button" aria-label={`Agents (${agents.length})`} onClick={() => { setShowMenu(false); setAgentNav({ open: true, selectedId: null }); }}>
-                  Agents ({agents.length})
+              <button type="button" aria-label={`Agents (${agents.length})`} onClick={() => { setShowMenu(false); openAgents(); }}>
+                Agents ({agents.length})
+              </button>
+              {refusedRecoveries.length > 0 && (
+                <button type="button" aria-label={`Review ${refusedRecoveries.length} unacknowledged prompts`} onClick={() => { setShowMenu(false); setRecoverySheetOpen(true); }}>
+                  Review prompts ({refusedRecoveries.length})
                 </button>
               )}
               {/* Handoff is offered only where it can actually run. A conversation
@@ -2127,6 +2405,28 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
           )}
         </div>
       </div>
+      {/* Dashboard: three compact navigation summaries, bounded and scrolling away
+          with the transcript. They are the *only* new permanent row on this screen. */}
+      <DashboardCards
+        counts={dashboardCounts}
+        onOpenAgents={openAgents}
+        onOpenFiles={openFiles}
+        onOpenActivity={() => setShowActivity(true)}
+      />
+      {/* ONE compact summary row for refused prompts, never their text (P1-A). A
+          long unconfirmed prompt used to render in full here, inside a screen that
+          is `height: 100dvh; overflow: hidden` — so the transcript became
+          unreachable until a reload. The count is the number of records; each
+          full prompt lives in the sheet, one tap away. */}
+      {refusedRecoveries.length > 0 && (
+        <button type="button" className="recovery-summary" onClick={() => setRecoverySheetOpen(true)}>
+          <span className="recovery-summary-glyph" aria-hidden="true">⚠</span>
+          <span className="recovery-summary-text">
+            {refusedRecoveries.length} prompt{refusedRecoveries.length === 1 ? "" : "s"} need{refusedRecoveries.length === 1 ? "s" : ""} review
+          </span>
+          <span className="recovery-summary-action" aria-hidden="true">Review ›</span>
+        </button>
+      )}
       {conversation !== null && handoffReason && !handoffConfirming && <p className="handoff-reason">Handoff unavailable: {handoffReason}</p>}
       {/* The reason is printed even when the control is not rendered (an external
           session): a missing action with no explanation reads as a bug. */}
@@ -2313,11 +2613,14 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
         </div>
       )}
       {linkFailure && <div className="banner disconnected" role="alert">{linkFailure}</div>}
-      {transcript.notice && (
-        <div className={`banner ${transcript.notice.level}`} role={transcript.notice.level === "error" ? "alert" : "status"}>
-          <span>{transcript.notice.message}</span>
-        </div>
-      )}
+      {/* One live protocol notice, rendered by its level (never by its text):
+          a routine `info` join is a quiet muted line, `warning` keeps its row, and
+          `error` keeps `role="alert"`. Each clamps to one/two rendered lines with a
+          `Show more` control, so the full host message stays reachable without a
+          5,000-character notice occupying the screen. The row is keyed by the
+          message, so a new notice starts collapsed rather than inheriting the
+          previous one's expansion. */}
+      {transcript.notice && <NoticeRow key={transcript.notice.message} notice={transcript.notice} />}
       {/* While the link is live (idle/running) the host is up, so the record's
           stale `starting` must not claim prompting may be refused. Only while the
           link is down/connecting does the startup warning stay honest. */}
@@ -2518,41 +2821,40 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
           <button type="button" className="ghost" onClick={() => setInterceptedCommand(null)}>Cancel</button>
         </div>
       )}
-      {/* V20-07: the strip is a LOCAL affordance. Copy writes the clipboard, so a lost
-          link, a saved transcript or a read-only link never hides it. Recover writes the
-          composer draft, so it is offered only while the composer is writable: staging
-          it into a hidden composer would call updateDraft and silently overwrite the
-          App-owned draft, the only copy of the user's newer text. Sending stays gated by
-          the composer's own disabled state. */}
-      {refusedRecoveries.map((item) => (
-        <div key={item.id} className="banner warning refused-prompt" role="status" style={{ gap: "8px" }}>
-          {/* The strip is the only way back to a refused prompt, so it cannot hide
-              the text behind a one-line ellipsis (measured: 201px shown of 821px).
-              Wrapping keeps the whole prompt readable; the row grows instead. */}
-          <span style={{ minWidth: 0, wordBreak: "break-word", flex: 1 }}>
-            {item.unconfirmed ? "Unconfirmed — host receipt unknown; may already have executed — " : item.echoed ? "Echoed — " : "Refused — "}{item.text}
-          </span>
-          <span style={{ display: "flex", gap: "8px", flexShrink: 0 }}>
-            {canWriteToHost && !linkUnavailable && (
-              <button type="button" aria-label="Recover to draft" className="ghost" onClick={() => recoverRefusedPromptText(item)}>Recover to draft</button>
-            )}
-            <button type="button" className="ghost" onClick={() => void copyRefusedPromptText(item)}>
-              {refusedCopyState?.id === item.id ? (refusedCopyState.state === "copied" ? "Copied" : "Copy failed") : "Copy"}
-            </button>
-            <button type="button" className="ghost" onClick={() => removeRefusedRecovery(item.id)}>Dismiss</button>
-          </span>
-        </div>
-      ))}
+      {/* The recovery records themselves live in the bounded sheet, opened from the
+          summary row above (or the overflow menu). They are NO LONGER rendered here:
+          rendering their complete text in this column is exactly what made a long
+          prompt displace the transcript (P1-A). Every record, and every one of its
+          controls, is one tap away and nothing was dropped — the sheet shows each
+          prompt verbatim, with the same honest status wording and the same
+          Recover/Copy/Dismiss actions, offered under the same gates: Copy is local,
+          so it is always available; Recover writes the composer draft, so it is
+          offered only while the composer is writable. */}
+      {recoverySheetOpen && refusedRecoveries.length > 0 && (
+        <RecoverySheet
+          records={refusedRecoveries}
+          copyState={refusedCopyState}
+          canRecover={canWriteToHost && !linkUnavailable && !transcript.readOnly}
+          onCopy={(record) => void copyRefusedPromptText(record)}
+          onRecover={(record) => recoverRefusedPromptText(record)}
+          onDismiss={(record) => removeRefusedRecovery(record.id)}
+          onClose={() => setRecoverySheetOpen(false)}
+        />
+      )}
       {canWriteToHost && !linkUnavailable && (
       <form onSubmit={handleSendPrompt} className="composer-container">
         <textarea
           className="composer-input"
-          placeholder={transcript.readOnly ? "Read-only — not sent" : status === "running" ? "Turn in flight — send a follow-up…" : "Send instructions to agent…"}
+          placeholder={transcript.readOnly ? "Read-only — not sent" : status === "running" ? "Turn in flight — send a follow-up…" : "Send a follow-up…"}
           value={inputText}
           ref={composerRef}
           onChange={(event) => updateDraft(event.target.value)}
           disabled={transcript.readOnly || status === "disconnected" || status === "unknown" || status === "connecting" || status === "reconnecting"}
           rows={1}
+          /* Nits: the visible hint and the accessible name are the SAME string in
+             every state. They previously disagreed ("Send a follow-up…" shown,
+             "Send instructions to agent" announced) — two names for one control. */
+          aria-label={transcript.readOnly ? "Read-only — not sent" : status === "running" ? "Turn in flight — send a follow-up…" : "Send a follow-up…"}
           onCompositionStart={() => { composingRef.current = true; }}
           onCompositionEnd={() => { setTimeout(() => { composingRef.current = false; }, 0); }}
           onKeyDown={(event) => {
@@ -2562,62 +2864,94 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
             }
           }}
         />
+        {/* An icon control with an accessible name, not a wider "Send" label: the
+            composer is single-line on a phone and the button must not steal width
+            from the text. `aria-label` is what assistive tech announces, and the
+            `title` gives the same name to a pointer user. */}
         <button
           type="submit"
-          className="primary"
+          className="primary composer-send"
+          aria-label="Send"
+          title="Send"
           disabled={transcript.readOnly || !inputText.trim() || status === "disconnected" || status === "unknown" || status === "connecting" || status === "reconnecting"}
-          style={{ minHeight: "44px", minWidth: "64px" }}
         >
-          Send
+          <span aria-hidden="true">↑</span>
         </button>
       {sendError && <div className="banner unknown" role="alert">{sendError}</div>}
       </form>
       )}
+      {/* M1: a sibling of the form, not a child. Inside the form it rendered only
+          while `canWriteToHost && !linkUnavailable`, so a refusal raised in
+          read-only or saved mode was announced to nobody; and it was never cleared,
+          so it outlived the condition it described. It is now cleared by the same
+          three events that make it stale: a new draft (`updateDraft`), a send that
+          emptied the draft, and a conversation switch.
+          Known residual, measured rather than assumed: every retention refusal
+          currently originates in `promoteUnconfirmedPending`, which runs from effect
+          cleanups — so on a switch this state is cleared in the same commit and on
+          unmount there is no commit, and the banner does not reach a paint today.
+          The clears are kept because each is correct for any future caller that
+          refuses while mounted; see the retention contract for the user-visible
+          consequence. */}
+      {recoveryCapacityNote && !agentNav.open && (
+        <div className="banner warning" role="status">{recoveryCapacityNote}</div>
+      )}
 
-      {/* Agents Center — a full-screen view, not a modal stacked over the chat
-          (Phase 3.2). Level 2 lists agents; level 3 shows the selected one. The
-          conversation keeps its state underneath, so returning is instant and the
-          draft and scroll position survive. */}
-      {agentNav.open && (() => {
-        const selected = agentNav.selectedId === null ? null : agentVibes.find((view) => view.id === agentNav.selectedId) ?? null;
-        // An agent that left the roster while its detail was open: say so rather
-        // than silently dropping back to the list, which would look like a bug.
-        const vanished = agentNav.selectedId !== null && selected === null;
-        if (vanished) {
-          return (
-            <div className="agents-screen" role="region" aria-label="Agent detail unavailable">
-              <header className="agents-header">
-                <button type="button" className="ghost" onClick={() => setAgentNav({ open: true, selectedId: null })}>← Agents</button>
-                <h3>Agent unavailable</h3>
-              </header>
-              <p className="agents-empty">This agent is no longer in the host's roster, so its detail cannot be shown.</p>
-            </div>
-          );
-        }
-        return selected === null ? (
-          <AgentsCenter
-            views={agentVibes}
-            activity={transcript.agentActivity}
-            onSelect={(id) => setAgentNav({ open: true, selectedId: id })}
-            onBack={handleCloseSubagents}
-          />
-        ) : (
-          <AgentDetail
-            view={selected}
-            activity={transcript.agentActivity[selected.id]}
-            transcript={transcripts[selected.id]}
-            transcriptError={transcriptErrors[selected.id]}
-            loading={loadingAgentIds.includes(selected.id)}
-            onFetchTranscript={handleFetchTranscript}
-            onWatchAgent={handleWatchTranscript}
-            // Same gate the Vibe panel applies: a destructive control is not
-            // offered where the host would refuse it.
-            readOnly={transcript.readOnly || linkAccess === "view" || !canManageConversation}
-            onBack={() => setAgentNav({ open: true, selectedId: null })}
-            onKillWorker={killWorker}
-          />
-        );
-      })()}
+      </div>
+      {/* end .conversation-column — the header, dashboard, transcript and composer
+          above are its children; the agents layer below is its SIBLING, not a flex
+          child under the composer (that was P1-B). */}
+      {/* Agents — a genuine level-2/level-3 screen, not a sibling of the composer.
+          It is a fixed, own-scrolling, full-viewport layer painted on the app
+          background, so only the ACTIVE screen occupies the content viewport. The
+          conversation stays mounted underneath (marked `inert` above), which is why
+          returning is instant and the socket, transcript, draft and scroll position
+          all survive. The destructive/read-only gates below are the ones that were
+          already in force; nothing about them changed. */}
+      {agentNav.open && (
+        <div className="agents-layer">
+          {(() => {
+            const selected = agentNav.selectedId === null ? null : agentVibes.find((view) => view.id === agentNav.selectedId) ?? null;
+            // An agent that left the roster while its detail was open: say so rather
+            // than silently dropping back to the list, which would look like a bug.
+            const vanished = agentNav.selectedId !== null && selected === null;
+            if (vanished) {
+              return (
+                <div className="agents-screen" role="region" aria-label="Agent detail unavailable">
+                  <header className="agents-header">
+                    <button type="button" className="ghost header-icon-button" aria-label="Back to Agents" onClick={() => leaveAgentsLayer({ open: true, selectedId: null })}>←</button>
+                    <h3>Agent unavailable</h3>
+                  </header>
+                  <p className="agents-empty">This agent is no longer in the host's roster, so its detail cannot be shown.</p>
+                </div>
+              );
+            }
+            return selected === null ? (
+              <AgentsCenter
+                views={agentVibes}
+                activity={transcript.agentActivity}
+                onSelect={openAgentDetail}
+                onBack={handleCloseSubagents}
+              />
+            ) : (
+              <AgentDetail
+                view={selected}
+                activity={transcript.agentActivity[selected.id]}
+                transcript={transcripts[selected.id]}
+                transcriptError={transcriptErrors[selected.id]}
+                loading={loadingAgentIds.includes(selected.id)}
+                onFetchTranscript={handleFetchTranscript}
+                onWatchAgent={handleWatchTranscript}
+                // Same gate the Vibe panel applies: a destructive control is not
+                // offered where the host would refuse it.
+                readOnly={transcript.readOnly || linkAccess === "view" || !canManageConversation}
+                onBack={() => leaveAgentsLayer({ open: true, selectedId: null })}
+                onKillWorker={killWorker}
+              />
+            );
+          })()}
+        </div>
+      )}
       {/* Activity Timeline Modal */}
       {showActivity && (
         <ActivityPanel
@@ -2647,7 +2981,7 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
           onEnter={(directive) => runVibeAction("enter", directive)}
           onExit={() => runVibeAction("exit")}
           onKillWorker={killWorker}
-          onOpenWorkers={() => { setShowVibe(false); setAgentNav({ open: true, selectedId: null }); }}
+          onOpenWorkers={() => { setShowVibe(false); openAgents(); }}
           onClose={() => setShowVibe(false)}
         />
       )}

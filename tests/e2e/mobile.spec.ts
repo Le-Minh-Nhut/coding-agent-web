@@ -8,7 +8,7 @@ import { harnessFixture, installMockCollabHost, login, openSeededConversation, r
  * block scrolls inside itself instead of widening the page.
  */
 
-const COMPOSER = /Send instructions to agent|Turn in flight/;
+const COMPOSER = /Send a follow-up…|Turn in flight — send a follow-up…|Read-only/;
 const MIN_TOUCH_TARGET = 40;
 
 /** Interactive elements a finger must be able to hit. */

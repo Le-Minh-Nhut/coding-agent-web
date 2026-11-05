@@ -12,7 +12,7 @@ import { harnessFixture, installMockCollabHost, openSeededConversation, requireA
  * keeps its current screen in React state, so a reload returns to the project list.
  */
 
-const COMPOSER = /Send instructions to agent|Turn in flight/;
+const COMPOSER = /Send a follow-up…|Turn in flight — send a follow-up…|Read-only/;
 
 test.beforeEach(async ({ request }: { request: APIRequestContext }) => {
   await requireAppServer(request);

@@ -5,6 +5,7 @@ import { act, cleanup, fireEvent, render, waitFor } from "@testing-library/react
 import { CollabSocket, type HostFrame } from "@caw/collab-protocol";
 import { api } from "../../apps/web/src/api.js";
 import { ConversationView } from "../../apps/web/src/components/ConversationView.js";
+import { recoveryText } from "./recovery-sheet.js";
 vi.mock("../../apps/web/src/api.js", () => ({ api: { getConversation: vi.fn(), getAttachInstructions: vi.fn(), getConversationLink: vi.fn(), getModels: vi.fn() } }));
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 it.each([false, true])("V17 a refused prompt remains recoverable (newer composer draft=%s)", async (hasNewDraft) => {
@@ -26,7 +27,15 @@ it.each([false, true])("V17 a refused prompt remains recoverable (newer composer
   expect(input.value).toBe("");
   if (hasNewDraft) fireEvent.change(input, { target: { value: "DRAFT_C_STILL_TYPING" } });
   await act(async () => { socket!.onFrame?.({ t: "error", message: "prompting is unavailable until the host finishes starting up" }, 0); });
-  console.log("AUDIT17 refused newer draft", JSON.stringify({ draft: input.value, recoverablePromptInDOM: view.container.textContent!.includes("PROMPT_B_MUST_BE_RECOVERABLE"), userRows: view.container.querySelectorAll(".message-card.user").length, latestParentDraft: changed.mock.calls.at(-1)?.[0] }));
+  // R54: the refused record lives behind the review summary row (a full-text
+  // banner displaced the transcript — P1-A). It is still retained and reachable.
+  const summary = view.container.querySelector(".recovery-summary");
+  const records = recoveryText(view.container);
+  console.log("AUDIT17 refused newer draft", JSON.stringify({ draft: input.value, recoverablePromptInDOM: view.container.textContent!.includes("PROMPT_B_MUST_BE_RECOVERABLE"), summaryPresent: summary !== null, records, userRows: view.container.querySelectorAll(".message-card.user").length, latestParentDraft: changed.mock.calls.at(-1)?.[0] }));
   expect(input.value).toBe(hasNewDraft ? "DRAFT_C_STILL_TYPING" : "PROMPT_B_MUST_BE_RECOVERABLE");
-  expect(view.container.textContent).toContain("PROMPT_B_MUST_BE_RECOVERABLE");
+  // Two legitimate ways the text survives: the untouched composer got it back
+  // directly, or the newer draft kept it in the retained record behind the row.
+  if (summary !== null) fireEvent.click(summary);
+  const recoverable = input.value.includes("PROMPT_B_MUST_BE_RECOVERABLE") || recoveryText(view.container).includes("PROMPT_B_MUST_BE_RECOVERABLE");
+  expect(recoverable).toBe(true);
 });

@@ -28,6 +28,7 @@ Tài liệu dành cho người mới dùng Coding Agent Web (CAW) trên Ubuntu c
 22. [Advisor — mô hình review thứ hai](#22-advisor--mô-hình-review-thứ-hai)
 23. [Vibe mode — director và worker](#23-vibe-mode--director-và-worker)
 24. [Giao diện mới: chat gọn, Agents Center, thu gọn prompt dài](#24-giao-diện-mới-chat-gọn-agents-center-thu-gọn-prompt-dài)
+25. [Vòng 54 — tinh chỉnh giao diện di động](#25-vòng-54--tinh-chỉnh-giao-diện-di-động)
 
 ## 1. Giới thiệu
 
@@ -383,6 +384,8 @@ Không. Chỉ session **do CAW quản lý** mới dùng được: writer phải 
 
 ## 14. Giao diện di động mới (thanh trên, menu, nút Latest)
 
+> Chương này mô tả **vòng 53**. Vòng 54 tinh chỉnh thêm (ba thẻ điều hướng, thu gọn prompt, hàng tóm tắt prompt cần xem lại, thông báo một dòng, bỏ khung viền tin nhắn trợ lý) — xem [chương 25](#25-vòng-54--tinh-chỉnh-giao-diện-di-động).
+
 **Thanh trên gọn.** Phần đầu của conversation chỉ còn: nút **←** quay lại, tên conversation, một dòng trạng thái nhỏ, và nút **⋯ More actions**.
 
 **Dòng trạng thái chỉ nói MỘT điều.** Trước đây dòng này in cả trạng thái conversation lẫn trạng thái kết nối, nên bạn thường thấy những dòng như `idle · idle` — cùng một sự thật in hai lần, chiếm chỗ mà một dòng transcript cần. Nay dòng đó chỉ hiện **trạng thái kết nối live** (`idle`, `running`, `connecting`, `reconnecting`, `disconnected`, `unknown`), vì đó là thứ bạn có thể hành động ngay (Retry, lấy link mới). Trạng thái mà CAW đang lưu cho conversation vẫn nằm trong **chi tiết session**.
@@ -395,23 +398,27 @@ Chấm tròn đổi màu: xanh khi kết nối đang tốt, vàng khi đang kế
 
 | Chip | Khi nào hiện | Chạm để làm gì |
 | --- | --- | --- |
-| `Adv ●` | Có ít nhất một ghi chú advisor trong lịch sử session | Mở panel Advisor |
-| `Adv ⛔` | Có ghi chú mức **blocker** | Mở panel Advisor (chip này đổi màu đỏ để bạn không bỏ sót) |
-| `Vibe ● n` | Chế độ Vibe đang **bật** (n = số worker) | Mở panel Vibe mode |
+| `Adv N` | N ≥ 1 ghi chú advisor **đã ghi lại** trong session này | Mở panel Advisor |
+| `Adv N ⚠` | Trong số đó có ít nhất một ghi chú mức **blocker** | Mở panel Advisor (chip này đổi màu để bạn không bỏ sót) |
+| `Vibe ● n` | Chế độ Vibe đang **bật** (đọc từ tiến trình); `n` = số worker **đã xác minh**, và chỉ được in khi n > 0 | Mở panel Vibe mode |
 
-Chip `Vibe` chỉ hiện khi chế độ đang bật — trạng thái "tắt" là mặc định nên không đáng chiếm chỗ. Cả hai panel luôn mở được từ menu **⋯** dù chip có hiện hay không (xem [chương 22](#22-advisor--mô-hình-review-thứ-hai) và [chương 23](#23-vibe-mode--director-và-worker)).
+Chip `Adv N` là **số ghi chú đã ghi lại**, không phải cảnh báo đang chạy: transport hiện tại không báo được advisor đang bật hay tắt, nên chip không khẳng định điều đó (xem [24.6](#246-advisor-ghi-chú-và-chip)). Chip `Vibe` chỉ hiện khi chế độ đang bật — trạng thái "tắt" là mặc định nên không đáng chiếm chỗ. Cả hai panel luôn mở được từ menu **⋯** dù chip có hiện hay không (xem [chương 22](#22-advisor--mô-hình-review-thứ-hai) và [chương 23](#23-vibe-mode--director-và-worker)).
 
 **Menu ⋯ (More actions).** Các thao tác phụ nằm trong menu này, mỗi mục một lần chạm:
 
 | Mục | Việc nó làm |
 | --- | --- |
 | Activity | Mở timeline sự kiện hoạt động |
+| Files | Cuộn transcript tới chỗ thay đổi tệp mới nhất đã xác minh (không có thì tới cuối transcript) |
 | Advisor | Mở panel Advisor (xem [chương 22](#22-advisor--mô-hình-review-thứ-hai)) |
 | Vibe mode | Mở panel Vibe mode (xem [chương 23](#23-vibe-mode--director-và-worker)) |
-| Agents (n) | Mở panel agent con (chỉ hiện khi có agent) |
-| Handoff context | Nén ngữ cảnh tại chỗ (xem [chương 10](#10-lệnh-handoff--nén-ngữ-cảnh-tại-chỗ)) |
-| Stop OMP session | Kết thúc tiến trình OMP do CAW quản lý |
+| Agents (n) | Mở **Agents Center** — màn hình riêng (xem [24.3](#243-agents-center--hai-cấp-điều-hướng)) |
+| Review prompts (n) | Mở sheet xem lại prompt chưa được host xác nhận (chỉ hiện khi n > 0; xem [25.8](#258-prompt-cần-xem-lại--hàng-tóm-tắt-và-sheet)) |
+| Handoff context | Nén ngữ cảnh tại chỗ (xem [chương 10](#10-lệnh-handoff--nén-ngữ-cảnh-tại-chỗ)); chỉ hiện với conversation CAW đã tải xong |
+| Stop OMP session | Kết thúc tiến trình OMP do CAW quản lý; chỉ hiện với session `managed` |
 | Model settings | Mở **sheet** cấu hình model (xem bên dưới) |
+
+Ba mục `Handoff context`, `Stop OMP session`, `Review prompts` **không phải lúc nào cũng có** trong menu: `Review prompts` chỉ hiện khi có ít nhất một prompt chưa xác nhận; `Stop OMP session` chỉ hiện với session do CAW quản lý (`managed`); `Handoff context` hiện khi thông tin conversation đã tải xong — với session **không** do CAW quản lý nó vẫn hiện nhưng ở trạng thái **vô hiệu hoá** kèm lý do. Lý do của cả `Handoff` lẫn `Stop` cũng được in thành một dòng ngay dưới thanh trên (ví dụ `Handoff unavailable: …`, `Stop session unavailable: …`) thay vì để bạn đoán.
 
 **Cấu hình model giờ nằm trong một sheet, không nằm trong transcript.** Trước đây phần model settings là một khối có thể mở/đóng **nằm ngay trong dòng chảy transcript**, nên dù đóng nó vẫn chiếm một hàng ngang vĩnh viễn phía trên cuộc trò chuyện. Nay nó là một **sheet** (bảng trượt lên từ đáy màn hình), mở từ menu **⋯ → Model settings** hoặc bằng lệnh `/model` trong ô chat. Mọi thứ bên trong giữ nguyên: model ưu tiên cho lần chạy sau, model tuỳ chỉnh, nút **Save model** / **Save & restart agent**, model hiệu lực đang được báo, và các thông báo lỗi. Bản nháp bạn đang gõ trong sheet cũng không bị mất khi bạn đóng/mở lại.
 
@@ -731,7 +738,7 @@ Nút **Kill** chỉ xuất hiện cho worker **đang thật sự chạy** — hu
 
 ## 24. Giao diện mới: chat gọn, Agents Center, thu gọn prompt dài
 
-Chương này mô tả **giao diện đã được thiết kế lại** (vòng 53): cuộc trò chuyện là trung tâm, còn chi tiết về agent, task dài và chẩn đoán nằm trong các màn hình riêng.
+Chương này mô tả **giao diện đã được thiết kế lại** (vòng 53): cuộc trò chuyện là trung tâm, còn chi tiết về agent, task dài và chẩn đoán nằm trong các màn hình riêng. Vòng 54 giữ nguyên cấu trúc này và chỉ tinh chỉnh cách trình bày — xem [chương 25](#25-vòng-54--tinh-chỉnh-giao-diện-di-động).
 
 ### 24.1 Chat chính chỉ giữ những gì cần đọc
 
@@ -859,3 +866,213 @@ Mỗi agent được định danh bằng **id do OMP cấp**, không phải vị
 | Trạng thái Vibe là **Unknown** | Không hỏi được bridge (phiên chưa có bridge, hoặc listener dừng). **Không** phải "đang tắt" |
 | Không thấy nút Kill cho một agent đang chạy | Agent đó không được chứng minh là worker Vibe — đúng theo thiết kế |
 | Mô tả task trực tiếp biến mất sau khi kết nối lại | Dữ liệu live-only; xem lại Agent Detail hoặc lịch sử phiên |
+
+## 25. Vòng 54 — tinh chỉnh giao diện di động
+
+Chương này mô tả **vòng 54**: thay đổi nằm ở **phía web** — cách trình bày giao diện và việc **giữ lại bản ghi** prompt chưa được xác nhận. Không đổi backend, không đổi contract, không đổi vòng đời session. Mục tiêu: mỗi màn hình chỉ còn thứ bạn **hành động được**; màu chỉ để nói **trạng thái**, không để trang trí; và không có con số nào được in ra mà chưa có bằng chứng.
+
+Bố cục màn hình conversation theo thứ tự từ trên xuống: **thanh trên** → **ba thẻ điều hướng** → **hàng tóm tắt prompt cần xem lại** (nếu có) → **banner trạng thái cần xử lý** (nếu có) → **một dòng thông báo** (nếu có) → **transcript** (phần co giãn) → **ô soạn tin** (dính đáy).
+
+Trong bố cục này, **chỉ vùng transcript cuộn**. Cột hội thoại là `overflow: hidden` với chiều cao đúng viewport, và `.messages-scroll` là con duy nhất co giãn; thanh trên, ba thẻ, hàng tóm tắt, banner và dòng thông báo là các hàng **cố định** phía trên nó — chúng **không** cuộn đi cùng transcript. Vì vậy mọi đích đến còn có mặt lại trong menu **⋯**, ở vị trí cuộn bất kỳ và ở màn hẹp nhất.
+
+### 25.1 Thanh trên hội thoại — một hàng duy nhất
+
+Phần đầu hội thoại chỉ còn **một hàng**, gồm: nút **←** quay lại, tiêu đề hội thoại, **một dòng trạng thái**, (tuỳ lúc) nút **Stop generating**, và nút **⋯** mở menu. Không còn nhiều hàng header chồng nhau.
+
+Dòng trạng thái **chỉ in trạng thái kết nối live**, kèm một chấm tròn:
+
+| Chữ hiện ra | Chấm | Nghĩa |
+| --- | --- | --- |
+| `running` | xanh | Kết nối tốt, agent đang chạy |
+| `idle` | xanh | Kết nối tốt, không có lượt nào đang chạy |
+| `connecting` | vàng | Đang thiết lập kết nối |
+| `reconnecting` | vàng | Đang nối lại sau khi mất |
+| `disconnected` | đỏ | Mất kết nối tới live room (không chứng minh process đã dừng) |
+| `unknown` | đỏ | Không xác minh được trạng thái agent |
+
+**Model chỉ hiện khi host thực sự báo.** Nếu host không báo model cho chính hội thoại này, dòng trạng thái **không** in gì thêm — CAW không lấy "model ưu tiên" đã lưu rồi in ra như thể đó là model đang chạy. Khi có, nó nối sau trạng thái dưới dạng ` · <model-id>` (ví dụ `running · vendor/model-id`), và mờ hơn chữ trạng thái.
+
+**Nút Stop generating** chỉ hiện khi agent đang chạy, và **nằm ngoài menu** — một lần chạm, không phải mở menu (xem [chương 14](#14-giao-diện-di-động-mới-thanh-trên-menu-nút-latest)).
+
+**Menu ⋯ (More actions).** Mở ra danh sách nút phẳng (không phải `role="menu"` — Tab là cách di chuyển duy nhất, đúng như một disclosure): **Activity**, **Files**, **Advisor**, **Vibe mode**, **Agents (n)**, **Review prompts (n)** (chỉ hiện khi n > 0), **Handoff context**, **Stop OMP session** (chỉ hiện với session `managed`), **Model settings**. `Handoff context` và `Stop OMP session` có thể ở trạng thái **vô hiệu hoá** kèm lý do khi thao tác không chạy được. Xem bảng đầy đủ ở [chương 14](#14-giao-diện-di-động-mới-thanh-trên-menu-nút-latest).
+
+### 25.2 Ba thẻ Agents / Files / Activity
+
+Ba thẻ là **thẻ điều hướng**, không phải bảng số liệu trang trí: mỗi thẻ một lần chạm là tới đúng nơi con số đến từ đó (`role="group"`, tên "Conversation summary"). Chiều cao **cố định 56px** (dưới 420px vẫn **3 cột**, chỉ thu padding và cỡ chữ — không xuống 2 cột). Mỗi thẻ là mục chạm ≥ 44px.
+
+| Thẻ | Dòng trên | Dòng dưới | Nguồn con số |
+| --- | --- | --- | --- |
+| Agents | `N Agents` | `M running` | Host báo có bao nhiêu agent, trong đó bao nhiêu đang `running` |
+| Files | `N Files`, hoặc `Files` khi chưa có gì chứng minh | `+a −d`, hoặc `View changes` khi chưa có diff đã xác minh | `summarizeFileChanges` trên **các dòng tool thật** |
+| Activity | `Activity` | `View events` | **Không có số** — xem bên dưới |
+
+Ba quy tắc trung thực — đây là lý do thẻ không in con số bừa:
+
+- **Files chưa có dữ liệu thì không in `0`.** Khi chưa chứng minh được thay đổi tệp nào, thẻ ghi `Files` + `View changes` — chạm vào sẽ cuộn tới cuối transcript. Một số `0` sẽ là lời khẳng định CAW chưa kiểm chứng.
+- **`+a −d` chỉ hiện khi cả hai tổng đều biết.** Nếu thiếu hoặc bị cắt, con số bị bỏ thay vì in một tổng cụt. Văn xuôi của trợ lý **không** được dùng làm nguồn: câu "tôi đã sửa ba tệp" không phải bản ghi thay đổi tệp.
+- **Thẻ Activity không đếm gì cả.** Số sự kiện server ghi lại chỉ có khi gọi trang Activity; gọi nó chỉ để trang trí một thẻ là một request bạn không yêu cầu.
+
+Cả ba đích đều **có mặt lại trong menu ⋯**: ba thẻ là hàng cố định ngay dưới thanh trên, nên trên màn rất hẹp hoặc khi bạn chỉ muốn mở nhanh một mục, menu vẫn là đường vào thứ hai luôn sẵn có.
+
+### 25.3 Prompt dài tự thu gọn
+
+Đã mô tả ở [24.2](#242-prompt-dài-tự-động-thu-gọn); vòng 54 giữ nguyên hành vi và ngưỡng: prompt cao hơn khoảng **4 dòng hiển thị** thì thu gọn, hiện nút **Show more**; mở ra thì nút đổi thành **Show less** và xuất hiện **Copy**.
+
+- **Copy sao chép nguyên văn toàn bộ prompt gốc**, không phải phần đang nhìn thấy. Nội dung đầy đủ **luôn** nằm trong DOM dù đang thu gọn.
+- Ngưỡng dựa trên **chiều cao đã render** (đo `scrollHeight` so với số dòng × line-height), không phải số ký tự.
+- Trạng thái mở/đóng thuộc về **từng tin nhắn** theo id: hai prompt giống hệt nhau mở/đóng độc lập.
+- Một chuỗi không có dấu cách vẫn bị ngắt trong cột (`overflow-wrap: anywhere`), không làm trang cuộn ngang.
+
+### 25.4 Tin nhắn trợ lý — bỏ khung viền
+
+Trước đây **mọi** câu trả lời của trợ lý đều nằm trong một thẻ có viền và padding, kèm nhãn vai trò viết hoa — nguồn nhiễu thị giác lớn nhất trong một transcript dài. Nay tin nhắn trợ lý **không còn khung, không còn padding thẻ**: chỉ có nội dung ở hết chiều rộng, ngăn với bong bóng người dùng bằng khoảng cách bố cục.
+
+- **Markdown, code block, bảng giữ nguyên** toàn bộ kiểu dáng; bảng rộng và code rộng vẫn cuộn trong khung của chúng.
+- Bong bóng người dùng vẫn là **bubble bo góc phải**, giới hạn 85% chiều rộng.
+- **Nhãn vai trò chỉ còn khi nó nói điều gì đó** mà hình dạng dòng không nói: dòng tool, dòng notice, tin có lỗi, và câu ghi chú `· sent while active; awaiting host`. Câu trả lời bình thường không còn nhãn `Assistant`.
+
+### 25.5 Hoạt động công cụ — icon trạng thái và số dòng thật
+
+Tool call liền kề **cùng loại** được gom thành một **dòng nhóm** gọn; mở nhóm ra là danh sách tool call, mở tiếp từng dòng là chi tiết.
+
+Ký hiệu trạng thái đứng đầu dòng (nhóm lấy trạng thái "xấu nhất" của thành viên):
+
+| Ký hiệu | Nghĩa |
+| --- | --- |
+| `✓` | Đã xong, không lỗi (`✓ completed`) |
+| `◌` | Đang chạy, **chưa** phải đã thành công (`◌ Running…`) |
+| `✕` | Có lỗi (`✕ failed — View output`) |
+
+Nhãn nhóm theo loại, ví dụ `✓ Read 8 files`, `✓ Search 3 patterns`, `✓ Run 2 commands`, `✓ Edit 3 operations`, `✓ Apply 1 patch operation`, `✓ Inspect diff`, `✓ Run 1 tool`. Nhóm sửa tệp hiện thêm **dòng mô tả** đếm từ diff thật, ví dụ `✓ Edit 3 operations · Changed 2 files +128 −34`; các con số này đã giải thích ở [chương 15](#15-nhóm-hoạt-động-tool-agent-activity) và chương 16.
+
+Bên trong một dòng tool có thay đổi tệp, danh sách tệp liệt kê **từng tệp một dòng** với **số dòng thật** `+x −y`, ví dụ:
+
+```
+M src/auth.ts                      +42  −12   ›
+A src/auth.test.ts                 +18  −0    ›
+✕ src/legacy.ts                    not applied
+? src/generated.ts                 counts unavailable
+```
+
+- Chữ cái đầu là trạng thái: `A` thêm mới, `M` sửa, `D` xoá, `R` đổi tên, `bin` nhị phân, `?` chưa xác định, `✕` **thao tác thất bại**.
+- Không có diff thì ghi `counts unavailable`; diff bị host cắt thì ghi `counts partial`; tệp lỗi thì ghi `not applied`. **Không bao giờ** in một con số chưa được chứng minh.
+- **Bấm vào từng tệp** để xem diff của chính tệp đó (một accordion, không phải một bức tường diff): diff thật được tô màu `+`/`−`, kèm nút **Copy patch**. Diff dài hơn 200 dòng thì hiện trước 200 dòng và nút `⋯ N more lines` — mở ra là xem đủ, không mất dòng nào.
+- **Dữ liệu không bị cắt:** dòng tool đã mở có nút **View tool details** để xem **nguyên văn** tham số (JSON) và output transport; khi không có kết quả có cấu trúc thì phần thô này được in thẳng ra, không giấu sau nút.
+- Nhóm chưa mở **không dựng** nội dung bên trong, nên transcript dài vẫn nhẹ. Lỗi của một dòng trong nhóm được in ngay dưới dòng nhóm **dù chưa mở**.
+
+### 25.6 Agents Center và Agent Detail
+
+Hai màn hình riêng, **chiếm toàn bộ viewport** (layer `fixed; inset: 0`, nền bằng nền app, có vùng cuộn riêng). Chỉ màn đang mở chiếm không gian: khi màn agent đang hiện, **ô soạn tin không nằm trên màn hình** — nó vẫn tồn tại phía dưới (đó là cách giữ nguyên bản nháp và kết nối) nhưng bị layer che kín và bị đánh `inert`, nên không bấm được.
+
+**Màn danh sách — Agents Center** (mở từ menu **⋯ → Agents (n)** hoặc thẻ **Agents**): tiêu đề **`Agents (n)`** với `n` là số agent **đang hiện sau bộ lọc**, bộ lọc **All / Running / Finished**, rồi danh sách dòng agent. Mỗi dòng: tên, phân loại, badge trạng thái, preview task (tối đa 2 dòng), tool hiện tại (`Tool: …` hoặc `No live tool reported`), và lần hoạt động cuối (`Last activity 3m ago`; không có mốc thời gian dùng được thì ghi `unknown`). Bộ lọc "Running" lấy **đúng chữ trạng thái của host**; mọi thứ còn lại (idle, parked, aborted) thuộc "Finished" vì đó là những gì host **không** gọi là running. Danh sách rỗng ghi `No agents reported by the host.`, hoặc `No agents match this filter.` khi bộ lọc lọc sạch.
+
+**Màn chi tiết — Agent Detail** (bấm vào một dòng): tên agent, dòng trạng thái (`badge` trạng thái · phân loại · `model: not reported`), mục **Task**, mục **Transcript**, mục **Actions**.
+
+- Task đầy đủ in ở đây và **chỉ ở đây** — màn danh sách giới hạn 2 dòng, nên nếu màn này cũng cắt thì bản đầy đủ duy nhất trên kênh live-only sẽ mất. Task dài hơn ~240 ký tự nằm sau **Show full task**; task ngắn in thẳng.
+- Không có task thì ghi thẳng **"The host reported no task for this agent."**; không có file transcript thì ghi **"No session file was reported for this agent, so there is no transcript to read."**; đọc lỗi thì hiện lỗi. Không im lặng để bạn tưởng agent "không nói gì".
+- Task đọc từ bus (live-only) có ghi chú: OMP không lưu nó, nên nó có thể **không sống qua một lần nối lại**.
+
+**Nút Back của trình duyệt hoạt động thật.** Mở danh sách đẩy một entry `{cawAgents:"list"}`, mở chi tiết đẩy `{cawAgents:"detail", id}`; một listener `popstate` duy nhất ánh xạ state trở lại màn hình. Nút **←** trong app áp state **ngay lập tức** rồi mới nghỉ entry của chính nó — nên một cú Back mà trình duyệt đã tiêu thụ không thể đá bạn ra khỏi app. **Hội thoại không bị unmount**: socket, transcript, bản nháp và vị trí cuộn đều sống; cột hội thoại được đánh `inert` (bỏ khỏi cả cây trợ năng lẫn thứ tự Tab) chứ không phải `aria-hidden`.
+
+**Hành động Kill — chỉ cho worker đã được xác minh.** Mục **Actions** chỉ hiện nút **Kill worker** khi host/journal **chứng minh** agent đó là worker Vibe (`canKillWorker`) **và** link không read-only. Với **main agent** và **subagent thường**, nút không xuất hiện; thay vào đó CAW in **lý do cụ thể**:
+
+| Trường hợp | Dòng chữ hiện ra thay cho nút |
+| --- | --- |
+| Agent chính của phiên | `This is the session's own agent, not a Vibe worker.` |
+| Subagent không có bản ghi Vibe | `No Vibe lifecycle record for this agent, so it is not treated as a worker.` |
+| Không phân loại được | `This agent's classification could not be established from the host data.` |
+| Link read-only | `This link is read-only, so the worker cannot be cancelled from here.` |
+
+Lý do: `canKillWorker` chỉ đúng cho agent được phân loại **tích cực** là worker Vibe từ bằng chứng journal — "không xác định được" thì là read-only, không bao giờ là giấy phép để kill. Main agent và subagent thường vì vậy **không bao giờ** có nút này.
+
+Nếu agent **rời roster** khi bạn đang mở chi tiết, màn hình ghi **"Agent unavailable"** kèm giải thích, thay vì im lặng quay về danh sách (trông như lỗi).
+
+### 25.7 Advisor và Vibe — chip và nơi điều khiển
+
+**Chip `Adv N` là số ghi chú đã ghi lại, không phải cảnh báo đang chạy.** Nhãn đọc cho screen reader nói đúng điều đó ("N recorded notes"), và dấu `⚠` chỉ đánh dấu rằng **trong số ghi chú đã ghi** có một cái mức blocker — không phải "advisor đang báo động lúc này". Transport hiện tại **không** cho biết advisor đang bật hay tắt, nên chip không khẳng định điều đó.
+
+**Chip `Vibe ● n` chỉ hiện khi chế độ đang bật** (đọc từ tiến trình OMP). Khi hiện, `n` là số **worker đã được xác minh**, không phải toàn bộ roster — nên một subagent lẻ không bị đếm thành "1 worker". Khi chế độ tắt (mặc định), không có chip.
+
+**Điều khiển không khả dụng được nêu rõ nơi thực hiện.** Panel Advisor **không** có công tắc bật/tắt: `advisor.enabled` và `/advisor on|off` là thao tác **bên trong tiến trình OMP qua terminal**, không có khung nào trên kênh Collab cho việc đó. Panel in thẳng nơi phải làm và lệnh cần gõ, thay vì dựng một công tắc giả (xem [chương 22](#22-advisor--mô-hình-review-thứ-hai)).
+
+### 25.8 Prompt cần xem lại — hàng tóm tắt và sheet
+
+Khi một prompt gửi đi mà host **chưa xác nhận**, CAW giữ nó lại thay vì coi như đã xong. Thay vì in cả khối văn bản (cách cũ chiếm hết viewport và đẩy transcript ra khỏi màn hình), CAW hiện **một hàng tóm tắt cao 44px**:
+
+```
+⚠  2 prompts need review                       Review ›
+```
+
+Chạm vào hàng đó (hoặc menu **⋯ → Review prompts (n)**) mở **sheet** neo đáy, `max-height: 85dvh`, có vùng cuộn riêng. Sheet gồm tiêu đề **`Prompts needing review (n)`**, một dòng ghi chú, rồi mỗi prompt một mục với **toàn bộ văn bản gốc nguyên văn** (không cắt thành preview) và ba nhãn trạng thái:
+
+| Nhãn | Nghĩa |
+| --- | --- |
+| `Unconfirmed` | Chưa biết host có nhận được không — **có thể prompt đã chạy rồi** |
+| `Echoed` | Một bản echo trong phiên live **chứng minh** host đã thấy văn bản này |
+| `Refused` | Host **từ chối** prompt này; không có gì được gửi đi |
+
+Mỗi mục có tối đa ba hành động:
+
+| Nút | Làm gì | Khi nào có |
+| --- | --- | --- |
+| **Recover to draft** | Chèn văn bản vào ô soạn tin để **bạn tự gửi** | Chỉ khi ô soạn tin đang ghi được (không read-only, không mất kết nối) |
+| **Copy** | Sao chép nguyên văn vào clipboard (đổi thành `Copied` / `Copy failed`) | Luôn luôn |
+| **Dismiss** | Xoá mục khỏi danh sách | Luôn luôn |
+
+**Không bao giờ tự gửi lại.** Không có đường nào để CAW tự phát lại một prompt chưa xác nhận; nó chỉ *đề nghị* chèn vào bản nháp, và việc gửi vẫn là một cú chạm của bạn.
+
+**Bản ghi được giữ ở đâu — nói thẳng:** danh sách này được lưu trong **`sessionStorage` của tab**, dưới khoá có phiên bản `caw.promptRecovery.v1`.
+
+- Nó **sống qua reload trong cùng tab** (kể cả khi iOS đuổi tiến trình trang và bạn mở lại).
+- Nó **mất khi bạn đóng tab** — `sessionStorage` chết theo tab, nên không để lại gì trên máy dùng chung.
+- **Link phòng không bao giờ được lưu** — nó là credential dạng bearer, nên không có bản sao nào trên đĩa.
+- Trần lưu giữ: **256 bản ghi** và **1 MiB văn bản**. Vượt trần thì prompt đó **không được giữ** và CAW báo rõ `Not retained: … Copy or dismiss a prompt in Review to make room — nothing was discarded.` — không âm thầm xoá bản ghi cũ.
+- Nếu trình duyệt chặn storage (iframe sandbox, storage bị tắt), bản ghi **chỉ sống trong bộ nhớ** — CAW không vỡ, chỉ mất tính bền qua reload.
+
+### 25.9 Thông báo thường — một dòng mờ
+
+Thông báo giao thức (ví dụ ai đó tham gia/rời phiên: *"… joined the collab session"*) **không còn** là một dải xanh rộng cho mỗi sự kiện. Cách hiển thị theo **mức của chính thông báo**, không đoán theo nội dung:
+
+| Mức | Hiển thị | Số dòng render |
+| --- | --- | --- |
+| `info` | Dòng mờ, yên tĩnh | 1 dòng |
+| `warning` | Hàng cảnh báo như trước | 2 dòng |
+| `error` | Hàng lỗi, `role="alert"` | 2 dòng |
+
+Tin nhắn **không bị cắt**: nếu dài hơn số dòng đó, một nút **Show more** hiện ra (mở ra thành **Show less**) để đọc đầy đủ. Bấm vào là thấy hết — chỉ phần *trình bày* bị giới hạn, văn bản vẫn còn nguyên trong DOM. Lỗi và cảnh báo vẫn hiện rõ, không bị thu về một dòng mờ.
+
+### 25.10 Bàn phím và ô soạn tin
+
+- Ô nhập **dính đáy** màn hình (`position: sticky; bottom: 0` bên trong cột hội thoại không cuộn), tôn trọng `safe-area-inset-bottom` (trên iPhone có notch/home indicator).
+- Cao **44px khi trống**, **tự cao lên** khi bạn gõ nhiều dòng, **tối đa 140px** rồi **tự cuộn bên trong** — không đẩy trang đi ngang.
+- Nút gửi là nút icon **↑**, tên trợ năng là **`Send`** (không dùng chữ "Send" để không chiếm chiều rộng của ô nhập trên điện thoại).
+- **Enter chỉ gửi trên bàn phím thường (con trỏ chính xác).** Trên thiết bị có con trỏ thô (điện thoại), Enter **xuống dòng** — vì bàn phím ảo làm Enter-gửi thành tai nạn thường xuyên. Trong lúc gõ IME (bộ gõ tiếng Việt/bộ gõ khác), Enter không bị coi là gửi.
+- Ô nhập bị **vô hiệu hoá** khi: link read-only, đang `disconnected`, `unknown`, `connecting`, hoặc `reconnecting`. Bản nháp của bạn **không mất** khi mở/đóng tool, mở diff, hay đổi màn hình.
+- Nút **↓ Latest** chỉ hiện khi bạn đã cuộn lên khỏi cuối transcript; tin mới đến **không** kéo màn hình khi bạn đang đọc tin cũ.
+
+### 25.11 Điều hướng
+
+- **Conversation → Agents → Agent Detail → (Detail) → (Center) → Conversation.** Cả ba cấp nằm trong **một** viewport; màn đang mở chiếm trọn nó.
+- **Nút Back của trình duyệt** đi đúng một cấp mỗi lần, khớp với nút **←** trong app.
+- Khi quay lại, **bản nháp** và **vị trí cuộn** của hội thoại **được giữ nguyên**, kết nối WebSocket **không** dựng lại, và listener `popstate` **không** chồng lên nhau.
+
+### 25.12 Xử lý sự cố (vòng 54)
+
+| Hiện tượng | Nghĩa / cách xử lý |
+| --- | --- |
+| Dòng trạng thái ghi `disconnected` | Mất kết nối tới live room. Process OMP **có thể vẫn chạy**. Bấm **Retry** trong banner để nối lại; kiểm tra agent riêng trước khi gửi lại prompt. |
+| Có prompt trong "Review prompts" | Host chưa xác nhận prompt đó. Đọc nhãn (`Unconfirmed`/`Echoed`/`Refused`), rồi **Copy** để giữ văn bản hoặc **Recover to draft** để tự gửi lại. CAW **sẽ không** tự gửi. |
+| Prompt biến mất khỏi Review sau khi tôi đóng tab | `sessionStorage` chết theo tab — bản ghi chỉ sống trong cùng tab. Đây là hành vi có chủ đích, không phải lỗi. |
+| Agent đang xem biến mất khỏi danh sách | Màn hình ghi **"Agent unavailable"**. Bấm **←** để về danh sách mới nhất. |
+| Không thấy nút **Kill worker** cho một agent đang chạy | Agent đó **không** được journal chứng minh là worker Vibe (main agent / subagent thường), hoặc link đang read-only. Đúng theo thiết kế. |
+| Transcript không cuộn được | Cuộn **trong vùng transcript**, không phải cuộn cả trang — trang hội thoại được ghim cao đúng viewport (`100dvh`). Nếu một thẻ/notice che mất, đóng sheet (phím **Esc** hoặc nút **✕**) rồi cuộn lại. |
+| Thẻ **Files** trong dashboard chỉ ghi `View changes` | Chưa có **diff đã xác minh** (workspace không phải git, host không gửi diff, hoặc tệp quá lớn). CAW không in `0` cho thứ nó chưa chứng minh. Chạm thẻ để nhảy tới cuối transcript và xem dòng tool thật. |
+| Thẻ Activity không có số | Cố ý — con số chỉ có sau khi gọi trang Activity; xem sự kiện bằng cách chạm thẻ hoặc menu **⋯ → Activity**. |
+
+### 25.13 Giới hạn đã biết (vòng 54)
+
+- **Chưa xác minh trên iPhone Safari thật** với bàn phím ảo: hành vi `safe-area`, việc bàn phím ảo che ô nhập, và việc iOS đuổi tiến trình tab đều được xử lý trong mã nhưng **chưa** được kiểm trên máy thật. Playwright headless không mô phỏng được bàn phím ảo phần mềm — các ca đo đều được đánh dấu `keyboard-unverified`.
+- **Xác minh pixel do người dùng thực hiện.** Vòng 54 không tự nhận đạt tiêu chí pixel; phần đo đạc và ảnh chụp là bằng chứng **bên ngoài kho mã**.
+- **Ảnh chụp màn hình không nằm trong git như bằng chứng của vòng này.** Bộ ảnh kiểm thử được sinh vào thư mục scratch (`$TMPDIR/caw-screens` hoặc `/var/tmp/…`), không cam kết là ảnh tracked; xem [chính sách ảnh chụp](operations/screenshot-policy.md). Ảnh baseline cũ vẫn nằm ở `docs/assets/screens/`, nhưng là ảnh **lịch sử**, không phải ảnh của vòng 54.
+- Model của agent trong **Agent Detail** hiện `model: not reported` — kênh snapshot không mang trường này; CAW không bịa.
+

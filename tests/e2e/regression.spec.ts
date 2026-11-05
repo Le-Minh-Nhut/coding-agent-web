@@ -16,7 +16,7 @@ import {
   welcomeFrame,
 } from "./fixture.js";
 
-const COMPOSER = /Send instructions to agent|Turn in flight/;
+const COMPOSER = /Send a follow-up…|Turn in flight — send a follow-up…|Read-only/;
 const RUN = Date.now().toString(36).slice(-6);
 
 test.beforeEach(async ({ request }) => {
@@ -250,7 +250,9 @@ test("draft survives navigation and clears after successful send", async ({ page
   const composer = page.getByRole("textbox", { name: COMPOSER });
   await composer.fill("draft survives navigation");
   const connectionsBefore = host.connections;
-  await page.getByRole("button", { name: "←" }).click();
+  // R54: the header back control is an icon button whose accessible name is the
+  // word, not the glyph, so the query names the control rather than its drawing.
+  await page.getByRole("button", { name: "Back", exact: true }).click();
   await page.getByRole("heading", { name: "Seeded conversation", exact: true }).click();
   const returnedComposer = page.getByRole("textbox", { name: COMPOSER });
   await expect(returnedComposer).toHaveValue("draft survives navigation");

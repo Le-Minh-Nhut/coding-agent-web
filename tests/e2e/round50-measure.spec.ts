@@ -283,7 +283,7 @@ test("a group expands, a diff opens, and the draft survives the round trip", asy
   for (let index = 0; index < 3; index++) await host.send(readEntry(`g-read-${index}`, 2 + index, `src/read-${index}.ts`));
   await host.send(editEntry("g-edit", 9));
 
-  const composer = page.getByRole("textbox", { name: /Send instructions to agent/ });
+  const composer = page.getByRole("textbox", { name: /Send a follow-up…|Turn in flight — send a follow-up…|Read-only/ });
   await composer.fill("unsent draft that must survive");
 
   const groups = page.locator(".activity-group");

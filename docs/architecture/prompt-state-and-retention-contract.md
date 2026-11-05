@@ -14,4 +14,45 @@ A prompt journaled before the host cuts its snapshot dump may appear only in tha
 
 ## Retention lifetime
 
-In-memory retention survives in-page reconnect, Rejoin, ended state, and client replacement. The recovery store outlives one client; client-generation fencing rejects mutations from superseded clients. It does not survive full page reload or iOS process eviction. Tab-scoped persistence is a separate later deliverable; no bearer link is persisted.
+In-memory retention survives in-page reconnect, Rejoin, ended state, and client replacement. The recovery store outlives one client; client-generation fencing rejects mutations from superseded clients. It does not survive iOS process eviction of the tab.
+
+**Round 54: tab-scoped persistence is implemented for the web client.** Retained
+recovery records are mirrored into `sessionStorage` under the namespaced key
+`caw.promptRecovery.v1`, keyed by conversation id, by `apps/web/src/prompt-recovery.ts`
+(hydrated and written by `App.tsx`, the owner of `refusedRecoveries`). What that
+buys and what it does not:
+
+- **Persisted: only the recovery records** — the text, its status flags, and the
+  conversation id. A reload (or a tab restore) no longer destroys the only copy of
+  a prompt the host never acknowledged.
+- **Never persisted: the Collab link, the transcript, drafts.** The link is a
+  bearer credential and stays memory-only, exactly as the security model requires;
+  see `docs/architecture/security-model.md` §"Do not store a room link in
+  localStorage, IndexedDB, or a service-worker cache".
+- **sessionStorage, not localStorage**, so the records die with the tab and leave
+  nothing behind on a shared device.
+- **Threat delta:** the records are same-origin script-readable while the tab lives.
+  A prompt the user typed is already readable by any script the page runs, and XSS
+  on this origin already implies owner compromise (it can mint a fresh control link
+  and act as the owner). The added exposure is therefore a *durable* copy of text
+  the user themselves typed within that same compromised page — not a new class of
+  secret. The bearer link's rules are unchanged.
+- **Capacity:** the same ceilings the guest client enforces on retention — 256
+  records / 1 MiB of retained UTF-8 text — applied to *retention*. A record that
+  does not fit is refused with a visible, actionable message (in the composer's own
+  status line) and the send is never blocked; nothing is evicted silently, because
+  eviction would be the data loss this list exists to prevent.
+- **Residual, accepted at exactly the ceiling (round 54 B1).** When the ceiling is
+  already reached and a retention is refused *voluntarily* — because the refused
+  prompt is still sitting in the composer, which is the only condition under which a
+  refusal is allowed — that text exists only in the **non-persisted** draft: the
+  ceiling plus Back plus a reload still loses it. This is a deliberate trade, not an
+  oversight. The alternative is evicting a record the user has neither dismissed nor
+  recovered, which converts a recoverable prompt into a destroyed one. A refusal is
+  permitted only where the text remains on screen, and Dismiss/Recover make room.
+- **Removal:** only explicit Dismiss, or an explicit Recover that leaves the text
+  in the composer. No pruning, no expiry, no slicing.
+- When the retained set becomes empty the key is removed outright, so nothing looks
+  like retained state to the next boot. It does not survive the browser evicting the
+  tab itself (iOS process eviction), which no tab-scoped store can outlive.
+
