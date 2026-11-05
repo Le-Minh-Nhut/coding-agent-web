@@ -40,7 +40,7 @@ async function setup(total:number){
  return {store,conversation,addEvents,teardown};
 }
 const descending=(from:number,to:number)=>Array.from({length:from-to+1},(_,i)=>from-i);
-const renderedSeqs=(container:HTMLElement)=>[...container.querySelectorAll('.activity-item')].map((el)=>{const match=/^#(\d+)/.exec(el.querySelector('span[style*="0.75rem"]')?.textContent??'') ?? /#(\d+)/.exec(el.textContent??'');return Number(match?.[1]);});
+const renderedSeqs=(container:HTMLElement)=>[...container.querySelectorAll('.activity-item')].map((el)=>{const match=/^#(\d+)/.exec(el.querySelector('.activity-seq')?.textContent??'') ?? /#(\d+)/.exec(el.textContent??'');return Number(match?.[1]);});
 const clickOlder=async()=>{const older=screen.queryByRole('button',{name:'Load older activity'});if(older)await act(async()=>fireEvent.click(older));return Boolean(older);};
 
 it.each([0,99,100,101,250])('V23 activity opens on the newest events using real API/store (%s events)',async total=>{

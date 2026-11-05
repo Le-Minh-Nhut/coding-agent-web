@@ -220,7 +220,7 @@ describe("ACTIVITY-01 loading belongs to the newest activity read", () => {
 
     await act(async () => { second.resolve(ok({ events: [EVENT], nextBefore: null }) as never); });
     expect(screen.queryByText("Loading activity…")).toBeNull();
-    expect(screen.getByText("Agent Launched")).toBeTruthy();
+    expect(screen.getByText("Agent started")).toBeTruthy();
   });
 
   it("does not leave the spinner stuck when the panel is handed an empty event list while a read is open", async () => {
@@ -240,7 +240,7 @@ describe("ACTIVITY-01 loading belongs to the newest activity read", () => {
 
     // The abandoned read lands and changes nothing.
     await act(async () => { pending.resolve(ok({ events: [EVENT], nextBefore: null }) as never); });
-    expect(screen.queryByText("Agent Launched")).toBeNull();
+    expect(screen.queryByText("Agent started")).toBeNull();
   });
 
   it("clears the spinner when the newest read is the one that settles", async () => {
@@ -253,7 +253,7 @@ describe("ACTIVITY-01 loading belongs to the newest activity read", () => {
 
     await act(async () => { second.resolve(ok({ events: [EVENT], nextBefore: null }) as never); });
     expect(screen.queryByText("Loading activity…")).toBeNull();
-    expect(screen.getByText("Agent Launched")).toBeTruthy();
+    expect(screen.getByText("Agent started")).toBeTruthy();
 
     // The superseded read lands afterwards and repaints nothing.
     await act(async () => { first.resolve(ok({ events: [{ ...EVENT, seq: 99 }], nextBefore: null }) as never); });

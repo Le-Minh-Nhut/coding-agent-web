@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from "react";
 import type { ConversationEvent } from "@caw/contracts";
 import { api } from "../api.js";
 import { ModalOverlay } from "./ModalOverlay.js";
+import { describeActivityEvent } from "./activity-event.js";
 
 export interface ActivityPanelProps {
   conversationId?: string;
@@ -10,33 +11,39 @@ export interface ActivityPanelProps {
   onClose?: () => void;
 }
 
-export function humanizeEventType(type: string): string {
-  switch (type) {
-    case "launch.refused":
-      return "Launch Refused";
-    case "agent.launched":
-      return "Agent Launched";
-    case "agent.hosted":
-      return "Agent Collab Hosted";
-    case "agent.exited":
-      return "Agent Exited";
-    case "agent.stop_requested":
-      return "Stop Requested";
-    case "agent.stopped":
-      return "Agent Stopped";
-    case "agent.stop_timeout":
-      return "Stop Timed Out";
-    case "agent.publish_timeout":
-      return "Publish Timed Out";
-    default:
-      return (
-        type
-          .split(/[._-]/)
-          .filter((w) => w.length > 0)
-          .map((w) => w[0]!.toUpperCase() + w.slice(1))
-          .join(" ") || type
-      );
-  }
+/**
+ * Kept exported from this module's path because tests import it here; the
+ * implementation lives with the rest of the event vocabulary.
+ */
+export { humanizeEventType } from "./activity-event.js";
+
+/**
+ * The raw payload, mounted only while its disclosure is open.
+ *
+ * React mounts a `<details>`'s children whether or not it is open — only the
+ * browser hides them — so rendering `JSON.stringify(payload)` inline meant every
+ * row in the list held its full JSON in the DOM while showing none of it. On a
+ * long timeline that is megabytes of text nodes and a second serialization per
+ * render, for content the reader has not asked to see. The `open` flag is local
+ * per row, and `onToggle` keeps it true only while the element really is open
+ * (including a browser-forced close), so a collapsed row costs one `<summary>`.
+ */
+function ActivityRawEvent({ seq, payload, hasPayload }: { seq: number; payload: unknown; hasPayload: boolean }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <details className="activity-raw" open={open} onToggle={(event) => setOpen(event.currentTarget.open)}>
+      <summary>Raw event <span className="activity-seq">#{seq}</span></summary>
+      {open && (hasPayload ? (
+        typeof payload === "object" ? (
+          <pre className="activity-raw-body"><code>{JSON.stringify(payload, null, 2)}</code></pre>
+        ) : (
+          <p className="activity-raw-body">{String(payload)}</p>
+        )
+      ) : (
+        <p className="activity-raw-body">No payload recorded.</p>
+      ))}
+    </details>
+  );
 }
 
 export function ActivityPanel({
@@ -190,51 +197,32 @@ export function ActivityPanel({
             </div>
           )}
 
-          {sortedEvents.map((event) => (
-            <div
-              key={event.seq}
-              className="activity-item"
-              style={{
-                padding: "10px 0",
-                borderBottom: "1px solid var(--border)",
-                display: "flex",
-                flexDirection: "column",
-                gap: "4px",
-              }}
-            >
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
-                <span style={{ fontWeight: 600, fontSize: "0.95rem" }}>
-                  {humanizeEventType(event.type)}
-                </span>
-                <span style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>
-                  #{event.seq}
-                </span>
-              </div>
-              <div style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>
-                {new Date(event.ts).toLocaleString()}
-              </div>
-              {event.payload !== null && event.payload !== undefined && (typeof event.payload !== "object" || Object.keys(event.payload as object).length > 0) && (
-                <div style={{ marginTop: "4px" }}>
-                  {typeof event.payload === "object" ? (
-                    <pre
-                      style={{
-                        fontSize: "0.75rem",
-                        padding: "6px 8px",
-                        backgroundColor: "var(--surface-alt)",
-                        borderRadius: "4px",
-                        overflowX: "auto",
-                        margin: 0,
-                      }}
-                    >
-                      <code>{JSON.stringify(event.payload, null, 2)}</code>
-                    </pre>
-                  ) : (
-                    <span style={{ fontSize: "0.8rem" }}>{String(event.payload)}</span>
-                  )}
+          {sortedEvents.map((event, index) => {
+            const described = describeActivityEvent(event);
+            // A date heading only when the day actually changes, derived from `ts`
+            // and never invented: the rows are already in seq order, and the label
+            // is the row's own timestamp day.
+            const day = new Date(event.ts).toDateString();
+            const previousDay = index === 0 ? null : new Date(sortedEvents[index - 1]!.ts).toDateString();
+            const hasPayload = event.payload !== null && event.payload !== undefined
+              && (typeof event.payload !== "object" || Object.keys(event.payload as object).length > 0);
+            return (
+              <div key={event.seq}>
+                {day !== previousDay && <h3 className="activity-date-heading">{day === new Date().toDateString() ? "Today" : new Date(event.ts).toLocaleDateString()}</h3>}
+                <div className={`activity-item activity-item--${described.tone}${described.debugOnly ? " activity-item--internal" : ""}`}>
+                  <div className="activity-head">
+                    <span className="activity-label">{described.label}</span>
+                    <time className="activity-time" dateTime={event.ts}>{new Date(event.ts).toLocaleString()}</time>
+                  </div>
+                  {described.detail !== null && <p className="activity-detail">{described.detail}</p>}
+                  {/* The raw record stays reachable, but behind a disclosure: the
+                      row's job is the meaning, and the payload is evidence for the
+                      rare case the meaning is not enough. */}
+                  <ActivityRawEvent seq={event.seq} payload={event.payload} hasPayload={hasPayload} />
                 </div>
-              )}
-            </div>
-          ))}
+              </div>
+            );
+          })}
 
           {nextBefore !== null && (
             <div style={{ padding: "12px 0", textAlign: "center" }}>

@@ -176,7 +176,7 @@ describe("tail and page reads", () => {
       if (order === "tail-first") { resolveTail(); resolvePage(); }
       else { resolvePage(); resolveTail(); }
     });
-    const seqs = [...document.querySelectorAll(".activity-item")].map((row) => Number(row.querySelector("span[style*='0.75rem']")?.textContent?.replace(/\D/g, "")));
+    const seqs = [...document.querySelectorAll(".activity-item")].map((row) => Number(row.querySelector(".activity-seq")?.textContent?.replace(/\D/g, "")));
     expect(seqs).toEqual([11, 10, 9, 8, 7, 6, 5, 4]);
     expect(new Set(seqs).size).toBe(seqs.length);
   });

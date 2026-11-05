@@ -658,6 +658,10 @@ test.describe("Screenshot inventory & geometry verification", () => {
           const chatScrollBefore = await page.evaluate(
             () => window.scrollY || document.documentElement.scrollTop || (document.querySelector(".messages-scroll") as HTMLElement).scrollTop
           );
+          // R55: the overflow sheet now dismisses on an outside tap, and the
+          // interactions above (the Latest tap) closed it. Re-open it through the
+          // same real user path before reaching for the Agents entry.
+          await moreActions.click();
           await agentsBtn.click();
           // Round 53: the Agents Center is a full-screen view, not a modal. The
           // claim under test is unchanged — opening and leaving the agents UI must

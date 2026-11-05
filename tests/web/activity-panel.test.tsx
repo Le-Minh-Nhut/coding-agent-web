@@ -22,10 +22,13 @@ describe("ActivityPanel UI", () => {
     expect(humanizeEventType("agent.launched")).toBe("Agent Launched");
     expect(humanizeEventType("agent.hosted")).toBe("Agent Collab Hosted");
     expect(humanizeEventType("agent.exited")).toBe("Agent Exited");
-    expect(humanizeEventType("agent.stop_requested")).toBe("Stop Requested");
     expect(humanizeEventType("agent.stopped")).toBe("Agent Stopped");
     expect(humanizeEventType("agent.stop_timeout")).toBe("Stop Timed Out");
     expect(humanizeEventType("agent.publish_timeout")).toBe("Publish Timed Out");
+    // The dead branch this used to pin is gone: `agent.stop_requested` had no
+    // producer anywhere in the codebase, so it is an unknown kind now and falls
+    // through to the splitter like any other.
+    expect(humanizeEventType("agent.stop_requested")).toBe("Agent Stop Requested");
 
     // Unknown event types must not crash and format nicely
     expect(humanizeEventType("custom.step_executed")).toBe("Custom Step Executed");
@@ -59,13 +62,28 @@ describe("ActivityPanel UI", () => {
     const items = container.querySelectorAll(".activity-item");
     expect(items.length).toBe(2);
 
-    // Newest first: seq 2 before seq 1
-    expect(items[0]?.textContent).toContain("Agent Collab Hosted");
+    // Newest first: seq 2 before seq 1. The label is the operator meaning
+    // (`describeActivityEvent`), and the seq lives on the row's own `Raw event`
+    // summary — the payload body mounts only once that disclosure is opened.
+    expect(items[0]?.textContent).toContain("Agent connected");
     expect(items[0]?.textContent).toContain("#2");
-    expect(items[0]?.textContent).toContain("inst-1");
-
-    expect(items[1]?.textContent).toContain("Agent Launched");
+    expect(items[1]?.textContent).toContain("Agent started");
     expect(items[1]?.textContent).toContain("#1");
+
+    // A collapsed row holds no payload text at all: that is the point of the
+    // disclosure (React mounts `details` children even while closed).
+    expect(container.textContent).not.toContain("inst-1");
+
+    // Opened — jsdom does not toggle `details` on a summary click, so the real
+    // `toggle` event a browser fires when `open` changes is dispatched.
+    const openRow = (row: Element) => {
+      const details = row.querySelector("details") as HTMLDetailsElement;
+      details.open = true;
+      fireEvent(details, new Event("toggle"));
+    };
+    openRow(items[0]!);
+    expect(items[0]?.textContent).toContain("inst-1");
+    openRow(items[1]!);
     expect(items[1]?.textContent).toContain("$1");
   });
 
@@ -89,6 +107,10 @@ describe("ActivityPanel UI", () => {
       const { container } = render(<ActivityPanel events={events} />);
       expect(container.textContent).toContain("Future Experimental Probe");
       expect(container.textContent).toContain("Weird Event Name");
+      // A primitive payload is revealed the same way, by opening its disclosure.
+      const details = container.querySelector(".activity-raw") as HTMLDetailsElement;
+      details.open = true;
+      fireEvent(details, new Event("toggle"));
       expect(container.textContent).toContain("primitive-string-payload");
     }).not.toThrow();
   });

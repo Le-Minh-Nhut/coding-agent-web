@@ -1,7 +1,7 @@
-import React, { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { api, type SavedConversationHistory } from "../api.js";
 import { chainMutation, MUTATION_CANCELLED } from "../mutation-order.js";
-import { MarkdownCodeBlock, parseInline, renderMarkdown } from "../sanitize.js";
+import { parseInline, renderMarkdown } from "../sanitize.js";
 import { ActivityPanel } from "./ActivityPanel.js";
 import { AdvisorPanel } from "./AdvisorPanel.js";
 import { ModalOverlay } from "./ModalOverlay.js";
@@ -10,7 +10,7 @@ import { NoticeRow } from "./NoticeRow.js";
 import { DashboardCards } from "./DashboardCards.js";
 import { AgentsCenter } from "./AgentsCenter.js";
 import { AgentDetail } from "./AgentDetail.js";
-import { CollapsibleMessage } from "./CollapsibleMessage.js";
+import { FilesCenter } from "./FilesCenter.js";
 import { VibePanel, vibeVerdictLabel } from "./VibePanel.js";
 import { advisorNotesOf, summarizeAdvisorNotes } from "../advisor.js";
 import { agentCounts, agentViews, vibeWorkerIds } from "../agent-model.js";
@@ -22,10 +22,10 @@ import {
   type HostFrame,
   type SessionEntry,
 } from "@caw/collab-protocol";
-import { clearTranscriptRequests, createTranscriptState, forgetTranscriptRequest, reduceHostFrame, setConnectionStatus, textFromContent, trackTranscriptRequest, transcriptMessagesFromEntries, type TranscriptBlock, type TranscriptMessage, type TranscriptReply, type TranscriptState, type ToolResultLike } from "../transcript.js";
+import { clearTranscriptRequests, createTranscriptState, forgetTranscriptRequest, reduceHostFrame, setConnectionStatus, textFromContent, trackTranscriptRequest, transcriptMessagesFromEntries, type TranscriptMessage, type TranscriptReply, type TranscriptState } from "../transcript.js";
 import { findSlashCommand, slashCommands, type SlashCommand } from "../commands.js";
-import { ActivityGroupRow } from "./ToolActivity.js";
-import { groupActivity, pairToolArguments, summarizeFileChanges } from "../tool-activity.js";
+import { summarizeFileChanges, pairToolArguments } from "../tool-activity.js";
+import { collectChangedFiles, summarizeChangedFiles } from "../files.js";
 import { canRetain, type RecoveryRecord } from "../prompt-recovery.js";
 import type { AttachInstructions, Conversation, NativeModeResult, VibeStateResponse } from "@caw/contracts";
 
@@ -46,26 +46,15 @@ interface ConversationViewProps {
   refusedRecoveries?: RefusedRecovery[];
   onRefusedRecoveriesChange?: (next: RefusedRecovery[]) => void;
 }
-interface DisplayMessage {
-  id: string;
-  role: "user" | "assistant" | "tool" | "notice";
-  text: string;
-  blocks?: TranscriptBlock[];
-  toolName?: string;
-  toolCallId?: string;
-  toolResult?: ToolResultLike;
-  /** Wire arguments captured from the live start event; the guest body renders
-      these directly, so dropping them here silently empties every live tool row. */
-  toolArgs?: Record<string, unknown>;
-  isError?: boolean;
-  isRunning?: boolean;
-  awaitingHost?: boolean;
-  hostEchoCount?: number;
-  /** Custom-message type, so an advisor card can render structurally. */
-  customType?: string;
-  /** That entry's `details` payload, verbatim. */
-  customDetails?: unknown;
-}
+/**
+ * The transcript row, its advisor variant and the grouping list now live in
+ * `MessageRow.tsx` so level-2/level-3 screens can render rows without pulling in
+ * this whole view. Re-exported here because `HistoryView` and three test files
+ * import them from this path, and that import must keep working.
+ */
+export { MessageRow, TranscriptList } from "./MessageRow.js";
+export type { DisplayMessage } from "./MessageRow.js";
+import { MessageRow, TranscriptList, type DisplayMessage } from "./MessageRow.js";
 interface PendingPrompt {
   text: string;
   submitted: string;
@@ -141,157 +130,6 @@ export function shouldSubmitOnEnter(
   coarsePointer = typeof window !== "undefined" && window.matchMedia?.("(pointer: coarse)").matches === true,
 ): boolean {
   return !coarsePointer && event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing && !composing;
-}
-
-/**
- * An advisor card, in the compact form the phone needs.
- *
- * OMP delivers advice as a batched `custom_message` (`customType: "advisor"`)
- * whose details carry one or more notes with a severity each. The row's shape is
- * a single line per note — `⚠ Advisor · Concern ›` — with the note text revealed
- * on tap, because a wall of advisor prose between two turns is exactly the kind
- * of chrome that pushes the conversation off a 390px screen.
- *
- * Severity is never levelled: a `blocker` keeps the error colour and its own
- * prominent line so it cannot be mistaken for a nit, and it is never hidden
- * behind the transcript's own collapsing (the row is a normal transcript row, so
- * replay and compaction keep it).
- */
-function AdvisorMessageCard({ message }: { message: DisplayMessage }) {
-  const [open, setOpen] = useState(false);
-  const notes = advisorNotesOf({ customType: message.customType, details: message.customDetails });
-  if (notes.length === 0) {
-    return <div className="message-content"><p>{message.text}</p></div>;
-  }
-  const worst = notes.some((note) => note.severity === "blocker")
-    ? "blocker"
-    : notes.some((note) => note.severity === "concern") ? "concern" : "nit";
-  return (
-    <div className={`advisor-card advisor-card--${worst}`}>
-      <button
-        type="button"
-        className="advisor-card-head"
-        aria-expanded={open}
-        onClick={() => setOpen((value) => !value)}
-      >
-        <span className="advisor-card-glyph" aria-hidden="true">{worst === "blocker" ? "⛔" : "⚠"}</span>
-        <span className="advisor-card-label">
-          Advisor{notes.length === 1 ? "" : ` · ${notes.length} notes`}
-          {worst !== "nit" ? ` · ${worst === "blocker" ? "Blocker" : "Concern"}` : ""}
-        </span>
-        <span className="advisor-card-preview">{notes[0]!.note.split("\n", 1)[0]}</span>
-        <span className="advisor-card-chevron" aria-hidden="true">{open ? "▾" : "›"}</span>
-      </button>
-      {worst === "blocker" && !open && (
-        // A blocker is the one severity that must survive a collapsed row: the
-        // user has to be able to read what it says without tapping anything.
-        <p className="advisor-card-blocker-text">{notes.find((note) => note.severity === "blocker")!.note}</p>
-      )}
-      {open && (
-        <ul className="advisor-card-notes">
-          {notes.map((note, index) => (
-            <li key={index}>
-              <span className={`badge ${note.severity === "blocker" ? "error" : note.severity === "concern" ? "warning" : "idle"}`}>{note.severity}</span>
-              {note.advisor !== null && <span className="advisor-note-owner">{note.advisor}</span>}
-              <p>{note.note}</p>
-            </li>
-          ))}
-        </ul>
-      )}
-    </div>
-  );
-}
-
-export const MessageRow = memo(function MessageRow({ message }: { message: DisplayMessage | TranscriptMessage }) {
-  const [expanded, setExpanded] = useState(false);
-  const blocks = "blocks" in message ? message.blocks : undefined;
-  const copy = async (text: string) => { try { await navigator.clipboard.writeText(text); } catch { /* Clipboard permission is optional; content remains selectable. */ } };
-  /**
-   * The role label is chrome, and it is only worth its line when it carries
-   * something the row's shape does not already say.
-   *
-   * `user`/`assistant` are told apart by alignment and bubble, so a bare role
-   * label there is noise — but a tool row's name, an error, and the
-   * "sent while active; awaiting host" caveat are facts nothing else reports, and
-   * those keep their line verbatim.
-   */
-  const caveat = "awaitingHost" in message && message.awaitingHost ? " · sent while active; awaiting host" : "";
-  const roleLabel = message.role === "tool"
-    ? `tool${message.toolName ? ` (${message.toolName})` : ""}`
-    : `${message.role}${message.isError ? " · error" : ""}`;
-  const showRoleLabel = message.role === "tool" || message.role === "notice" || message.isError === true || caveat !== "";
-  return (
-    <div className={`message-card ${message.role}${message.isError ? " error" : ""}`}>
-      {showRoleLabel && (
-        <div className="message-role" style={{ color: message.isError ? "var(--danger-text)" : "var(--text-muted)" }}>
-          {roleLabel}{caveat}
-        </div>
-      )}
-      {/* An advisor card is a transcript row, so it survives replay and is never
-          folded into a group: an advisor warning hidden inside a collapsed
-          activity row is a warning the user will not see. */}
-      {"customType" in message && message.customType === "advisor" ? (
-        <AdvisorMessageCard message={message} />
-      ) : message.role === "tool" ? <details open={expanded} onToggle={(event) => setExpanded(event.currentTarget.open)}>
-        <summary>{message.toolName ?? "Tool Result"} {"isRunning" in message && message.isRunning ? "(Running…)" : message.isError ? "(Error)" : "(Completed)"}</summary>
-        <p className="tool-output-preview">{message.text.slice(0, 240)}{message.text.length > 240 ? "…" : ""}</p>
-        <div className="history-actions"><button type="button" onClick={() => setExpanded((value) => !value)}>{expanded ? "Collapse output" : "Expand output"}</button><button type="button" onClick={() => void copy(message.text)}>Copy output</button></div>
-        {/* Mounted only while open: a 5000-line result otherwise builds every text
-            node the collapsed card never shows, which is the expensive-render case
-            on a phone. The full string stays in `message.text` — Copy reads it and
-            expanding mounts all of it, so nothing is deleted, only deferred. */}
-        {expanded && <pre className="message-content" style={{ overflowX: "auto", whiteSpace: "pre" }}><code>{message.text}</code></pre>}
-      </details> : message.role === "user" ? (
-        /* A pasted multi-page task used to occupy whole screens (Phase 4).
-           This branch MUST precede the `blocks` one: durable user rows always
-           carry blocks (`transcript.ts:315`), so testing blocks first meant a
-           long prompt collapsed while optimistic and then expanded again the
-           moment the host echo replaced the row. The body is always mounted and
-           `Copy` reads `message.text` verbatim, so nothing is lost — only
-           deferred. `identity` is the durable row id, never an index, so two
-           identical prompts expand independently. */
-        <CollapsibleMessage identity={message.id} text={message.text}>
-          {blocks ? (
-            <div className="message-content">{blocks.map((block, index) => renderTranscriptBlock(block, index))}</div>
-          ) : (
-            <div className="message-content">{renderMarkdown(message.text)}</div>
-          )}
-        </CollapsibleMessage>
-      ) : blocks && message.role !== "notice" ? (
-        <div className="message-content">{blocks.map((block, index) => renderTranscriptBlock(block, index))}</div>
-      ) : (
-        <div className="message-content">{message.role === "notice" ? <p>{message.text}</p> : renderMarkdown(message.text)}</div>
-      )}
-    </div>
-  );
-});
-
-/**
- * The transcript list: tool results collapse into per-category activity groups,
- * every other row keeps its own card.
- *
- * Grouping is presentation only — the rows handed to a group are the same
- * objects the ungrouped list would render, and each group's card expands to
- * those rows unchanged. That is why a reconnect or replay cannot duplicate rows:
- * the group derives from `messages`, which the reducer already de-duplicates.
- */
-export const TranscriptList = memo(function TranscriptList({ rows }: { rows: DisplayMessage[] }) {
-  const entries = useMemo(() => groupActivity(rows), [rows]);
-  const pairedArgs = useMemo(() => pairToolArguments(rows), [rows]);
-  return (
-    <>
-      {entries.map((entry) => entry.kind === "row"
-        ? <MessageRow key={entry.row.id} message={entry.row} />
-        : <ActivityGroupRow key={`group:${entry.group.rows[0]?.id ?? ""}`} group={entry.group} pairedArgs={pairedArgs} />)}
-    </>
-  );
-});
-
-function renderTranscriptBlock(block: TranscriptBlock, index: number): React.ReactNode {
-  if (block.type === "toolCall") return <details key={index}><summary>{`[Tool call: ${block.name}${block.intent ? ` — ${block.intent}` : ""}]`}</summary><pre style={{ overflowX: "auto" }}><code>{JSON.stringify(block.arguments, null, 2)}</code></pre></details>;
-  if (block.type === "image") return block.dataUrl ? <img key={index} src={block.dataUrl} alt="Attachment" style={{ maxWidth: "100%" }} /> : <p key={index}>{block.label}</p>;
-  if (block.type === "notice") return <p key={index}>{block.text}</p>;
-  return <React.Fragment key={index}>{renderMarkdown(block.text)}</React.Fragment>;
 }
 
 /**
@@ -391,6 +229,9 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
   const [vibeBusy, setVibeBusy] = useState(false);
   const [vibeError, setVibeError] = useState<string | null>(null);
   const [showMenu, setShowMenu] = useState(false);
+  /** The Files Center layer, and the path whose diff is open inside it. */
+  const [showFiles, setShowFiles] = useState(false);
+  const [openFilePath, setOpenFilePath] = useState<string | null>(null);
   const [transcriptErrors, setTranscriptErrors] = useState<Record<string, string>>({});
   const [savedHistory, setSavedHistory] = useState<(SavedConversationHistory & { messages: TranscriptMessage[] }) | null>(null);
   /**
@@ -591,9 +432,14 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     // closes it. Closing without retiring left a `cawAgents` entry in the session
     // history that a later Back would consume — re-opening conversation B's agents
     // layer with conversation A's `selectedId`.
-    if (typeof window !== "undefined" && window.history?.state !== null && typeof window.history?.state === "object" && "cawAgents" in (window.history.state as object)) {
+    const state = typeof window !== "undefined" && window.history?.state !== null && typeof window.history?.state === "object" ? window.history.state as object : null;
+    if (state !== null && ("cawAgents" in state || "cawFiles" in state || "cawMenu" in state)) {
       window.history.replaceState(null, "");
     }
+    // Same for this layer and the header menu: neither belongs to the new conversation.
+    setShowFiles(false);
+    setOpenFilePath(null);
+    setShowMenu(false);
     setRecoverySheetOpen(false);
     // M1: a capacity warning belongs to the conversation it was raised in; leaving it
     // set would show conversation A's refusal over conversation B's composer.
@@ -874,6 +720,19 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     () => summarizeFileChanges(isShowingSavedHistory ? savedRows : messages),
     [isShowingSavedHistory, savedRows, messages],
   );
+  /**
+   * The Files Center's own data, from the SAME rows the dashboard card counts.
+   * The two numbers agree BY CONSTRUCTION, not by wish: the header prints
+   * `appliedFiles` (applied edits only, what `summarizeFileChanges(rows).uniqueFiles`
+   * computes) while the row list ALSO shows failed edits that named a file, each
+   * labelled "not counted" — so the header must keep using `appliedFiles`; switching
+   * it to `summary.total` would silently make the two disagree.
+   * `pairToolArguments` is required: a failed edit's `details` carries no path (OMP
+   * sends `{diff:"", errorKind}`), and the path exists only in the call's arguments.
+   */
+  const filesRows = useMemo(() => (isShowingSavedHistory ? savedRows : messages), [isShowingSavedHistory, savedRows, messages]);
+  const changedFiles = useMemo(() => collectChangedFiles(filesRows, pairToolArguments(filesRows)), [filesRows]);
+  const changedFilesSummary = useMemo(() => summarizeChangedFiles(changedFiles), [changedFiles]);
   const dashboardCounts = useMemo(
     () => ({
       agents: { total: workerCounts.total, running: workerCounts.runningWorkers + workerCounts.runningSubagents },
@@ -2088,29 +1947,167 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
   };
 
   /**
-   * Scroll the transcript to its verified file-change rows.
+   * Push a layer entry, or REPLACE the header menu's own entry with it.
    *
-   * The card is a navigation summary, so its destination is the change data the
-   * screenshot came from — the tool rows themselves, not a new view. When nothing
-   * verified exists the card already says `View changes`, and the tap lands on the
-   * tail of the transcript, where the newest activity is.
+   * The menu pushes an entry so browser Back closes it. When a row then opens a
+   * layer that pushes its own entry, popping first would race that push — the
+   * traversal completes after the new entry exists and consumes it, so the layer
+   * opens and instantly vanishes (observed: the Files layer never appeared).
+   * Replacing the menu's entry with the layer's keeps the stack at its original
+   * depth and leaves the layer standing.
    */
-  const openFiles = (): void => {
-    const container = messagesScrollRef.current;
-    const content = messagesContentRef.current;
-    const targets = content?.querySelectorAll(".activity-group, .tv-file-changes") ?? [];
-    const last = targets[targets.length - 1];
-    // Nit: compute the offset RELATIVE to the scroll container instead of calling
-    // `scrollIntoView`, which also scrolls ancestors (the page itself on desktop)
-    // and could move the whole screen to reach a row inside the transcript.
-    if (container instanceof HTMLElement && last instanceof HTMLElement) {
-      const row = last.getBoundingClientRect();
-      const view = container.getBoundingClientRect();
-      container.scrollTop += row.top - view.top - (view.height - row.height) / 2;
+  const pushLayerEntry = useCallback((state: Record<string, unknown>): void => {
+    const ours = typeof window !== "undefined" && window.history?.state !== null && typeof window.history.state === "object" && "cawMenu" in window.history.state;
+    if (ours) window.history.replaceState(state, "");
+    else window.history.pushState(state, "");
+  }, []);
+
+  /**
+   * Open the Files Center layer.
+   *
+   * This used to scroll the transcript to its last verified file-change row, which
+   * never showed the *list* the dashboard card counts (`32 Files · +1301 −313`);
+   * the card's destination is now a real screen over the conversation. The
+   * conversation stays mounted underneath (`inert`), exactly like the agents
+   * layer, so the draft and the scroll position survive.
+   */
+  const filesOpenerRef = useRef<Element | null>(null);
+  const openFiles = useCallback((): void => {
+    filesOpenerRef.current = document.activeElement;
+    setOpenFilePath(null);
+    setShowFiles(true);
+    // The entry names the conversation it belongs to, so a stale one surviving a
+    // conversation switch can be refused by the popstate listener.
+    pushLayerEntry({ cawFiles: "list", conversationId: conversationIdRef.current });
+  }, [pushLayerEntry]);
+
+  const openFileDiff = useCallback((path: string): void => {
+    // `""` is the component's "back to the list" signal, not a path.
+    if (path === "") {
+      const state = typeof window !== "undefined" && window.history?.state !== null && typeof window.history.state === "object"
+        ? window.history.state as object
+        : null;
+      setOpenFilePath(null);
+      // The detail entry is ours and still current: retire it. Leaving it meant the
+      // next Back landed on the "list" entry, whose popstate re-opened the layer
+      // instead of closing it — so the layer could never be left by Back.
+      if (state !== null && "cawFiles" in state) window.history.back();
       return;
     }
-    goToLatest();
-  };
+    // Opened from a transcript file row, the layer is not on screen yet. Push the
+    // SAME two entries the Files Center list pushes before its own rows do
+    // (`openFiles` then this), so the walk is identical: Back from the diff lands on
+    // the list, and Back again leaves the layer. Mounting without the "list" entry
+    // put "detail" directly on the conversation, so Back skipped the list and closed
+    // the layer — caught by the hierarchy spec's file-row case.
+    if (!showFiles) {
+      filesOpenerRef.current = document.activeElement;
+      setShowFiles(true);
+      setOpenFilePath(null);
+      window.history.pushState({ cawFiles: "list", conversationId: conversationIdRef.current }, "");
+    }
+    setOpenFilePath(path);
+    window.history.pushState({ cawFiles: "detail", path, conversationId: conversationIdRef.current }, "");
+  }, [showFiles]);
+
+  /**
+   * Leave the files layer, retiring our own history entry when one is current.
+   *
+   * Same rule as the agents layer: `history.state` is read before popping, so a
+   * layer this view never pushed cannot make `back()` navigate off the app.
+   */
+  const leaveFilesLayer = useCallback((): void => {
+    const ours = typeof window !== "undefined" && window.history?.state !== null && typeof window.history?.state === "object" && "cawFiles" in (window.history.state as object);
+    setShowFiles(false);
+    setOpenFilePath(null);
+    if (ours) window.history.back();
+  }, []);
+
+  /**
+   * M3 for this layer: return focus to the opener when it closes.
+   *
+   * An effect on the layer's own state, so the Back button, a browser Back (which
+   * goes through `onPopState`) and unmount all land in the same place. The opener
+   * is a menu item that the menu has already removed, so the persistent header
+   * trigger is the fallback — focus must never land on `document.body`.
+   */
+  useEffect(() => {
+    if (showFiles) return;
+    const opener = filesOpenerRef.current;
+    if (opener === null) return;
+    filesOpenerRef.current = null;
+    const target = opener instanceof HTMLElement && opener.isConnected
+      ? opener
+      : document.querySelector<HTMLElement>(".header-menu-button");
+    target?.focus();
+  }, [showFiles]);
+
+  /**
+   * Close the header menu, retiring the history entry it pushed.
+   *
+   * `back()` — not `replaceState` — for the same reason `leaveFilesLayer` uses it:
+   * blanking the marker leaves an entry the user can never reach, so every
+   * open/dismiss cycle pushes the conversation one further Back away from the
+   * user. Guarded on `history.state` being ours, because an unguarded `back()`
+   * would navigate off the app once the entry is already consumed.
+   *
+   * `retireEntry: false` for a row that is about to push its OWN entry
+   * (`pushLayerEntry`) — there, retiring by `back()` would race that push.
+   */
+  const closeMenu = useCallback((restoreFocus = false, retireEntry = true): void => {
+    const ours = typeof window !== "undefined" && window.history?.state !== null && typeof window.history.state === "object" && "cawMenu" in window.history.state;
+    setShowMenu(false);
+    if (retireEntry && ours) window.history.back();
+    if (restoreFocus) document.querySelector<HTMLElement>(".header-menu-button")?.focus();
+  }, []);
+
+  /**
+   * Open/close the menu from the trigger, pushing the entry that makes browser
+   * Back close it.
+   *
+   * Read through a ref rather than inside a state updater: React may invoke an
+   * updater twice, and `pushState` inside one would push twice.
+   */
+  const menuOpenRef = useRef(false);
+  menuOpenRef.current = showMenu;
+  const toggleMenu = useCallback((): void => {
+    if (menuOpenRef.current) {
+      closeMenu();
+      return;
+    }
+    setShowMenu(true);
+    window.history.pushState({ cawMenu: true, conversationId: conversationIdRef.current }, "");
+  }, [closeMenu]);
+
+  /**
+   * The menu's two real dismissal paths, neither of which existed before: a tap
+   * outside it, and Escape. Both are pointer/keyboard events on `document`
+   * because the menu is a disclosure, not a modal — it must not block the rest of
+   * the header, it just must not outlive a tap that clearly meant to leave it.
+   *
+   * `closest` on the event target, never `contains` against a captured node: a
+   * re-render replaces the menu element, and a stale reference would answer from a
+   * node no longer on screen.
+   */
+  useEffect(() => {
+    if (!showMenu) return;
+    const onPointerDown = (event: PointerEvent): void => {
+      const target = event.target;
+      if (!(target instanceof Element)) return;
+      if (target.closest(".header-menu") !== null || target.closest(".header-menu-button") !== null) return;
+      closeMenu();
+    };
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key !== "Escape") return;
+      closeMenu(true);
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [showMenu, closeMenu]);
 
   /**
    * The agents layer sits ON TOP of the conversation, and it participates in the
@@ -2142,14 +2139,14 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     setAgentNav({ open: true, selectedId: null });
     // M2: the pushed entry names the conversation it belongs to, so `onPopState`
     // can refuse a stale entry that survived a conversation switch.
-    window.history.pushState({ cawAgents: "list", conversationId: conversationIdRef.current }, "");
-  }, []);
+    pushLayerEntry({ cawAgents: "list", conversationId: conversationIdRef.current });
+  }, [pushLayerEntry]);
 
   const openAgentDetail = useCallback((id: string): void => {
     agentsOpenerRef.current = document.activeElement;
     setAgentNav({ open: true, selectedId: id });
-    window.history.pushState({ cawAgents: "detail", id, conversationId: conversationIdRef.current }, "");
-  }, []);
+    pushLayerEntry({ cawAgents: "detail", id, conversationId: conversationIdRef.current });
+  }, [pushLayerEntry]);
 
   /**
    * Leave the agents layer, retiring our own history entry when one is current.
@@ -2190,7 +2187,7 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
 
   useEffect(() => {
     const onPopState = (event: PopStateEvent): void => {
-      const state = event.state as { cawAgents?: string; id?: string; conversationId?: string } | null;
+      const state = event.state as { cawAgents?: string; id?: string; cawFiles?: string; path?: string; cawMenu?: true; conversationId?: string } | null;
       if (state !== null && typeof state === "object" && "cawAgents" in state) {
         // M2: an entry pushed by a different conversation is not ours to honour —
         // acting on it would show conversation A's selected agent against B's roster.
@@ -2198,8 +2195,26 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
         setAgentNav({ open: true, selectedId: state.cawAgents === "detail" && typeof state.id === "string" ? state.id : null });
         return;
       }
+      if (state !== null && typeof state === "object" && "cawFiles" in state) {
+        // Same stale-entry rule: opening conversation B must not answer a Back to
+        // conversation A's files layer.
+        if (typeof state.conversationId === "string" && state.conversationId !== conversationIdRef.current) return;
+        setShowFiles(true);
+        setOpenFilePath(state.cawFiles === "detail" && typeof state.path === "string" ? state.path : null);
+        return;
+      }
+      // A menu entry is answered by CLOSING the menu, never by changing what the
+      // conversation shows — Back out of the menu must leave the screen as it was.
+      if (state !== null && typeof state === "object" && "cawMenu" in state) {
+        if (typeof state.conversationId === "string" && state.conversationId !== conversationIdRef.current) return;
+        setShowMenu(true);
+        return;
+      }
       // Back past our own entries: the conversation is the screen underneath.
       setAgentNav({ open: false, selectedId: null });
+      setShowFiles(false);
+      setOpenFilePath(null);
+      setShowMenu(false);
     };
     window.addEventListener("popstate", onPopState);
     return () => window.removeEventListener("popstate", onPopState);
@@ -2213,7 +2228,8 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
    * re-opens an agents layer for a conversation that is no longer mounted.
    */
   useEffect(() => () => {
-    if (typeof window !== "undefined" && window.history?.state !== null && typeof window.history?.state === "object" && "cawAgents" in (window.history.state as object)) {
+    const state = typeof window !== "undefined" && window.history?.state !== null && typeof window.history?.state === "object" ? window.history.state as object : null;
+    if (state !== null && ("cawAgents" in state || "cawFiles" in state || "cawMenu" in state)) {
       window.history.replaceState(null, "");
     }
   }, []);
@@ -2224,7 +2240,7 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
           one viewport, one interactive screen. `inert` (not `aria-hidden`) removes
           the covered subtree from the accessibility tree AND from tab order, which
           is what a full-viewport overlay actually means. */}
-      <div className="conversation-column" inert={agentNav.open}>
+      <div className="conversation-column" inert={agentNav.open || showFiles}>
       {/* Header: one row. Back, title, one status line, Stop while running, and
           the overflow menu. Everything secondary lives in the menu. */}
       <div className="app-header">
@@ -2261,25 +2277,30 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
               {reportedModel !== null && <span className="header-status-model"> · {reportedModel}</span>}
             </span>
           </div>
-          {/* Mode chips: kept as the quiet entry points the brief preserves, and
-              they hold no claim of their own. */}
+        </div>
+
+        <div className="conversation-header-actions">
+          {/* Chips sit in the fixed action cluster, not inside the title block: the
+              title ellipsises against a fixed-width cluster instead of competing
+              with the chips for the same width. They cost no vertical space — the
+              row is already 44px tall from the buttons beside them. */}
           <div className="header-chips">
-            {/* B09: this chip reports **recorded notes**, nothing about the
-                advisor's runtime. It used to paint `⛔` from historical blockers,
-                which reads as "the advisor is alarming right now" — a claim this
-                data cannot support, because nothing on this transport reports the
-                advisor's enable state. So the label counts notes (`3`), the tone
-                marks a blocker as *recorded* (a triangle, not an alarm), and the
-                accessible name says exactly that. */}
-            {advisorSummary.notes.length > 0 && (
+            {/* The Adv chip is rendered ONLY for a recorded blocker.
+                A count of historical notes is not a warning: nothing on this
+                transport knows whether the advisor is enabled or running
+                (`apps/web/src/advisor.ts:39-47`), so a standing `Adv 3` reads as
+                "the advisor is alarming right now" — a claim this data cannot
+                support. The count stays reachable in the menu's Advisor entry, so
+                no information is lost by hiding the chip. */}
+            {advisorSummary.hasBlocker && (
               <button
                 type="button"
-                className={`mode-chip${advisorSummary.hasBlocker ? " mode-chip--alert" : ""}`}
-                aria-label={`Advisor: ${advisorSummary.notes.length} recorded note${advisorSummary.notes.length === 1 ? "" : "s"}${advisorSummary.hasBlocker ? ", including a blocker" : ""}. Open the advisor panel.`}
-                title={`Recorded advisor notes: ${advisorSummary.notes.length}`}
+                className="mode-chip mode-chip--alert"
+                aria-label={`Advisor recorded a blocker among ${advisorSummary.notes.length} note${advisorSummary.notes.length === 1 ? "" : "s"}. Open the advisor panel.`}
+                title={`Recorded advisor notes: ${advisorSummary.notes.length}, including a blocker`}
                 onClick={() => setShowAdvisor(true)}
               >
-                Adv {advisorSummary.notes.length}{advisorSummary.hasBlocker ? " ⚠" : ""}
+                Adv ⚠
               </button>
             )}
             {/* Rendered only when the mode is known ON. An "off" mode is not worth
@@ -2298,9 +2319,6 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
               </button>
             )}
           </div>
-        </div>
-
-        <div className="conversation-header-actions">
           {/* Stop generating stays OUT of the menu and stays one tap while
               generating: it is the control a user reaches for when a turn is
               going wrong, and a menu between them and it is a real cost. The
@@ -2325,7 +2343,7 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
             aria-expanded={showMenu}
             aria-controls="conversation-actions-menu"
             title="More actions"
-            onClick={() => setShowMenu((value) => !value)}
+            onClick={toggleMenu}
           >
             <span aria-hidden="true">⋯</span>
           </button>
@@ -2335,72 +2353,87 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
             // which this does not implement (Tab is the only way through, as in
             // any disclosure). Claiming the role would be an accessibility lie.
             <div className="header-menu" id="conversation-actions-menu" aria-label="Conversation actions">
-              <button type="button" onClick={() => { setShowMenu(false); setShowActivity(true); }}>
-                Activity
-              </button>
-              {/* The three dashboard cards are the primary way to these places, but
-                  they scroll away with the transcript and collapse to two columns on
-                  the narrowest phones — so each destination also lives here, where it
-                  is reachable at any scroll position and any width. */}
-              <button type="button" onClick={() => { setShowMenu(false); openFiles(); }}>
-                Files
-              </button>
-              {/* Advisor and Vibe are always reachable from the menu, not only
-                  through a header chip: the chips appear only when there is
-                  something to show (a recorded note, an active mode), so without
-                  these entries a user with no notes yet would have no way to open
-                  either panel and read where its controls live. */}
-              <button type="button" onClick={() => { setShowMenu(false); setShowAdvisor(true); }}>
-                Advisor
-              </button>
-              <button type="button" onClick={() => { setShowMenu(false); setShowVibe(true); }}>
-                Vibe mode
-              </button>
-              <button type="button" aria-label={`Agents (${agents.length})`} onClick={() => { setShowMenu(false); openAgents(); }}>
-                Agents ({agents.length})
-              </button>
-              {refusedRecoveries.length > 0 && (
-                <button type="button" aria-label={`Review ${refusedRecoveries.length} unacknowledged prompts`} onClick={() => { setShowMenu(false); setRecoverySheetOpen(true); }}>
-                  Review prompts ({refusedRecoveries.length})
+              <div className="header-menu-group">
+                <span className="header-menu-heading">Go to</span>
+                <button type="button" onClick={() => { closeMenu(); setShowActivity(true); }}>
+                  Activity
                 </button>
-              )}
-              {/* Handoff is offered only where it can actually run. A conversation
-                  this app does not own gets the control disabled with the reason
-                  printed below, never an enabled action that fails. */}
-              {handoffOffered && (
+                {/* The three dashboard cards are the primary way to these places, but
+                    they scroll away with the transcript and collapse to two columns on
+                    the narrowest phones — so each destination also lives here, where it
+                    is reachable at any scroll position and any width. */}
+                <button type="button" onClick={() => { closeMenu(false, false); openFiles(); }}>
+                  Files
+                </button>
+                <button type="button" aria-label={`Agents (${agents.length})`} onClick={() => { closeMenu(false, false); openAgents(); }}>
+                  Agents ({agents.length})
+                </button>
+                {refusedRecoveries.length > 0 && (
+                  <button type="button" aria-label={`Review ${refusedRecoveries.length} unacknowledged prompts`} onClick={() => { closeMenu(); setRecoverySheetOpen(true); }}>
+                    Review prompts ({refusedRecoveries.length})
+                  </button>
+                )}
+              </div>
+              <div className="header-menu-group">
+                <span className="header-menu-heading">Panels</span>
+                {/* Advisor and Vibe are always reachable from the menu, not only
+                    through a header chip: the Adv chip appears only when a blocker
+                    was recorded (the count moved here so nothing is lost), so
+                    without these entries a user with no blocker yet would have no
+                    way to open either panel and read where its controls live. */}
+                <button
+                  type="button"
+                  aria-label={`Advisor${advisorSummary.notes.length > 0 ? ` (${advisorSummary.notes.length} recorded note${advisorSummary.notes.length === 1 ? "" : "s"})` : ""}`}
+                  onClick={() => { closeMenu(); setShowAdvisor(true); }}
+                >
+                  Advisor{advisorSummary.notes.length > 0 ? ` (${advisorSummary.notes.length})` : ""}
+                </button>
+                <button type="button" onClick={() => { closeMenu(); setShowVibe(true); }}>
+                  Vibe mode
+                </button>
                 <button
                   type="button"
                   className="header-menu-item"
-                  disabled={handoffBusy || handoffReason !== null}
-                  title={handoffReason ?? "Compact this session's context in place"}
-                  onClick={() => { setShowMenu(false); setHandoffConfirming((value) => !value); }}
+                  onClick={() => { closeMenu(); setModelSheetOpen(true); }}
                 >
-                  {handoffBusy ? "Generating handoff…" : "Handoff context"}
+                  Model settings
                 </button>
-              )}
-              {/* Two different things, deliberately distinguishable. `Stop generating`
-                  aborts the current turn and leaves the process alive; this one ends
-                  the app-managed OMP process and releases its agent slot. Neither
-                  touches the native journal, and neither is offered where it cannot
-                  work. */}
-              {stopSessionOffered && (
-                <button
-                  type="button"
-                  className="header-menu-item header-menu-item--danger"
-                  disabled={stopSessionBusy || stopSessionReason !== null}
-                  title={stopSessionReason ?? "Terminate the app-managed OMP process; history and the native session are preserved"}
-                  onClick={() => { setShowMenu(false); setStopSessionConfirming((value) => !value); }}
-                >
-                  {stopSessionBusy ? "Stopping session…" : "Stop OMP session"}
-                </button>
-              )}
-              <button
-                type="button"
-                className="header-menu-item"
-                onClick={() => { setShowMenu(false); setModelSheetOpen(true); }}
-              >
-                Model settings
-              </button>
+              </div>
+              {/* Session is last and visually separated: both of its entries end
+                  something, and neither belongs next to a navigation row. */}
+              <div className="header-menu-group header-menu-group--session">
+                <span className="header-menu-heading">Session</span>
+                {/* Handoff is offered only where it can actually run. A conversation
+                    this app does not own gets the control disabled with the reason
+                    printed below, never an enabled action that fails. */}
+                {handoffOffered && (
+                  <button
+                    type="button"
+                    className="header-menu-item"
+                    disabled={handoffBusy || handoffReason !== null}
+                    title={handoffReason ?? "Compact this session's context in place"}
+                    onClick={() => { closeMenu(); setHandoffConfirming((value) => !value); }}
+                  >
+                    {handoffBusy ? "Generating handoff…" : "Handoff context"}
+                  </button>
+                )}
+                {/* Two different things, deliberately distinguishable. `Stop generating`
+                    aborts the current turn and leaves the process alive; this one ends
+                    the app-managed OMP process and releases its agent slot. Neither
+                    touches the native journal, and neither is offered where it cannot
+                    work. */}
+                {stopSessionOffered && (
+                  <button
+                    type="button"
+                    className="header-menu-item header-menu-item--danger"
+                    disabled={stopSessionBusy || stopSessionReason !== null}
+                    title={stopSessionReason ?? "Terminate the app-managed OMP process; history and the native session are preserved"}
+                    onClick={() => { closeMenu(); setStopSessionConfirming((value) => !value); }}
+                  >
+                    {stopSessionBusy ? "Stopping session…" : "Stop OMP session"}
+                  </button>
+                )}
+              </div>
             </div>
           )}
         </div>
@@ -2656,7 +2689,7 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
             {olderHistoryLoading && <p role="status">Loading older history…</p>}
             {olderHistoryError && <p role="alert">{olderHistoryError}</p>}
             {!savedHistory.hasOlder && !savedHistory.skippedOversized && <p role="status">Beginning of history.</p>}
-            <TranscriptList rows={savedRows} />
+            <TranscriptList rows={savedRows} onOpenFile={openFileDiff} />
             {savedModeOptimistic.map((message) => <MessageRow key={message.id} message={message} />)}
           </>
         ) : linkUnavailable ? (
@@ -2707,7 +2740,7 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
           </div>
         )}
 
-        {!isShowingSavedHistory && <TranscriptList rows={messages} />}
+        {!isShowingSavedHistory && <TranscriptList rows={messages} onOpenFile={openFileDiff} />}
 
         {/* Streaming assistant message. Never in saved mode: the saved transcript is
             the single source of truth there, and a live stream is not its content. */}
@@ -2951,6 +2984,20 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
             );
           })()}
         </div>
+      )}
+      {/* The Files Center, a sibling level-2 layer exactly like the agents layer:
+          fixed, own-scrolling, painted on the app background, with the conversation
+          kept mounted and `inert` underneath. `FilesCenter` owns its own
+          `.files-layer` wrapper, so none is added here. */}
+      {showFiles && (
+        <FilesCenter
+          files={changedFiles}
+          summary={changedFilesSummary}
+          windowNote="Edits observed in this conversation's transcript — not the git working tree. Only the loaded history window is covered (paged at 500 entries), so older edits may be outside it."
+          onOpenFile={openFileDiff}
+          onBack={leaveFilesLayer}
+          openPath={openFilePath}
+        />
       )}
       {/* Activity Timeline Modal */}
       {showActivity && (
