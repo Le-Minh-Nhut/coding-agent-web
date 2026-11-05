@@ -51,7 +51,7 @@ interface StubBridge {
  * put a second request in flight against a known-first one without guessing a
  * duration — the race is *constructed*, not timed.
  */
-async function startBridge(options: { token?: string; modeResult?: unknown; hold?: boolean } = {}): Promise<StubBridge> {
+async function startBridge(options: { token?: string; modeResult?: unknown; hold?: boolean; sessionId?: string | null } = {}): Promise<StubBridge> {
   const token = options.token ?? "bridge-token-0123456789";
   let modeRequests = 0;
   let signalArrived: () => void = () => {};
@@ -69,7 +69,12 @@ async function startBridge(options: { token?: string; modeResult?: unknown; hold
       res.end(JSON.stringify(payload));
     };
     if (req.method === "GET" && req.url?.startsWith("/state")) {
-      return respond(200, { ok: true, hasSessionModes: true, modes: state, tools: ["read"], model: "test/model", thinkingLevel: "medium" });
+      // The real extension reports which native session it serves; the route
+      // compares it against the conversation's recorded session, so the stub must
+      // carry it too or every answer is (correctly) treated as unattributable.
+      // `undefined` means "serve the fixture's session"; `null` means "cannot say".
+      const sessionId = options.sessionId === undefined ? "sess-1" : options.sessionId;
+      return respond(200, { ok: true, hasSessionModes: true, sessionId, modes: state, tools: ["read"], model: "test/model", thinkingLevel: "medium" });
     }
     if (req.method === "POST" && req.url?.startsWith("/mode")) {
       modeRequests += 1;
@@ -141,6 +146,91 @@ const post = (app: FastifyInstance<HttpServer>, id: string, headers: Record<stri
   app.inject({ method: "POST", url: `/api/conversations/${id}/vibe`, headers, payload });
 
 describe("vibe route", () => {
+  /**
+   * B02 — the bridge serves a *process*, and a process can switch sessions.
+   *
+   * The dangerous case: a `/resume` inside the same TUI leaves the listener
+   * answering for session B while the phone is still looking at conversation A.
+   * Applying that mode change would mutate the wrong session, so identity is
+   * verified before any write, and an answer that cannot be attributed is refused.
+   */
+  it("refuses a read when the bridge serves a different native session", async () => {
+    const { app, conversation, headers, attach } = await fixture();
+    const bridge = await startBridge({ sessionId: "some-other-session" });
+    cleanup.push(bridge.stop);
+    await attach(bridge);
+
+    const response = await get(app, conversation.id, headers);
+    expect(response.statusCode).toBe(200);
+    // Reported as unavailable WITH the reason — never as another session's mode.
+    expect(response.json().data.available).toBe(false);
+    expect(response.json().data.modes).toBeNull();
+    expect(response.json().data.reason).toMatch(/different native session/i);
+    await app.close();
+  });
+
+  it("refuses a mode change when the bridge serves a different native session", async () => {
+    const { app, conversation, headers, attach } = await fixture();
+    const bridge = await startBridge({ sessionId: "some-other-session" });
+    cleanup.push(bridge.stop);
+    await attach(bridge);
+
+    const response = await post(app, conversation.id, headers);
+    expect(response.statusCode).toBe(409);
+    expect(response.json().error.code).toBe("conflict_owner");
+    // And nothing was written: a mismatched answer must not reach the transition.
+    expect(bridge.modeRequests()).toBe(0);
+    await app.close();
+  });
+
+  it("refuses when the bridge cannot report which session it serves", async () => {
+    // "I could not check" is not "it matches": an unreadable id fails closed.
+    const { app, conversation, headers, attach } = await fixture();
+    const bridge = await startBridge({ sessionId: null });
+    cleanup.push(bridge.stop);
+    await attach(bridge);
+
+    const read = await get(app, conversation.id, headers);
+    expect(read.json().data.available).toBe(false);
+    expect(read.json().data.reason).toMatch(/did not report which native session/i);
+
+    const write = await post(app, conversation.id, headers);
+    expect(write.statusCode).toBe(409);
+    expect(bridge.modeRequests()).toBe(0);
+    await app.close();
+  });
+
+  it("reports the journal-proven worker ids alongside the state", async () => {
+    // The Kill gate's evidence: only ids the server proved from the journal are
+    // reported, and an absent reader yields none rather than every agent.
+    const dir = await mkdtemp(join(tmpdir(), "caw-bridge-workers-"));
+    cleanup.push(async () => { await rm(dir, { recursive: true, force: true }); });
+    const auth = createAuthenticationService({ stateDir: dir, setupOutput: () => undefined });
+    await auth.initAuth();
+    const store = createMetadataStore(dir);
+    const overlayDir = join(dir, "overlays");
+    await mkdir(overlayDir, { recursive: true, mode: 0o700 });
+    const app = buildApp({
+      config: { host: "127.0.0.1", port: 8791, stateDir: dir, allowedRoots: [dir], relayPort: 8792, relayAllowedOrigins: [], maxActiveAgents: 3, authTokenTtlHours: 720, trustTailscaleOrigin: false, logLevel: "silent", insecureCookies: false, handoffEvidenceBudgetMs: 0 },
+      auth, store, originAllowlist: ["https://workspace.test"],
+      tmuxServerIdentity: async () => "sock:1:2",
+      bridgeConfigDir: overlayDir,
+      readVibeWorkers: async (sessionId) => ({ ids: sessionId === "sess-1" ? ["w1", "w2"] : [], timestamp: null }),
+    });
+    cleanup.push(async () => { await app.close(); });
+    const session = auth.createSession();
+    const headers = { cookie: `__Host-caw_session=${session.token}`, origin: "https://workspace.test", "x-caw-csrf": session.csrfToken };
+    const project = await store.createProject({ path: dir, label: "p" });
+    const conversation = await store.createConversation({ projectId: project.id, title: "c" });
+    await store.updateConversation(conversation.id, { ownership: "managed", state: "idle", nativeSessionId: "sess-1", tmuxSessionId: "$0", tmuxSessionName: "caw-c", tmuxServerIdentity: "sock:1:2", tmuxPanePid: 42 });
+    const bridge = await startBridge();
+    cleanup.push(bridge.stop);
+    await writeFile(bridgeConfigPath(overlayDir, conversation.id), JSON.stringify({ port: bridge.port, token: bridge.token }), { mode: 0o600 });
+
+    const response = await get(app, conversation.id, headers);
+    expect(response.json().data.workerIds).toEqual(["w1", "w2"]);
+  });
+
   it("refuses an unauthenticated caller", async () => {
     const { app, conversation } = await fixture();
     // Registered with the app's own session guard, so it answers the same 401 as
@@ -210,7 +300,7 @@ describe("vibe route", () => {
 
     const live = await get(app, conversation.id, headers);
     expect(live.statusCode).toBe(200);
-    expect(live.json().data).toEqual({ available: true, reason: null, modes: state, tools: ["read"], model: "test/model", thinkingLevel: "medium" });
+    expect(live.json().data).toEqual({ available: true, reason: null, modes: state, tools: ["read"], model: "test/model", thinkingLevel: "medium", workerIds: [] });
     await app.close();
 
     // The bridge is up but the native runtime refuses the transition. The exchange

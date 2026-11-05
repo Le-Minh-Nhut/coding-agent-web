@@ -5,9 +5,12 @@ import { MarkdownCodeBlock, parseInline, renderMarkdown } from "../sanitize.js";
 import { ActivityPanel } from "./ActivityPanel.js";
 import { AdvisorPanel } from "./AdvisorPanel.js";
 import { ModalOverlay } from "./ModalOverlay.js";
-import { SubagentPanel } from "./SubagentPanel.js";
+import { AgentsCenter } from "./AgentsCenter.js";
+import { AgentDetail } from "./AgentDetail.js";
+import { CollapsibleMessage } from "./CollapsibleMessage.js";
 import { VibePanel, vibeVerdictLabel } from "./VibePanel.js";
 import { advisorNotesOf, summarizeAdvisorNotes } from "../advisor.js";
+import { agentCounts, agentViews, vibeWorkerIds } from "../agent-model.js";
 import {
   CollabSocket,
   parseCollabLink,
@@ -219,7 +222,19 @@ export const MessageRow = memo(function MessageRow({ message }: { message: Displ
             on a phone. The full string stays in `message.text` — Copy reads it and
             expanding mounts all of it, so nothing is deleted, only deferred. */}
         {expanded && <pre className="message-content" style={{ overflowX: "auto", whiteSpace: "pre" }}><code>{message.text}</code></pre>}
-      </details> : blocks && message.role !== "notice" ? <div className="message-content">{blocks.map((block, index) => renderTranscriptBlock(block, index))}</div> : (
+      </details> : blocks && message.role !== "notice" ? (
+        <div className="message-content">{blocks.map((block, index) => renderTranscriptBlock(block, index))}</div>
+      ) : message.role === "user" ? (
+        /* A pasted multi-page task used to occupy whole screens (Phase 4). Only
+           user rows collapse: an assistant answer is what the reader came for, and
+           hiding it by default would be the wrong trade. The body stays mounted in
+           full and `Copy` reads `message.text` verbatim, so nothing is lost — only
+           deferred. `identity` is the durable row id, never an index, so two
+           identical prompts expand independently. */
+        <CollapsibleMessage identity={message.id} text={message.text}>
+          <div className="message-content">{renderMarkdown(message.text)}</div>
+        </CollapsibleMessage>
+      ) : (
         <div className="message-content">{message.role === "notice" ? <p>{message.text}</p> : renderMarkdown(message.text)}</div>
       )}
     </div>
@@ -312,7 +327,12 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
   const [roomRetired, setRoomRetired] = useState(false);
   const [linkAccess, setLinkAccess] = useState<"view" | "full" | null>(null);
   const [modelBusy, setModelBusy] = useState(false);
-  const [showSubagents, setShowSubagents] = useState(false);
+  /**
+   * Agents Center navigation (B11): `null` = closed, `undefined` = list shown,
+   * an id = that agent's detail. Identity is the host's agent id, never a list
+   * index, so a roster change cannot silently re-point the view at another agent.
+   */
+  const [agentNav, setAgentNav] = useState<{ open: boolean; selectedId: string | null }>({ open: false, selectedId: null });
   const [showActivity, setShowActivity] = useState(false);
   const [showAdvisor, setShowAdvisor] = useState(false);
   const [showVibe, setShowVibe] = useState(false);
@@ -324,6 +344,8 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
    * Nothing here guesses a mode.
    */
   const [vibeState, setVibeState] = useState<VibeStateResponse | null>(null);
+  /** Worker ids the server proved from the journal; empty ⇒ no worker controls. */
+  const [vibeWorkerIdsFromServer, setVibeWorkerIdsFromServer] = useState<readonly unknown[]>([]);
   const [vibeBusy, setVibeBusy] = useState(false);
   const [vibeError, setVibeError] = useState<string | null>(null);
   const [showMenu, setShowMenu] = useState(false);
@@ -547,8 +569,37 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     ? slashCommands.filter((command) => command.name.startsWith(inputText)).slice(0, 5)
     : [];
   const agents = transcript.agents;
+  /**
+   * The one agent view model (B01/B11). Classification and the destructive-control
+   * gate come from `agent-model.ts`, driven by the journal's Vibe lifecycle
+   * records — never from `kind` alone and never from a display name.
+   */
+  /**
+   * Worker ids proven by the session journal, as reported by the server.
+   *
+   * They cannot come from the transcript: OMP's Collab replication allowlist
+   * excludes `custom` entries (`packages/coding-agent/src/collab/host.ts:103-110`),
+   * and `vibe-session-lifecycle` is a `custom` entry — so this browser never sees
+   * a worker record no matter how long it listens. Until the server reports them
+   * this is empty, and empty means **no agent is a worker**: no Kill control is
+   * offered at all, which is the honest blank rather than a guess (B01).
+   */
+  const agentVibes = useMemo(() => agentViews(agents, vibeWorkerIds(vibeWorkerIdsFromServer)), [agents, vibeWorkerIdsFromServer]);
+  const workerCounts = useMemo(() => agentCounts(agentVibes), [agentVibes]);
   const transcripts = transcript.transcripts;
   const canManageConversation = conversation?.id === conversationId && conversation.ownership === "managed";
+  /**
+   * Whether a native mode could be read or changed for this conversation at all.
+   *
+   * The bridge only exists for a session this app launched — which means a
+   * recorded native session AND a verified tmux identity. Anything less has no
+   * listener, so asking would only produce a refusal in the browser console that
+   * looks like a failure. This is the same set of facts the server checks, read
+   * from the record; the server still has the final say.
+   */
+  const canControlNativeModes = canManageConversation
+    && conversation?.nativeSessionId !== null && conversation?.nativeSessionId !== undefined
+    && conversation?.tmuxSessionId !== null && conversation?.tmuxSessionId !== undefined;
   const canWriteToHost = linkAccess === "full";
   useLayoutEffect(() => {
     viewActiveRef.current = true;
@@ -600,9 +651,21 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
    * said or how severe it was. Notes prove an advisor ran; nothing here infers
    * that one is enabled, because this transport does not report that.
    */
+  /**
+   * Advisor notes from the transcript **currently on screen** (B04).
+   *
+   * This used to read `transcript.messages` unconditionally, so saved-history mode
+   * displayed live notes — two different sessions' advice in one panel. `rows` is
+   * whichever source the view is rendering, so the panel and the chat can never
+   * disagree about what was said.
+   */
+  const advisorRows = useMemo(
+    () => (isShowingSavedHistory ? savedHistory?.messages ?? [] : transcript.messages),
+    [isShowingSavedHistory, savedHistory, transcript.messages],
+  );
   const advisorSummary = useMemo(
-    () => summarizeAdvisorNotes(transcript.messages.map((message) => ({ customType: message.customType, details: message.customDetails }))),
-    [transcript.messages],
+    () => summarizeAdvisorNotes(advisorRows.map((message) => ({ customType: message.customType, details: message.customDetails }))),
+    [advisorRows],
   );
 
   const messages: DisplayMessage[] = useMemo(() => {
@@ -735,6 +798,16 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     if (frame.t === "welcome") {
       sendGuardRef.current = null;
       setEffectiveModel({ conversationId, model: frame.state.model?.id ?? null });
+      // B05: the mode can be changed from the session's own terminal, so whatever
+      // this view last showed may be stale the moment a fresh link is established.
+      // Re-reading on (re)connect is the only way the phone reflects a change it
+      // never made.
+      //
+      // Gated on the conversation being ours to control: an unmanaged or external
+      // conversation has no bridge, and asking anyway would put a 409 in the
+      // browser console on every reconnect — noise that looks like a failure and
+      // is not one. One read per connection, never a poll.
+      if (canControlNativeModesRef.current) void refreshVibeRef.current();
     }
     if (frame.t === "state" && frame.state.model) setEffectiveModel({ conversationId, model: frame.state.model.id });
     if ((frame.t === "welcome" || frame.t === "state") && next.error === null) setSendError(null);
@@ -1200,20 +1273,28 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     // recovered endpoint is picked up without waiting for linkUnavailable to flip.
     if (conversationIdRef.current === currentId) setHistoryRetryEpoch((epoch) => epoch + 1);
   };
-  const sendPrompt = (text: string, allowSlashCommand = false): void => {
+  /**
+   * Submit a prompt, reporting whether it was actually accepted for delivery.
+   *
+   * The return value matters to callers that perform a second operation after a
+   * prompt (the Vibe first-directive, B03): "the link was not accepting prompts"
+   * must not be mistaken for "sent". Every early return therefore reports `false`
+   * rather than falling off the end of a `void`.
+   */
+  const sendPrompt = (text: string, allowSlashCommand = false): boolean => {
     const trimmed = text.trim();
     const socket = socketRef.current;
-    if (!trimmed || !socket || (status !== "idle" && status !== "running")) return;
+    if (!trimmed || !socket || (status !== "idle" && status !== "running")) return false;
     if (transcriptRef.current.readOnly) {
       setSendError("Read-only view — prompt was not sent.");
-      return;
+      return false;
     }
     const command = findSlashCommand(trimmed);
     if (command && !allowSlashCommand) {
       setInterceptedCommand(command);
-      return;
+      return false;
     }
-    if (sendingPromptTextsRef.current.has(trimmed)) return;
+    if (sendingPromptTextsRef.current.has(trimmed)) return false;
     const sendId = ++sendIdRef.current;
     const draftVersion = sendVersionRef.current;
     const conversationAtSend = conversationIdRef.current;
@@ -1278,6 +1359,7 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
       }
       setSendError("Socket did not accept prompt. Draft kept; retry when connected.");
     });
+    return true;
   };
   const handleSendPrompt = (event: React.FormEvent): void => {
     event.preventDefault();
@@ -1293,7 +1375,7 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     setInterceptedCommand(null);
     onDraftChange?.(value);
   };
-  const sendSlashAsText = (): void => sendPrompt(inputValueRef.current, true);
+  const sendSlashAsText = (): void => { sendPrompt(inputValueRef.current, true); };
 
   /**
    * Explicit recovery never overwrites a newer draft. Merge refused text into that
@@ -1688,8 +1770,14 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     setTranscript(transcriptRef.current);
   }, []);
 
+  /** Mirrors `canControlNativeModes` for the frame handler, which runs outside render. */
+  const canControlNativeModesRef = useRef(false);
+
+  /** Latest `refreshVibe`, so a reconnect can reconcile without a dependency cycle. */
+  const refreshVibeRef = useRef<() => Promise<void>>(async () => {});
+
   /** Kept in a ref so `runVibeAction` can call the latest `sendPrompt` without re-creating. */
-  const sendPromptRef = useRef<(text: string, allowSlashCommand?: boolean) => void>(() => {});
+  const sendPromptRef = useRef<(text: string, allowSlashCommand?: boolean) => boolean>(() => false);
 
   /**
    * Read the native vibe state from the live process.
@@ -1700,18 +1788,49 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
    */
   const refreshVibe = useCallback(async (): Promise<void> => {
     const target = conversationIdRef.current;
-    const read = await api.getVibe(target);
+    // A missing method is a real configuration error, but it must never surface as
+    // an unhandled rejection from a frame handler (this runs on every welcome, and
+    // a bare `await` on a missing method throws asynchronously). Guarded and
+    // reported like any other read failure.
+    const read = typeof api.getVibe === "function"
+      ? await api.getVibe(target).catch(() => null)
+      : null;
+    if (read === null) {
+      if (conversationIdRef.current === target) {
+        setVibeWorkerIdsFromServer([]);
+        setVibeState((previous) => previous ?? { available: false, reason: "The vibe control is unavailable in this build.", modes: null, tools: null, model: null, thinkingLevel: null, workerIds: [] });
+      }
+      return;
+    }
     if (conversationIdRef.current !== target) return;
-    if (read.ok) { setVibeState(read.data); setVibeError(null); return; }
-    setVibeState({ available: false, reason: read.error?.message ?? "The control bridge could not be reached.", modes: null, tools: null, model: null, thinkingLevel: null });
+    if (read.ok) {
+      setVibeState(read.data);
+      // The Kill gate's evidence, straight from the server's journal read. An
+      // empty list is the honest blank: no agent is treated as a worker.
+      setVibeWorkerIdsFromServer(read.data.workerIds);
+      setVibeError(null);
+      return;
+    }
+    // A transport failure is reported, and the worker list degrades to empty with
+    // it — no Kill control survives a read we could not make.
+    setVibeWorkerIdsFromServer([]);
+    setVibeState({ available: false, reason: read.error?.message ?? "The control bridge could not be reached.", modes: null, tools: null, model: null, thinkingLevel: null, workerIds: [] });
   }, []);
 
   // Read once when the panel opens, and only then: this is a control surface, not
   // a polled readout, so it costs nothing while the user is reading the chat.
   useEffect(() => {
     if (!showVibe) return;
+    // An uncontrollable conversation has no bridge to ask. Saying so locally is
+    // both faster and quieter than a request whose only possible answer is a
+    // refusal — and the panel renders this as unknown-with-reason, not as "off".
+    if (!canControlNativeModes) {
+      setVibeState({ available: false, reason: "This conversation has no app-managed OMP session, so it has no control bridge.", modes: null, tools: null, model: null, thinkingLevel: null, workerIds: [] });
+      setVibeWorkerIdsFromServer([]);
+      return;
+    }
     void refreshVibe();
-  }, [showVibe, refreshVibe]);
+  }, [showVibe, refreshVibe, canControlNativeModes]);
 
   /**
    * Ask for a native mode transition and adopt OMP's own verdict.
@@ -1738,11 +1857,33 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
       setVibeBusy(false);
       if (!result.ok) { setVibeError(result.error?.message ?? "The control bridge did not answer."); return; }
       const verdict: NativeModeResult = result.data;
-      if (verdict.state !== null) setVibeState({ available: true, reason: null, modes: verdict.state, tools: vibeState?.tools ?? null, model: vibeState?.model ?? null, thinkingLevel: vibeState?.thinkingLevel ?? null });
+      // The worker list comes from the server's journal read, so a transition reuses
+      // what is already held rather than inventing ids from the roster.
+      if (verdict.state !== null) setVibeState({ available: true, reason: null, modes: verdict.state, tools: vibeState?.tools ?? null, model: vibeState?.model ?? null, thinkingLevel: vibeState?.thinkingLevel ?? null, workerIds: vibeState?.workerIds ?? [] });
       if (!verdict.ok) { setVibeError(vibeVerdictLabel(verdict)); return; }
       void refreshVibe();
       // Only now — the mode is on, so the directive is a real director prompt.
-      if (directive !== undefined && directive !== "") sendPromptRef.current(directive, true);
+      //
+      // B03: the mode transition and the prompt delivery are two separate
+      // operations, and `sendPrompt` refuses silently when the link is not
+      // idle/live (or when the socket is gone). Treating its return as success is
+      // how a directive could disappear while the UI said "entered". So the
+      // outcome is checked and reported, and the text is handed back to the
+      // composer on failure rather than dropped.
+      if (directive !== undefined && directive !== "") {
+        const delivered = sendPromptRef.current(directive, true);
+        if (delivered !== true) {
+          // B03: the mode changed but the prompt did not go out. The text is
+          // recorded in the recovery list — the app's existing home for a prompt
+          // the host never acknowledged — so it is visible, copyable and one tap
+          // from a resend, rather than silently lost or silently resent.
+          setVibeError("Vibe mode is on, but the first directive was not sent — the link was not accepting prompts. It is kept below to resend.");
+          setRefusedRecoveries([
+            ...refusedRecoveriesRef.current,
+            { id: Date.now(), text: directive, unconfirmed: true },
+          ]);
+        }
+      }
     });
   };
 
@@ -1760,6 +1901,8 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
 
   // Re-pointed every render so the vibe path always calls the current closure.
   sendPromptRef.current = sendPrompt;
+  refreshVibeRef.current = refreshVibe;
+  canControlNativeModesRef.current = canControlNativeModes;
 
   const handleCloseSubagents = () => {
     handleWatchTranscript(null);
@@ -1767,7 +1910,7 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     transcriptRequestsRef.current.clear();
     transcriptRef.current = clearTranscriptRequests(transcriptRef.current);
     setTranscript(transcriptRef.current);
-    setShowSubagents(false);
+    setAgentNav({ open: false, selectedId: null });
   };
 
   return (
@@ -1805,15 +1948,22 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
                   replace the rows these states used to occupy, and an advisor with
                   a recorded blocker is the only case that gets a loud colour —
                   everything else stays quiet until tapped. */}
+              {/* B09: this chip reports **recorded notes**, nothing about the
+                  advisor's runtime. It used to paint `⛔` from historical blockers,
+                  which reads as "the advisor is alarming right now" — a claim this
+                  data cannot support, because nothing on this transport reports the
+                  advisor's enable state. So the label counts notes (`3`), the tone
+                  marks a blocker as *recorded* (a triangle, not an alarm), and the
+                  accessible name says exactly that. */}
               {advisorSummary.notes.length > 0 && (
                 <button
                   type="button"
-                  className={`mode-chip${advisorSummary.notes.some((note) => note.severity === "blocker") ? " mode-chip--alert" : ""}`}
-                  aria-label={`Advisor: ${advisorSummary.notes.length} note${advisorSummary.notes.length === 1 ? "" : "s"} recorded. Open the advisor panel.`}
-                  title={`Advisor notes: ${advisorSummary.notes.length}`}
+                  className={`mode-chip${advisorSummary.hasBlocker ? " mode-chip--alert" : ""}`}
+                  aria-label={`Advisor: ${advisorSummary.notes.length} recorded note${advisorSummary.notes.length === 1 ? "" : "s"}${advisorSummary.hasBlocker ? ", including a blocker" : ""}. Open the advisor panel.`}
+                  title={`Recorded advisor notes: ${advisorSummary.notes.length}`}
                   onClick={() => setShowAdvisor(true)}
                 >
-                  Adv{advisorSummary.notes.some((note) => note.severity === "blocker") ? " ⛔" : " ●"}
+                  Adv {advisorSummary.notes.length}{advisorSummary.hasBlocker ? " ⚠" : ""}
                 </button>
               )}
               {/* Rendered only when the mode is known ON, or when the bridge could
@@ -1823,10 +1973,13 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
                 <button
                   type="button"
                   className="mode-chip mode-chip--on"
-                  aria-label={`Vibe mode is on${agents.length > 0 ? `, ${agents.length} worker${agents.length === 1 ? "" : "s"}` : ""}. Open the vibe panel.`}
+                  // B11: counts **verified workers**, not the whole agent roster.
+                  // The old label called every agent a worker, which is how a
+                  // single subagent came to read as "1 worker".
+                  aria-label={`Vibe mode is on${workerCounts.workers > 0 ? `, ${workerCounts.workers} verified worker${workerCounts.workers === 1 ? "" : "s"}` : ""}. Open the vibe panel.`}
                   onClick={() => setShowVibe(true)}
                 >
-                  Vibe ●{agents.length > 0 ? ` ${agents.length}` : ""}
+                  Vibe ●{workerCounts.workers > 0 ? ` ${workerCounts.workers}` : ""}
                 </button>
               )}
           </div>
@@ -1882,7 +2035,7 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
                 Vibe mode
               </button>
               {agents.length > 0 && (
-                <button type="button" aria-label={`Agents (${agents.length})`} onClick={() => { setShowMenu(false); setShowSubagents(true); }}>
+                <button type="button" aria-label={`Agents (${agents.length})`} onClick={() => { setShowMenu(false); setAgentNav({ open: true, selectedId: null }); }}>
                   Agents ({agents.length})
                 </button>
               )}
@@ -2374,18 +2527,47 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
       </form>
       )}
 
-      {/* Subagent Panel Modal */}
-      {showSubagents && (
-        <SubagentPanel
-          agents={agents}
-          onFetchTranscript={handleFetchTranscript}
-          onWatchAgent={handleWatchTranscript}
-          transcripts={transcripts}
-          transcriptErrors={transcriptErrors}
-          loadingAgentIds={loadingAgentIds}
-          onClose={handleCloseSubagents}
-        />
-      )}
+      {/* Agents Center — a full-screen view, not a modal stacked over the chat
+          (Phase 3.2). Level 2 lists agents; level 3 shows the selected one. The
+          conversation keeps its state underneath, so returning is instant and the
+          draft and scroll position survive. */}
+      {agentNav.open && (() => {
+        const selected = agentNav.selectedId === null ? null : agentVibes.find((view) => view.id === agentNav.selectedId) ?? null;
+        // An agent that left the roster while its detail was open: say so rather
+        // than silently dropping back to the list, which would look like a bug.
+        const vanished = agentNav.selectedId !== null && selected === null;
+        if (vanished) {
+          return (
+            <div className="agents-screen" role="region" aria-label="Agent detail unavailable">
+              <header className="agents-header">
+                <button type="button" className="ghost" onClick={() => setAgentNav({ open: true, selectedId: null })}>← Agents</button>
+                <h3>Agent unavailable</h3>
+              </header>
+              <p className="agents-empty">This agent is no longer in the host's roster, so its detail cannot be shown.</p>
+            </div>
+          );
+        }
+        return selected === null ? (
+          <AgentsCenter
+            views={agentVibes}
+            activity={transcript.agentActivity}
+            onSelect={(id) => setAgentNav({ open: true, selectedId: id })}
+            onBack={handleCloseSubagents}
+          />
+        ) : (
+          <AgentDetail
+            view={selected}
+            activity={transcript.agentActivity[selected.id]}
+            transcript={transcripts[selected.id]}
+            transcriptError={transcriptErrors[selected.id]}
+            loading={loadingAgentIds.includes(selected.id)}
+            onFetchTranscript={handleFetchTranscript}
+            onWatchAgent={handleWatchTranscript}
+            onBack={() => setAgentNav({ open: true, selectedId: null })}
+            onKillWorker={killWorker}
+          />
+        );
+      })()}
       {/* Activity Timeline Modal */}
       {showActivity && (
         <ActivityPanel
@@ -2410,11 +2592,12 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
           busy={vibeBusy}
           error={vibeError}
           readOnly={transcript.readOnly || linkAccess === "view" || !canManageConversation}
-          workers={agents}
+          // B01: the panel receives the classified views, never the raw roster.
+          workers={agentVibes}
           onEnter={(directive) => runVibeAction("enter", directive)}
           onExit={() => runVibeAction("exit")}
           onKillWorker={killWorker}
-          onOpenWorkers={() => { setShowVibe(false); setShowSubagents(true); }}
+          onOpenWorkers={() => { setShowVibe(false); setAgentNav({ open: true, selectedId: null }); }}
           onClose={() => setShowVibe(false)}
         />
       )}

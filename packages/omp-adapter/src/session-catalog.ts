@@ -6,7 +6,7 @@ import path from "node:path";
 import { resolveOmpDirs } from "./omp-dirs.js";
 import type { NativeSessionSummary } from "@caw/contracts";
 import { DefaultSessionLeaseProbe } from "./session-lease.js";
-import type { NativeSessionCatalog, NativeHandoffCompaction, NativeSessionHeader, NativeSessionHistory, SessionLeaseProbe } from "./types.js";
+import type { NativeSessionCatalog, NativeHandoffCompaction, NativeSessionHeader, NativeSessionHistory, NativeVibeWorkers, SessionLeaseProbe } from "./types.js";
 
 export const SESSION_HEADER_PREFIX_BYTES = 64 * 1024;
 export const SESSION_HISTORY_MAX_BYTES = 2 * 1024 * 1024;
@@ -25,6 +25,16 @@ export const SESSION_HISTORY_MAX_ENTRIES = 500;
  * head, if a miss is ever observed on a journal larger than this.
  */
 export const HANDOFF_EVIDENCE_MAX_BYTES = 1024 * 1024;
+
+/**
+ * Journal custom-entry type for Vibe worker lifecycle.
+ *
+ * Mirrors upstream `vibe/lifecycle.ts:14-16`. It is duplicated as a literal rather
+ * than imported because this package must not depend on the OMP source tree; the
+ * string is a wire contract of the journal, and a rename upstream would surface as
+ * "no workers proven" (read-only UI), never as a wrong kill target.
+ */
+export const VIBE_LIFECYCLE_TYPE = "vibe-session-lifecycle";
 
 export interface SessionCatalogOptions {
   sessionsRoot?: string;
@@ -488,6 +498,108 @@ export class DefaultNativeSessionCatalog implements NativeSessionCatalog {
       await handle.close().catch(() => {});
     }
   }
+
+  /**
+   * Worker ids this session's director actually spawned, read from the journal.
+   *
+   * Why this lives beside `readHandoffCompaction` and copies its safety shape:
+   *  - the session id is validated and the journal's own header must corroborate
+   *    it, because a file name is not identity;
+   *  - the file is opened `O_NOFOLLOW` and must be a regular file;
+   *  - only a bounded **tail** is read, and a torn first line is dropped, so a
+   *    partial JSON line can never be read as evidence;
+   *  - every failure returns an empty list. "I could not read it" therefore
+   *    degrades the UI to read-only, never to "everything is a worker".
+   */
+  async readVibeWorkers(sessionId: string): Promise<NativeVibeWorkers> {
+    const empty: NativeVibeWorkers = { ids: [], timestamp: null };
+    if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u.test(sessionId)) return empty;
+    const candidate = await this.findBySessionId(sessionId);
+    if (!candidate) return empty;
+    let header: NativeSessionHeader | null;
+    try {
+      header = await this.readHeader(candidate);
+    } catch {
+      return empty;
+    }
+    if (!header || header.sessionId !== sessionId) return empty;
+    let handle;
+    try {
+      handle = await open(candidate, constants.O_RDONLY | constants.O_NOFOLLOW);
+    } catch {
+      return empty;
+    }
+    try {
+      const metadata = await handle.stat();
+      if (!metadata.isFile()) return empty;
+      const windowBytes = 4 * 1024 * 1024;
+      const start = Math.max(0, metadata.size - windowBytes);
+      const window = Buffer.alloc(metadata.size - start);
+      const read = await handle.read(window, 0, window.length, start);
+      const text = window.toString("utf8", 0, read.bytesRead);
+      const lines = text.split("\n");
+      if (start > 0) lines.shift();
+
+      /**
+       * Replay in journal order, exactly as OMP does for its own in-memory
+       * tombstone check (`vibe/runtime.ts:423-440`):
+       *
+       *   spawn             → the worker exists
+       *   tombstone         → terminal, with the reason
+       *   tombstone-revoked → clears a terminal reason **only when it was
+       *                       `mode-exit`**; a kill is not revivable
+       *
+       * Only a worker whose replayed state is non-terminal is a worker the UI may
+       * offer to kill. Without this, a worker killed an hour ago would still carry
+       * a Kill button — the inverse of the false claim this whole path exists to
+       * remove, and just as wrong.
+       */
+      const state = new Map<string, { terminal: boolean; reason: string | null }>();
+      let newest: string | null = null;
+      for (const line of lines) {
+        if (!line.includes(VIBE_LIFECYCLE_TYPE)) continue;
+        let entry: Record<string, unknown>;
+        try {
+          const parsed: unknown = JSON.parse(line);
+          if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) continue;
+          entry = parsed as Record<string, unknown>;
+        } catch {
+          continue;
+        }
+        if (entry.type !== "custom" || entry.customType !== VIBE_LIFECYCLE_TYPE) continue;
+        const data = entry.data;
+        if (!data || typeof data !== "object" || Array.isArray(data)) continue;
+        const record = data as Record<string, unknown>;
+        // A record without the owner/parent pair cannot be attributed to this
+        // director, so it is not proof of ownership.
+        if (typeof record.ownerId !== "string" || typeof record.parentSessionId !== "string") continue;
+        if (typeof record.id !== "string" || record.id === "") continue;
+        const action = record.action;
+        if (action === "spawn") state.set(record.id, { terminal: false, reason: null });
+        else if (action === "tombstone") {
+          const previous = state.get(record.id);
+          if (previous) previous.terminal = true;
+          if (previous) previous.reason = typeof record.reason === "string" ? record.reason : "unknown";
+        } else if (action === "tombstone-revoked") {
+          const previous = state.get(record.id);
+          // Only a mode-exit tombstone is revocable; an explicit kill is final.
+          if (previous && previous.reason === "mode-exit") {
+            previous.terminal = false;
+            previous.reason = null;
+          }
+        }
+        if (typeof entry.timestamp === "string" && (newest === null || entry.timestamp > newest)) newest = entry.timestamp;
+      }
+      const ids: string[] = [];
+      for (const [id, value] of state) if (!value.terminal) ids.push(id);
+      return { ids, timestamp: newest };
+    } catch {
+      return empty;
+    } finally {
+      await handle.close().catch(() => {});
+    }
+  }
+
 
   async readHistory(sessionId: string, expectedCwd: string, options: number | { before?: string } = {}): Promise<NativeSessionHistory> {
     const limit = typeof options === "number" ? options : SESSION_HISTORY_MAX_ENTRIES;

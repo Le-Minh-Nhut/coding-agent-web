@@ -485,6 +485,17 @@ export interface VibeStateResponse {
   tools: string[] | null;
   model: string | null;
   thinkingLevel: string | null;
+  /**
+   * Worker ids proven from the session journal, for the Agents Center's
+   * kill-safety gate.
+   *
+   * Empty means **no worker was proven** — the UI then offers no worker control
+   * at all. It never means "every agent is a worker": the browser cannot see
+   * `vibe-session-lifecycle` entries over Collab (the replication allowlist
+   * excludes `custom` entries), so this server-side read is the only evidence
+   * that exists, and its absence must fail closed.
+   */
+  workerIds: string[];
 }
 
 export interface ConversationEvent<T = unknown> {

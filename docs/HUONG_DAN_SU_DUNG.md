@@ -27,6 +27,7 @@ Tài liệu dành cho người mới dùng Coding Agent Web (CAW) trên Ubuntu c
 21. [Bàn phím và cuộn trên điện thoại](#21-bàn-phím-và-cuộn-trên-điện-thoại)
 22. [Advisor — mô hình review thứ hai](#22-advisor--mô-hình-review-thứ-hai)
 23. [Vibe mode — director và worker](#23-vibe-mode--director-và-worker)
+24. [Giao diện mới: chat gọn, Agents Center, thu gọn prompt dài](#24-giao-diện-mới-chat-gọn-agents-center-thu-gọn-prompt-dài)
 
 ## 1. Giới thiệu
 
@@ -727,3 +728,134 @@ Nút **Kill** chỉ xuất hiện cho worker **đang thật sự chạy** — hu
 
 - Phiên **được khởi chạy từ CAW sau khi cập nhật này** mới có bridge.
 - Phiên **đang chạy sẵn từ trước** thì **chưa** có bridge. Panel sẽ báo `Unknown` kèm lý do, và CAW nói rõ: cần **khởi động lại agent** để gắn bridge. CAW **không** giả vờ điều khiển được phiên đó.
+
+## 24. Giao diện mới: chat gọn, Agents Center, thu gọn prompt dài
+
+Chương này mô tả **giao diện đã được thiết kế lại** (vòng 53): cuộc trò chuyện là trung tâm, còn chi tiết về agent, task dài và chẩn đoán nằm trong các màn hình riêng.
+
+### 24.1 Chat chính chỉ giữ những gì cần đọc
+
+Thứ tự ưu tiên trong transcript:
+
+1. **Prompt của bạn** và **câu trả lời của agent**.
+2. **Tiến trình đang chạy** (đang đọc/sửa tệp, đang chạy lệnh) — dạng dòng gọn.
+3. **Yêu cầu phê duyệt** và **lỗi quan trọng** — luôn hiện, không bị giấu.
+4. Ô nhập.
+
+Những thứ sau **không** còn chiếm một thẻ lớn giữa cuộc trò chuyện:
+
+| Trước đây | Bây giờ |
+| --- | --- |
+| Mô tả task của subagent hiện nguyên văn thành **banner xanh khổng lồ**, có thể chiếm cả màn hình | Một dòng hoạt động gọn; **task đầy đủ** nằm trong Agent Detail |
+| Mỗi sự kiện nội bộ (đổi model, đổi mức suy nghĩ, collab join) là một thẻ | Dòng gọn / nằm trong **Activity** |
+| Banner trạng thái lặp lại (`idle · idle`, "Connected — no turn in flight") | Một dòng trạng thái duy nhất trên thanh trên |
+
+**Không có thông tin nào bị xoá.** Task gốc, output tool, diff, lỗi — tất cả vẫn còn, chỉ được đặt ở nơi phù hợp và hiện ra khi bạn yêu cầu.
+
+### 24.2 Prompt dài tự động thu gọn
+
+Khi bạn dán một prompt dài (nhiều đoạn, nhiều trang), CAW **tự thu gọn** lại còn khoảng **4 dòng**:
+
+```
+You
+Build the CAW ↔ OMP control bridge.
+Implement native session modes and verify...
+Show more                         Copy
+```
+
+- Chạm **Show more** để xem **toàn bộ nội dung gốc**; khi mở, nút đổi thành **Show less** và có thêm **Copy**.
+- **Copy** luôn sao chép **nguyên văn bản gốc**, không phải phần đang hiển thị.
+- Prompt ngắn (≤ 4 dòng) **không** bị thu gọn — không có nút nào hiện ra.
+- Ngưỡng dựa trên **chiều cao thật đã render**, không phải số ký tự: một dòng dài 400 ký tự và một khối 8 dòng cùng độ dài được xử lý khác nhau.
+- Một chuỗi dài **không có dấu cách** (10.000 ký tự) **không** làm tràn ngang màn hình.
+- Nội dung gốc **không bị sửa**, không bị thay bằng bản tóm tắt, không mất định dạng Markdown hay code block.
+- Trạng thái mở/đóng thuộc về **từng tin nhắn** (theo id), nên hai prompt giống hệt nhau mở/đóng độc lập.
+- **Câu trả lời của agent không tự thu gọn** — đó là nội dung bạn cần đọc.
+
+### 24.3 Agents Center — hai cấp điều hướng
+
+Trước đây agent chỉ là một hộp thoại nhỏ xếp chồng lên chat. Nay có **hai màn hình riêng**:
+
+**Cấp 2 — Agents Center** (mở từ menu **⋯ → Agents (n)**, hoặc chip trên thanh trên): danh sách agent kèm bộ lọc **All / Running / Finished**.
+
+```
+Agents (3)
+All   Running   Finished
+● caw-deepseek
+  Building the OMP bridge...
+  Running · Editing extension.mjs       ›
+✓ frontend-auditor
+  UI review completed
+  Finished                              ›
+```
+
+Mỗi dòng chỉ hiện **tối đa 2 dòng** mô tả task (đủ để nhận ra việc), kèm tên, phân loại, trạng thái, tool hiện tại, lần hoạt động cuối.
+
+**Cấp 3 — Agent Detail** (chạm vào một agent): task **đầy đủ** (có nút mở rộng), transcript, trạng thái, và các thao tác an toàn.
+
+```
+‹ Agents               caw-deepseek
+Running · worker
+Task
+Build the OMP control bridge...
+[Show full task]
+Transcript
+...
+```
+
+**Điều hướng được giữ nguyên:** quay lại từ Detail về Center, rồi về chat; **bản nháp** trong ô nhập không mất; **vị trí cuộn** của chat được giữ; kết nối WebSocket **không** bị tạo lại. Nếu một agent rời khỏi danh sách khi bạn đang xem chi tiết, CAW nói rõ **"Agent unavailable"** thay vì im lặng quay về danh sách.
+
+### 24.4 Phân loại agent — và vì sao điều đó quan trọng
+
+| Phân loại | Nghĩa |
+| --- | --- |
+| `main` | Agent chính của phiên (director) |
+| `worker` | Worker của Vibe mode, **được chứng minh** bằng bản ghi trong journal |
+| `subagent` | Subagent thường (task tool, eval agent, …) |
+| `unknown` | Không đủ dữ liệu để phân loại |
+
+**CAW không đoán.** Một agent chỉ được coi là **worker** khi journal của phiên có bản ghi lifecycle tương ứng. Nếu không chứng minh được, nó là `subagent` và **không có** nút Kill. Đây là lý do nút **Kill** chỉ xuất hiện cho worker đã được chứng minh và đang chạy — **agent chính và subagent thường không bao giờ trở thành mục tiêu Kill**.
+
+### 24.5 Bốn thao tác "dừng" khác nhau
+
+| Thao tác | Dừng cái gì |
+| --- | --- |
+| **Stop generating** | Chỉ lượt đang chạy của phiên chính |
+| **Kill worker** (trong Agent Detail) | Một worker đã được chứng minh; transcript của nó vẫn giữ |
+| **Exit Vibe** | Cả Vibe mode; huỷ các lượt worker đang chạy |
+| **Stop OMP session** (menu ⋯) | Cả tiến trình OMP do CAW quản lý |
+
+### 24.6 Advisor: ghi chú và chip
+
+Ghi chú advisor hiện dưới dạng **dòng gọn** trong chat (`⚠ Advisor · Concern ›`), mở ra xem đầy đủ; mức **blocker** hiện **màu đỏ** và **nội dung được in ngay cả khi chưa mở**.
+
+Chip trên thanh trên hiện **số ghi chú đã ghi nhận** (ví dụ `Adv 3 ⚠`), **không** phải trạng thái runtime:
+
+- Chip cho biết **đã từng có ghi chú**, không có nghĩa advisor **đang bật** (transport hiện tại không báo được điều đó).
+- Nhãn đọc cho screen reader nói rõ "recorded note".
+- Bật/tắt advisor vẫn phải làm trong **terminal** của phiên (xem [chương 22](#22-advisor--mô-hình-review-thứ-hai)).
+
+### 24.7 Agent Center không lẫn phiên khác
+
+Mỗi agent được định danh bằng **id do OMP cấp**, không phải vị trí trong danh sách. Vì vậy:
+
+- Đổi danh sách (agent xuất hiện/biến mất) không làm màn hình chi tiết trỏ sang agent khác.
+- Thao tác nguy hiểm (Kill) chỉ hiện khi **danh tính và quyền sở hữu** đã được chứng minh.
+- Nếu không chứng minh được, bạn vẫn **xem được** (read-only) — CAW không đoán.
+
+### 24.8 Nguồn dữ liệu và giới hạn
+
+- Tiến trình agent **trực tiếp** chỉ đến qua bus của Collab; OMP **không** lưu nó vào journal, nên sau khi **kết nối lại**, phần mô tả task trực tiếp có thể **không còn**. CAW nói rõ điều này (`live-only`) thay vì giả vờ.
+- Task đầy đủ **chỉ** có nếu host đã gửi; nếu không, Agent Detail ghi **"The host reported no task for this agent."**
+- **Model/tier** của agent hiện `not reported` khi OMP không cung cấp — CAW **không bịa**.
+- Ghi chú advisor **của phiên đang xem** mới được hiển thị: xem lịch sử đã lưu thì panel đọc đúng lịch sử đó, không lẫn với phiên đang chạy.
+
+### 24.9 Xử lý sự cố nhanh
+
+| Hiện tượng | Nghĩa / cách xử lý |
+| --- | --- |
+| Prompt dài bị thu gọn | Bình thường — chạm **Show more** để xem đủ, **Copy** để lấy nguyên văn |
+| Agent Detail ghi "transcript unavailable" | Host không có file transcript cho agent đó, hoặc đọc lỗi — không phải agent "không có lịch sử" |
+| Trạng thái Vibe là **Unknown** | Không hỏi được bridge (phiên chưa có bridge, hoặc listener dừng). **Không** phải "đang tắt" |
+| Không thấy nút Kill cho một agent đang chạy | Agent đó không được chứng minh là worker Vibe — đúng theo thiết kế |
+| Mô tả task trực tiếp biến mất sau khi kết nối lại | Dữ liệu live-only; xem lại Agent Detail hoặc lịch sử phiên |

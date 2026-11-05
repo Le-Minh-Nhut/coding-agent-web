@@ -92,10 +92,43 @@ export interface TranscriptState {
   readOnly: boolean;
   error: string | null;
   notice: { level: "info" | "warning" | "error"; message: string } | null;
+  /**
+   * Live agent activity, keyed by agent id — the structured replacement for the
+   * old unbounded `notice` string.
+   *
+   * A `task:subagent:progress` frame used to be concatenated into one notice
+   * (`${agent}: ${task}${progress}${tool}`) whose `task` is the **full** brief, so
+   * a multi-page task became a multi-page banner. Here the fields stay separate
+   * and the task body is kept whole only for Agent Detail; the compact row uses a
+   * bounded preview. Keyed by the host's agent id, so two agents cannot overwrite
+   * each other and a reconnect cannot multiply rows.
+   */
+  agentActivity: Record<string, AgentActivity>;
   uiRequests: { current: CollabUiRequest | null; queue: CollabUiRequest[] };
   lastUiRequestSettlement: number | null;
   transcriptRequests: Record<string, TranscriptRequest>;
   transcripts: Record<string, TranscriptReply>;
+}
+
+/**
+ * One agent's most recent live activity.
+ *
+ * `task` is the full text as the host sent it and is never truncated here — the
+ * *view* bounds its preview. Losing it would lose the only copy on a live-only
+ * channel.
+ */
+export interface AgentActivity {
+  agentId: string;
+  agent: string;
+  /** Full task body, verbatim. */
+  task: string;
+  lifecycle: string | null;
+  currentTool: string | null;
+  status: string | null;
+  level: "info" | "warning" | "error";
+  /** True when this came from a bus frame, which OMP does not persist. */
+  liveOnly: boolean;
+  updatedAt: number;
 }
 export function createTranscriptState(): TranscriptState {
   return {
@@ -110,6 +143,7 @@ export function createTranscriptState(): TranscriptState {
     readOnly: false,
     error: null,
     notice: null,
+    agentActivity: {},
     uiRequests: { current: null, queue: [] },
     lastUiRequestSettlement: null,
     transcriptRequests: {},
@@ -619,6 +653,7 @@ export function reduceHostFrame(state: TranscriptState, frame: HostFrame): Trans
         readOnly: frame.readOnly ?? false,
         error: null,
         notice: null,
+        agentActivity: {},
         turnStatus: frame.state.isStreaming ? "running" as const : "idle" as const,
         streamingMessage: null,
         uiRequests: { current: null, queue: [] },
@@ -661,22 +696,54 @@ export function reduceHostFrame(state: TranscriptState, frame: HostFrame): Trans
     case "bye":
       return { ...state, connectionStatus: "disconnected", sessionEnded: true, error: frame.reason };
     case "bus": {
-      const data = frame.data && typeof frame.data === "object"
-        ? frame.data as { agent?: unknown; task?: unknown; status?: unknown; description?: unknown; progress?: { status?: unknown; currentTool?: unknown } }
-        : {};
-      const status = frame.channel === "task:subagent:progress" ? data.progress?.status : data.status;
+      // Field names are the host's, verified against
+      // `packages/tui/src/overlays/session-observer-registry.ts:10-40`:
+      //   progress  → { index, agent, task, assignment?, progress: AgentProgress }
+      //               and the agent id lives at `progress.id` (`wire/src/index.ts:254-257`)
+      //   lifecycle → { id, agent, description?, status, ... } with the id top-level
+      const record = frame.data && typeof frame.data === "object" ? (frame.data as Record<string, unknown>) : {};
+      const progress = record.progress && typeof record.progress === "object" ? (record.progress as Record<string, unknown>) : null;
+      const isProgress = frame.channel === "task:subagent:progress";
+      const status = isProgress
+        ? (typeof progress?.status === "string" ? progress.status : null)
+        : (typeof record.status === "string" ? record.status : null);
       const level = status === "failed" ? "error" : status === "aborted" ? "warning" : "info";
-      if (frame.channel === "task:subagent:progress") {
-        const agent = typeof data.agent === "string" ? data.agent : "Subagent";
-        const task = typeof data.task === "string" ? data.task : "task progress";
-        const progress = typeof status === "string" ? ` (${status})` : "";
-        const tool = typeof data.progress?.currentTool === "string" ? ` · ${data.progress.currentTool}` : "";
-        return { ...state, notice: { level, message: `${agent}: ${task}${progress}${tool}` } };
+      const agent = typeof record.agent === "string" ? record.agent : "Subagent";
+      const agentId = isProgress
+        ? (typeof progress?.id === "string" && progress.id !== "" ? progress.id : null)
+        : (typeof record.id === "string" && record.id !== "" ? record.id : null);
+      if (agentId === null) {
+        // Without the host's id there is nothing to attach activity to, and keying
+        // on the display name would merge two agents that share one. The generic
+        // notice stays bounded and carries no task body, so it cannot become the
+        // giant banner this branch used to produce.
+        return { ...state, notice: { level, message: `${agent} ${status ?? "updated"}` } };
       }
-      const agent = typeof data.agent === "string" ? data.agent : "Subagent";
-      const description = typeof data.description === "string" ? `: ${data.description}` : "";
-      const lifecycle = typeof status === "string" ? status : "updated";
-      return { ...state, notice: { level, message: `${agent} ${lifecycle}${description}` } };
+      const task = isProgress
+        ? (typeof record.task === "string" ? record.task : "")
+        : (typeof record.description === "string" ? record.description : "");
+      const currentTool = typeof progress?.currentTool === "string" ? progress.currentTool : null;
+      const previous = state.agentActivity[agentId];
+      return {
+        ...state,
+        agentActivity: {
+          ...state.agentActivity,
+          [agentId]: {
+            agentId,
+            agent,
+            // The fullest task text seen for this agent is kept: a later frame may
+            // carry only a tool update, and this is the only copy of a live-only
+            // channel. Bounding happens in the view, never here.
+            task: task !== "" ? task : previous?.task ?? "",
+            lifecycle: isProgress ? previous?.lifecycle ?? null : status,
+            currentTool: currentTool ?? previous?.currentTool ?? null,
+            status,
+            level,
+            liveOnly: true,
+            updatedAt: Date.now(),
+          },
+        },
+      };
     }
   }
 }

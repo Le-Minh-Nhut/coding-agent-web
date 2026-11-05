@@ -34,6 +34,8 @@ export interface BridgeRouteDependencies {
   tmuxServerIdentity?: () => Promise<string | null>;
   /** Directory holding per-conversation bridge configs (the overlay dir). Unset → no bridge. */
   bridgeConfigDir?: string;
+  /** Worker ids proven from the conversation's journal, for the Kill gate. */
+  readVibeWorkers?: (sessionId: string) => Promise<{ ids: string[]; timestamp: string | null }>;
   /** The app's session guard; every route here is owner-only, like the conversation routes. */
   preHandler?: (request: HttpRequest, reply: FastifyReply) => Promise<unknown>;
 }
@@ -107,6 +109,33 @@ async function precondition(deps: BridgeRouteDependencies, conversation: Convers
   return { ok: true, conversation };
 }
 
+
+/**
+ * Does the bridge answer belong to the conversation that asked?
+ *
+ * The bridge is bound to a process; the process can switch sessions (`/resume`,
+ * session switch), and a mode change aimed at conversation A would then mutate
+ * whatever session B the TUI has moved on to. Process identity cannot answer
+ * that question, so the bridge reports the session id it is attached to and this
+ * is the comparison.
+ *
+ * Fails closed on every uncertain case: an unreadable id (`null`), or a
+ * conversation that has no recorded native session, is a refusal — "I could not
+ * check" is not "it matches".
+ */
+function sessionMismatch(conversation: { nativeSessionId: string | null }, bridgeSessionId: string | null): string | null {
+  if (conversation.nativeSessionId === null || conversation.nativeSessionId === "") {
+    return "This conversation has no recorded native session, so a bridge answer cannot be attributed to it.";
+  }
+  if (bridgeSessionId === null) {
+    return "The bridge did not report which native session it serves, so it cannot be attributed to this conversation.";
+  }
+  if (bridgeSessionId !== conversation.nativeSessionId) {
+    return "The bridge is serving a different native session than this conversation; the terminal may have switched sessions.";
+  }
+  return null;
+}
+
 type ClientResult = { client: BridgeClient } | { reason: string };
 
 async function clientFor(deps: BridgeRouteDependencies, conversationId: string): Promise<ClientResult> {
@@ -123,6 +152,27 @@ async function clientFor(deps: BridgeRouteDependencies, conversationId: string):
   return { client: new BridgeClient({ port: config.port, token: config.token }) };
 }
 
+
+/**
+ * Worker ids for a conversation, or an empty list.
+ *
+ * Reads the journal directly rather than the wire: `vibe-session-lifecycle` is a
+ * `custom` entry, and Collab's replication allowlist excludes those, so this
+ * browser-facing route is the only place the evidence can enter the UI.
+ *
+ * Every failure path returns `[]`. An empty list disables the worker controls, so
+ * a reader that is missing, slow, or unreadable degrades the UI to read-only —
+ * never to "everything is a worker".
+ */
+async function workerIdsFor(deps: BridgeRouteDependencies, nativeSessionId: string | null): Promise<string[]> {
+  if (!deps.readVibeWorkers || nativeSessionId === null || nativeSessionId === "") return [];
+  try {
+    return (await deps.readVibeWorkers(nativeSessionId)).ids;
+  } catch {
+    return [];
+  }
+}
+
 export function registerBridgeRoutes(app: FastifyInstance<HttpServer>, deps: BridgeRouteDependencies): void {
   const inFlight = new Set<string>();
   const options = deps.preHandler ? { preHandler: deps.preHandler } : {};
@@ -137,11 +187,18 @@ export function registerBridgeRoutes(app: FastifyInstance<HttpServer>, deps: Bri
       // HTTP 200 with `available: false`: "I could not ask" is an answer the panel
       // renders, and an error status would push the caller into inventing copy for
       // a state the server already knows.
-      return ok<VibeStateResponse>({ available: false, reason: resolved.reason, modes: null, tools: null, model: null, thinkingLevel: null });
+      return ok<VibeStateResponse>({ available: false, reason: resolved.reason, modes: null, tools: null, model: null, thinkingLevel: null, workerIds: [] });
     }
     const state = await resolved.client.readState();
     if (!state.ok) {
-      return ok<VibeStateResponse>({ available: false, reason: `The bridge did not answer (${state.reason}).`, modes: null, tools: null, model: null, thinkingLevel: null });
+      return ok<VibeStateResponse>({ available: false, reason: `The bridge did not answer (${state.reason}).`, modes: null, tools: null, model: null, thinkingLevel: null, workerIds: [] });
+    }
+    // A bridge that answers for a session this conversation does not own is not a
+    // state we may show: rendering it would attribute another session's mode to
+    // this row. Reported as unavailable with the reason, never as a state.
+    const mismatch = sessionMismatch(verdict.conversation, state.state.sessionId);
+    if (mismatch !== null) {
+      return ok<VibeStateResponse>({ available: false, reason: mismatch, modes: null, tools: null, model: null, thinkingLevel: null, workerIds: [] });
     }
     return ok<VibeStateResponse>({
       available: true,
@@ -150,6 +207,7 @@ export function registerBridgeRoutes(app: FastifyInstance<HttpServer>, deps: Bri
       tools: state.state.tools,
       model: state.state.model,
       thinkingLevel: state.state.thinkingLevel,
+      workerIds: await workerIdsFor(deps, verdict.conversation.nativeSessionId),
     });
   });
 
@@ -171,8 +229,32 @@ export function registerBridgeRoutes(app: FastifyInstance<HttpServer>, deps: Bri
     try {
       const resolved = await clientFor(deps, id);
       if ("reason" in resolved) return reply.code(503).send(fail("bridge_unavailable", resolved.reason));
+      // Verify identity BEFORE mutating anything: a mode change is a write, and a
+      // write must never be attributed to a session that may not be this one.
+      const identity = await resolved.client.readState();
+      if (!identity.ok) return reply.code(503).send(fail("bridge_unavailable", `The bridge did not answer (${identity.reason}).`));
+      const mismatch = sessionMismatch(verdict.conversation, identity.state.sessionId);
+      if (mismatch !== null) return reply.code(409).send(fail("conflict_owner", mismatch));
       const outcome = await resolved.client.setMode({ mode: "vibe", action: body.data.action });
-      if (!outcome.ok) return reply.code(503).send(fail("bridge_unavailable", `The bridge did not answer (${outcome.reason}).`));
+      if (!outcome.ok) {
+        // B06: a timeout is not evidence that the transition failed. The request
+        // may have reached OMP and still be running — a worker cancellation takes
+        // as long as it takes. So the state is re-read once before answering:
+        // if the mode reflects the requested change, that is the answer; if it
+        // does not, the honest report is that the outcome is unknown, not that it
+        // failed. Either way the caller is never told "no" on a guess.
+        const after = await resolved.client.readState();
+        if (after.ok) {
+          const wanted = body.data.action === "enter" ? "active" : "inactive";
+          if (after.state.modes?.vibe.status === wanted) {
+            return ok(normalizeResult({ ok: true, changed: true, state: after.state.modes }));
+          }
+        }
+        return reply.code(503).send(fail(
+          "bridge_unavailable",
+          `The bridge did not answer in time (${outcome.reason}), and the current mode does not yet show the change. The transition may still be running; re-read the state rather than assuming it failed.`,
+        ));
+      }
       // Verbatim: OMP's refusal is the answer, and the state it carries is what
       // makes it actionable. The route adds nothing and removes nothing.
       return ok(normalizeResult(outcome.result));

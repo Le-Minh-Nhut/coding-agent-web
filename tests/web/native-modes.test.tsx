@@ -20,6 +20,16 @@ import { advisorNotesOf, summarizeAdvisorNotes } from "../../apps/web/src/adviso
 import { AdvisorPanel } from "../../apps/web/src/components/AdvisorPanel.js";
 import { VibePanel } from "../../apps/web/src/components/VibePanel.js";
 import type { NativeModeState, VibeStateResponse } from "@caw/contracts";
+import type { AgentView } from "../../apps/web/src/agent-model.js";
+
+/** A classified agent view, which is what the panel receives (B01). */
+function agentView(over: Partial<AgentView> & { id: string }): AgentView {
+  return {
+    displayName: over.id, kind: "sub", status: "running", class: "worker", parentId: "main",
+    hasSessionFile: true, createdAt: 0, lastActivity: 0, canKillWorker: true, readOnlyReason: null,
+    ...over,
+  };
+}
 
 afterEach(cleanup);
 
@@ -147,20 +157,26 @@ describe("vibe panel", () => {
     expect(screen.getByText(/transcript is kept/)).toBeTruthy();
   });
 
-  it("offers Kill only for a worker that is actually running", () => {
+  it("offers Kill only for a proven worker that is actually running", () => {
     render(
       <VibePanel
         state={vibeState({ modes: activeModes })}
         busy={false} error={null} readOnly={false}
         workers={[
-          { id: "w1", displayName: "sonic", kind: "sub", status: "running", hasSessionFile: true, createdAt: 0, lastActivity: 0 },
-          { id: "w2", displayName: "task", kind: "sub", status: "idle", hasSessionFile: true, createdAt: 0, lastActivity: 0 },
+          agentView({ id: "w1" }),
+          agentView({ id: "w2", status: "idle" }),
+          // A running *main* agent: the regression this test exists for. It must
+          // never gain a Kill control, however busy it looks.
+          agentView({ id: "main", kind: "main", class: "main", canKillWorker: false, readOnlyReason: "This is the session's own agent." }),
+          agentView({ id: "plain", class: "subagent", canKillWorker: false, readOnlyReason: "No Vibe lifecycle record." }),
         ]}
         onEnter={() => {}} onExit={() => {}} onKillWorker={() => {}} onOpenWorkers={() => {}} onClose={() => {}}
       />,
     );
-    // Killing an idle worker would imply it stopped something. Only one button.
-    expect(screen.getAllByRole("button", { name: "Kill" })).toHaveLength(1);
+    // Two conditions, not one: killing an idle worker would imply it stopped
+    // something, and killing an unproven agent could stop the session itself.
+    const kills = screen.getAllByRole("button", { name: "Kill" });
+    expect(kills).toHaveLength(1);
   });
 
   it("passes the first directive into the single enter call", () => {

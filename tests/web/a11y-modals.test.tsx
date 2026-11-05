@@ -10,7 +10,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { ProjectsView, resetProjectMutationState } from "../../apps/web/src/components/ProjectsView.js";
 import { FolderBrowser } from "../../apps/web/src/components/FolderBrowser.js";
-import { SubagentPanel } from "../../apps/web/src/components/SubagentPanel.js";
+import { AgentsCenter } from "../../apps/web/src/components/AgentsCenter.js";
+import { agentViews } from "../../apps/web/src/agent-model.js";
 import { ActivityPanel } from "../../apps/web/src/components/ActivityPanel.js";
 import { api } from "../../apps/web/src/api.js";
 import { resetMutationQueues } from "../../apps/web/src/mutation-order.js";
@@ -158,26 +159,27 @@ describe("A11Y-01 the folder browser dialog", () => {
   });
 });
 
-describe("A11Y-01 the subagents dialog", () => {
-  it("is a named modal dialog that takes focus and closes on Escape", async () => {
-    const onClose = vi.fn();
+describe("A11Y-01 the Agents Center", () => {
+  // The agents experience is a full-screen in-app view now, not a modal stacked
+  // over the chat (Phase 3.2), so the modal-specific premises (role="dialog",
+  // aria-modal, Escape) no longer apply and asserting them would be testing a
+  // design that was deliberately removed. What must still hold is the *behaviour*
+  // the old test protected: the view is reachable by name, it has a working way
+  // back, and a filter is a real named group rather than anonymous chips.
+  it("is a named region with a working back control and a named filter group", async () => {
+    const onBack = vi.fn();
     await act(async () => {
-      render(
-        <SubagentPanel
-          agents={[]}
-          onFetchTranscript={() => {}}
-          onWatchAgent={() => {}}
-          transcripts={{}}
-          transcriptErrors={{}}
-          loadingAgentIds={[]}
-          onClose={onClose}
-        />,
-      );
+      render(<AgentsCenter views={agentViews([], new Set())} activity={{}} onSelect={() => {}} onBack={onBack} />);
     });
 
-    expectRealDialog(overlay(), /Subagents/);
-    fireEvent.keyDown(overlay(), { key: "Escape" });
-    expect(onClose).toHaveBeenCalledTimes(1);
+    // Reachable by an accessible name, not an anonymous div.
+    const region = screen.getByRole("region", { name: /Agents/i });
+    expect(region).toBeTruthy();
+    expect(screen.getByRole("group", { name: "Filter agents" })).toBeTruthy();
+
+    // A visible, labelled way back to the conversation.
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Back to session" })); });
+    expect(onBack).toHaveBeenCalledTimes(1);
   });
 });
 

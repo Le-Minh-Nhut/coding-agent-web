@@ -37,6 +37,16 @@ export interface AdvisorSummary {
   notes: AdvisorNote[];
   /** Distinct advisor names that produced notes, in first-seen order. */
   advisors: string[];
+  /**
+   * True when a recorded note is a blocker.
+   *
+   * Deliberately *not* called "active" or "current": these are notes OMP wrote
+   * into the transcript, which may be minutes or hours old. Nothing here knows
+   * whether the advisor is enabled or still running — that state is not on this
+   * transport at all — so this flag may only ever drive "a blocker was recorded",
+   * never "something is wrong right now".
+   */
+  hasBlocker: boolean;
 }
 
 function severityOf(raw: unknown): AdvisorSeverity {
@@ -85,5 +95,5 @@ export function summarizeAdvisorNotes(rows: readonly { customType?: string; deta
       if (note.advisor !== null && !advisors.includes(note.advisor)) advisors.push(note.advisor);
     }
   }
-  return { notes, advisors };
+  return { notes, advisors, hasBlocker: notes.some((note) => note.severity === "blocker") };
 }

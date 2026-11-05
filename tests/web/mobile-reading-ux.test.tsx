@@ -135,6 +135,9 @@ describe("mobile reading behavior", () => {
 
   afterEach(() => {
     cleanup();
+    // `restoreAllMocks` does not undo `useFakeTimers`, so a fake clock left by a
+    // polling test would leak into every test after it.
+    vi.useRealTimers();
     spy?.mockRestore();
     vi.restoreAllMocks();
     socket = null;
@@ -334,12 +337,16 @@ describe("mobile reading behavior", () => {
       socket?.onFrame?.({ t: "event", event: { type: "notice", level: "warning", message: "Rate limited" } });
     });
     expect(container.querySelector(".banner.warning[role='status']")?.textContent).toBe("Rate limited");
+    // Round 53: a bus failure is structured activity now, not a banner carrying
+    // the (unbounded) task body. The claims kept here are the ones that matter:
+    // the notification banner is untouched, the failure is not allowed to look
+    // like a connection problem, and the header still reports a live link.
     await act(async () => {
       socket?.onFrame?.({ t: "bus", channel: "task:subagent:progress", data: {
         index: 0, agent: "Scout", task: "inspect", progress: { id: "sub-1", status: "failed", currentTool: "bash" },
       } });
     });
-    expect(container.querySelector(".banner.error[role='alert']")?.textContent).toBe("Scout: inspect (failed) · bash");
+    expect(container.querySelector(".banner.warning[role='status']")?.textContent).toBe("Rate limited");
     // R51: there is no idle banner to fall back on any more — the header carries
     // the state — so the claim is the stronger one: a bus failure paints an
     // alert and nothing paints a false connection banner beside it.
@@ -436,14 +443,18 @@ describe("mobile reading behavior", () => {
     const request = sent.find((frame) => frame.t === "fetch-transcript");
     expect(request?.t).toBe("fetch-transcript");
     const reqId = request?.t === "fetch-transcript" ? request.reqId : -1;
-    fireEvent.click(getByRole("button", { name: "Close subagents" }));
+    fireEvent.click(getByRole("button", { name: "Back to Agents" }));
+    fireEvent.click(getByRole("button", { name: "Back to session" }));
     await act(async () => { socket?.onFrame?.({ t: "agents", agents: [agent] }); });
     // Reopen the panel from the menu, then prove the old request stays dropped.
     openHeaderMenu(getByRole);
     fireEvent.click(getByRole("button", { name: "Agents (1)" }));
     await act(async () => { socket?.onFrame?.({ t: "transcript", reqId, text: "late\n", newSize: 5 }); });
     expect(queryByText("late")).toBeNull();
-    expect(container.querySelector(".modal-overlay")).not.toBeNull();
+    // Round 53: the Center is a full-screen view, not a modal. After walking back
+    // to the session the view is unmounted, and the reopened list shows the row
+    // without the late bytes having been applied anywhere.
+    expect(container.querySelector(".agent-transcript")).toBeNull();
   });
 
   it("keeps prompt composition for managed read-only conversation but hides Stop", async () => {
@@ -454,23 +465,41 @@ describe("mobile reading behavior", () => {
     expect((getByRole("button", { name: "Send" }) as HTMLButtonElement).disabled).toBe(true);
     expect(container.querySelector('[aria-label="Stop generating"]')).toBeNull();
   });
-  it("refetches replacement transcript from byte zero after empty EOF shrink", async () => {
+  it("advances the transcript cursor from the last reply's size, and restarts at zero when the stream shrinks", async () => {
+    // The claim: the fetch cursor is the last known size, and an empty EOF that
+    // reports a *smaller* size restarts from zero rather than asking past the new
+    // end. Driven through the view's own polling effect — the mount, the selection
+    // and each reply are awaited on real timers, and the poll interval is advanced
+    // with the real clock's own wait, so nothing here depends on a mocked clock
+    // that the component's async mount would deadlock against.
     const { container, getByRole } = await mountConversation();
     const agent = { id: "a", displayName: "Agent A", kind: "sub" as const, status: "running" as const, hasSessionFile: true, createdAt: 0, lastActivity: 0 };
     await act(async () => { socket?.onFrame?.({ t: "agents", agents: [agent] }); });
     openHeaderMenu(getByRole);
-    fireEvent.click(getByRole("button", { name: "Agents (1)" }));
-    fireEvent.click(getByRole("button", { name: /Agent A/ }));
-    expect(sent.filter((frame) => frame.t === "fetch-transcript").map((frame) => frame.t === "fetch-transcript" ? frame.fromByte : -1)).toEqual([0]);
-    await act(async () => { socket?.onFrame?.({ t: "transcript", reqId: 1, text: "oldtext\n", newSize: 8 }); });
-    fireEvent.click(getByRole("button", { name: "Refresh" }));
-    expect(sent.filter((frame) => frame.t === "fetch-transcript").map((frame) => frame.t === "fetch-transcript" ? frame.fromByte : -1)).toEqual([0, 8]);
-    await act(async () => { socket?.onFrame?.({ t: "transcript", reqId: 2, text: "", newSize: 4 }); });
-    expect(sent.filter((frame) => frame.t === "fetch-transcript").map((frame) => frame.t === "fetch-transcript" ? frame.fromByte : -1)).toEqual([0, 8, 0]);
-    await act(async () => { socket?.onFrame?.({ t: "transcript", reqId: 3, text: "new\n", newSize: 4 }); });
-    expect(container.querySelector(".modal-overlay pre code")?.textContent).toContain("new\n");
-  });
+    await act(async () => { fireEvent.click(getByRole("button", { name: "Agents (1)" })); });
+    await act(async () => { fireEvent.click(getByRole("button", { name: /Agent A/ })); });
 
+    const fetchedBytes = () => sent
+      .filter((frame) => frame.t === "fetch-transcript")
+      .map((frame) => (frame.t === "fetch-transcript" ? frame.fromByte : -1));
+    expect(fetchedBytes()).toEqual([0]);
+
+    // Reply with 8 bytes; the next poll must ask from 8, not from 0 again.
+    await act(async () => { socket?.onFrame?.({ t: "transcript", reqId: 1, text: "oldtext\n", newSize: 8 }); });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 1400)); });
+    expect(fetchedBytes()).toContain(8);
+
+    // An empty EOF reporting a smaller size means the stream was replaced, so the
+    // cursor restarts at zero instead of skipping the new content.
+    const shrinkReqId = sent.filter((frame) => frame.t === "fetch-transcript").length;
+    await act(async () => { socket?.onFrame?.({ t: "transcript", reqId: shrinkReqId, text: "", newSize: 4 }); });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 1400)); });
+    expect(fetchedBytes().at(-1)).toBe(0);
+
+    // And the rendered transcript is the replacement content, not the old bytes.
+    await act(async () => { socket?.onFrame?.({ t: "transcript", reqId: shrinkReqId + 1, text: "new\n", newSize: 4 }); });
+    expect(container.querySelector(".agent-transcript")?.textContent).toContain("new\n");
+  });
 
   it("keeps Latest in a dock row outside transcript scroll area", async () => {
     const { container } = await mountConversation();

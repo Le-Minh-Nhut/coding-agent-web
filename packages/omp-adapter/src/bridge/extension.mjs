@@ -133,12 +133,38 @@ function sessionModesOf(ctx) {
   return modes && typeof modes.getState === "function" ? modes : null;
 }
 
+/**
+ * The native session this process is currently serving, or null when it cannot be
+ * read.
+ *
+ * This is the answer to a real defect: the bridge is bound to a **process**, but
+ * the process can switch sessions under it (`/resume`, session switch), and a
+ * `/vibe` aimed at conversation A would then mutate session B's director mode.
+ * Process identity alone does not identify a session, so the bridge reports the
+ * id it is actually attached to and leaves the comparison to the caller.
+ *
+ * `null` means "could not read" — never a guess, and never treated as a match by
+ * anything downstream.
+ */
+function nativeSessionIdOf(ctx) {
+  try {
+    const manager = ctx && typeof ctx === "object" ? ctx.sessionManager : undefined;
+    const id = manager && typeof manager.getSessionId === "function" ? manager.getSessionId() : undefined;
+    return typeof id === "string" && id !== "" ? id : null;
+  } catch {
+    return null;
+  }
+}
+
 function createHandler({ pi, ctx, token }) {
   function onState(res) {
     const modes = sessionModesOf(ctx);
     send(res, 200, {
       ok: true,
       hasSessionModes: modes !== null,
+      // Read on every request rather than captured at startup: a session switch
+      // must be visible immediately, or the whole point of reporting it is lost.
+      sessionId: nativeSessionIdOf(ctx),
       modes: modes ? read(() => modes.getState(), null) : null,
       ...runtimeSnapshot(pi, ctx),
     });

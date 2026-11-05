@@ -32,6 +32,16 @@ export interface BridgeModeResult {
 
 export interface BridgeState {
   hasSessionModes: boolean;
+  /**
+   * The native session the serving process is attached to, or `null` when it
+   * could not be read.
+   *
+   * The bridge is bound to a process, and a process can switch sessions
+   * (`/resume`), so this is the only thing that ties a bridge answer to the
+   * conversation asking. `null` means unreadable and must never be treated as a
+   * match — the route refuses on it.
+   */
+  sessionId: string | null;
   modes: BridgeModeState | null;
   tools: string[] | null;
   model: string | null;
@@ -124,6 +134,7 @@ export class BridgeClient {
       ok: true,
       state: {
         hasSessionModes: body.hasSessionModes === true,
+        sessionId: typeof (body as { sessionId?: unknown }).sessionId === "string" ? (body as { sessionId: string }).sessionId : null,
         modes: body.modes ?? null,
         tools: body.tools ?? null,
         model: body.model ?? null,

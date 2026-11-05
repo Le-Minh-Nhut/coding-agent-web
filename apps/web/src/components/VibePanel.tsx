@@ -19,7 +19,7 @@
  * switch — an unavailable bridge is not "off".
  */
 import { useMemo, useState } from "react";
-import type { AgentSnapshot } from "@caw/collab-protocol";
+import type { AgentView } from "../agent-model.js";
 import type { NativeModeResult, NativeModeState, VibeStateResponse } from "@caw/contracts";
 import { ModalOverlay } from "./ModalOverlay.js";
 
@@ -31,8 +31,15 @@ interface VibePanelProps {
   error: string | null;
   /** True when the conversation's own record forbids controlling it. */
   readOnly: boolean;
-  /** Workers, from the Collab agent roster — the same list the Agents panel shows. */
-  workers: AgentSnapshot[];
+  /**
+   * Classified agent views, **not** the raw roster.
+   *
+   * This is the B01 gate: a row is only killable when `canKillWorker` is true,
+   * which only `agent-model.ts` sets from journal evidence. The panel never
+   * decides classification itself, so a main agent or an ordinary subagent can
+   * never reach the Kill control.
+   */
+  workers: AgentView[];
   /**
    * Enter vibe mode, with the optional first directive.
    *
@@ -188,10 +195,12 @@ export function VibePanel({
                     <li key={worker.id} className="vibe-worker">
                       <span className={`badge ${worker.status}`}>{worker.status}</span>
                       <span className="vibe-worker-name">{worker.displayName}</span>
-                      {/* Killing a worker is offered only for a worker that is
-                          actually running a turn: killing an idle one would imply
-                          it stopped something. */}
-                      {worker.status === "running" && (
+                      {/* Two conditions, both required: the agent is a **proven**
+                          Vibe worker (`canKillWorker`, from journal evidence) and it
+                          is running a turn. Killing an idle one would imply it
+                          stopped something; killing an unproven one could stop the
+                          session's own agent. */}
+                      {worker.canKillWorker && worker.status === "running" && (
                         <button
                           type="button"
                           className="ghost"

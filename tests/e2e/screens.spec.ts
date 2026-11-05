@@ -499,13 +499,24 @@ test.describe("Screenshot inventory & geometry verification", () => {
         await moreActions.click();
         await expect(agentsBtn).toBeVisible();
         await agentsBtn.click();
-        await expect(page.locator(".modal-overlay")).toBeVisible();
-        await expect(page.getByRole("heading", { name: "Subagents (2)" })).toBeVisible();
-        await captureScreen(page, vp.name, "subagent-panel");
+        // Round 53: the agents experience is a full-screen view (level 2), not a
+        // modal stacked over the chat. The inventory captures it as the app now
+        // presents it, and the walkthrough goes one level deeper to prove the
+        // detail view opens too — the behaviour the old modal check stood for.
+        await expect(page.getByRole("region", { name: /Agents/ })).toBeVisible();
+        await expect(page.getByRole("heading", { name: /Agents \(2\)/ })).toBeVisible();
+        await captureScreen(page, vp.name, "agents-center");
 
-        // Close subagent panel
-        await page.locator(".modal-content button.ghost", { hasText: "✕" }).click();
-        await expect(page.locator(".modal-overlay")).toBeHidden();
+        // Level 3: the selected agent's own screen.
+        await page.locator(".agent-row").first().click();
+        await expect(page.getByRole("heading", { name: "Transcript" })).toBeVisible();
+        await captureScreen(page, vp.name, "agent-detail");
+
+        // Back to the list, then back to the conversation.
+        await page.getByRole("button", { name: "Back to Agents" }).click();
+        await page.getByRole("button", { name: "Back to session" }).click();
+        await expect(page.getByRole("region", { name: /Agents/ })).toBeHidden();
+        await expect(composer).toBeVisible();
 
         // (j) the slash-command suggestion list while typing `/`
         await composer.fill("/");
@@ -648,9 +659,12 @@ test.describe("Screenshot inventory & geometry verification", () => {
             () => window.scrollY || document.documentElement.scrollTop || (document.querySelector(".messages-scroll") as HTMLElement).scrollTop
           );
           await agentsBtn.click();
-          await expect(page.locator(".modal-overlay")).toBeVisible();
-          await page.locator(".modal-content button.ghost", { hasText: "✕" }).click();
-          await expect(page.locator(".modal-overlay")).toBeHidden();
+          // Round 53: the Agents Center is a full-screen view, not a modal. The
+          // claim under test is unchanged — opening and leaving the agents UI must
+          // not move the reader's scroll position.
+          await expect(page.getByRole("region", { name: /Agents/ })).toBeVisible();
+          await page.getByRole("button", { name: "Back to session" }).click();
+          await expect(page.getByRole("region", { name: /Agents/ })).toBeHidden();
           const chatScrollAfter = await page.evaluate(
             () => window.scrollY || document.documentElement.scrollTop || (document.querySelector(".messages-scroll") as HTMLElement).scrollTop
           );

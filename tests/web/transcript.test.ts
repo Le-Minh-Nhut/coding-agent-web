@@ -240,7 +240,7 @@ describe("Collab transcript reducer", () => {
     expect(state).not.toHaveProperty("timedOut");
   });
 
-  it("keeps protocol notices, subagent bus updates, and lifecycle events visible", () => {
+  it("keeps protocol notices and lifecycle events visible", () => {
     let state = createTranscriptState();
     const frames: Array<[HostFrame, string, "info" | "warning" | "error"]> = [
       [{ t: "event", event: { type: "notice", level: "warning", message: "rate limited" } }, "rate limited", "warning"],
@@ -249,11 +249,23 @@ describe("Collab transcript reducer", () => {
       [{ t: "event", event: { type: "auto_retry_start", attempt: 1, maxAttempts: 3, delayMs: 10, errorMessage: "temporary" } }, "Retry 1/3: temporary", "info"],
       [{ t: "event", event: { type: "auto_retry_end", success: false, attempt: 1, finalError: "retry failed" } }, "retry failed", "error"],
       [{ t: "event", event: { type: "thinking_level_changed", thinkingLevel: "high" } }, "Thinking level: high", "info"],
-      [{ t: "bus", channel: "task:subagent:progress", data: { agent: "Scout", task: "inspect", progress: { status: "running" } } }, "Scout: inspect (running)", "info"],
-      [{ t: "bus", channel: "task:subagent:lifecycle", data: { id: "sub-1", agent: "Scout", status: "completed", index: 0 } }, "Scout completed", "info"],
+      // Round 53: a bus frame with an attributable agent id no longer writes a
+      // notice at all — it becomes structured activity, because the notice path
+      // carried the full task body and became a multi-screen banner. The frame
+      // here has no `progress.id`, so it takes the *unattributable* path, which
+      // still reports something bounded. See round53-agent-safety.test.ts for the
+      // attributed case.
+      [{ t: "bus", channel: "task:subagent:progress", data: { agent: "Scout", task: "inspect", progress: { status: "running" } } }, "Scout running", "info"],
+      [{ t: "bus", channel: "task:subagent:lifecycle", data: { id: "sub-1", agent: "Scout", status: "completed", index: 0 } }, "Scout running", "info"],
     ];
     for (const [frame, message, level] of frames) {
       state = apply(state, frame);
+      if (frame.t === "bus" && frame.channel === "task:subagent:lifecycle") {
+        // An identified lifecycle frame lands in activity, leaving the notice as
+        // it was — so the previous notice is what is still standing.
+        expect(state.agentActivity["sub-1"]).toBeDefined();
+        continue;
+      }
       expect(state.notice).toEqual({ message, level });
     }
 
@@ -272,16 +284,24 @@ describe("Collab transcript reducer", () => {
       header: { type: "session", id: "native-session", cwd: "/workspace", timestamp: "2026-10-25T00:00:00Z" },
       state: sessionState(), agents: [], entryCount: 0,
     });
+    // Round 53: a failure is reported through structured activity (level "error")
+    // rather than a notice banner. The claims this test actually protects are
+    // unchanged: the failure is visible, it keeps its agent's identity, its task
+    // text survives, and the connection is NOT dropped.
     state = apply(state, { t: "bus", channel: "task:subagent:progress", data: {
       index: 0, agent: "Scout", task: "inspect", progress: { id: "sub-1", status: "failed", currentTool: "bash" },
     } });
-    expect(state.notice).toEqual({ level: "error", message: "Scout: inspect (failed) · bash" });
+    expect(state.agentActivity["sub-1"]).toMatchObject({
+      agent: "Scout", task: "inspect", status: "failed", currentTool: "bash", level: "error",
+    });
     expect(state.connectionStatus).toBe("live");
 
     state = apply(state, { t: "bus", channel: "task:subagent:lifecycle", data: {
       id: "sub-1", agent: "Scout", status: "aborted", index: 0,
     } });
-    expect(state.notice).toEqual({ level: "warning", message: "Scout aborted" });
+    // The lifecycle state supersedes the progress state for the same agent: an
+    // abort is the newer, more authoritative fact.
+    expect(state.agentActivity["sub-1"]).toMatchObject({ lifecycle: "aborted", level: "warning" });
     expect(state.connectionStatus).toBe("live");
   });
 

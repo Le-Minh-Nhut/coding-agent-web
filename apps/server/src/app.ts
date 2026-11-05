@@ -84,6 +84,15 @@ export interface AppDependencies {
    * mode from absent evidence.
    */
   bridgeConfigDir?: string;
+  /**
+   * Worker ids proven from a session's journal, for the Agents Center's Kill gate.
+   *
+   * Unset, or any failure, yields an empty list — which disables worker controls.
+   * The evidence cannot come from Collab (its replication allowlist excludes the
+   * `custom` entries these records are), so this is the only source; its absence
+   * must fail closed rather than fall back to guessing.
+   */
+  readVibeWorkers?: (sessionId: string) => Promise<{ ids: string[]; timestamp: string | null }>;
 }
 
 const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
@@ -1157,6 +1166,7 @@ export function buildApp(deps: AppDependencies): FastifyInstance<HttpServer> {
     store: deps.store,
     ...(deps.tmuxServerIdentity ? { tmuxServerIdentity: deps.tmuxServerIdentity } : {}),
     ...(deps.bridgeConfigDir ? { bridgeConfigDir: deps.bridgeConfigDir } : {}),
+    ...(deps.readVibeWorkers ? { readVibeWorkers: deps.readVibeWorkers } : {}),
     preHandler: protectedHook,
   });
 

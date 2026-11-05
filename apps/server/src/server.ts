@@ -614,6 +614,9 @@ const app = buildApp({
   // The same directory the launch writes each conversation's overlay and bridge
   // config into, so a route can find the bridge it did not allocate itself.
   bridgeConfigDir: overlayDir,
+  // Journal read for the Vibe Kill gate: `vibe-session-lifecycle` is a `custom`
+  // entry, which Collab does not replicate, so the route reads it here.
+  readVibeWorkers: (sessionId) => catalog.readVibeWorkers(sessionId),
 });
 await app.ready();
 app.log.info({ configFile: config.configFile ?? "built-in defaults", allowedRoots: config.allowedRoots, publicOrigin: config.publicOrigin, host: config.host, port: config.port, relayPort: config.relayPort }, "configuration loaded");

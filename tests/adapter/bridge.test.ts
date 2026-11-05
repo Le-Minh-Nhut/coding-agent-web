@@ -74,7 +74,7 @@ async function occupiedPort(): Promise<{ port: number; stop: () => Promise<void>
  * which is when it binds. `withSessionModes` false omits the surface entirely,
  * because that absence is the case under test.
  */
-async function boot(options: {
+async function boot(options: { sessionId?: string | null;
   withSessionModes?: boolean;
   withCtxModel?: boolean;
   withRuntimeModel?: boolean;
@@ -115,6 +115,9 @@ async function boot(options: {
         }
       : {}),
     ...(options.withCtxModel ?? true ? { model: { id: "test-model", provider: "test" } } : {}),
+    // The real context always carries this, and the bridge reports it so a caller
+    // can tie an answer to the conversation that asked (B02).
+    sessionManager: { getSessionId: () => (options.sessionId === undefined ? "sess-1" : options.sessionId) },
   };
 
   const port = options.port ?? (await allocateLoopbackPort());
@@ -169,6 +172,9 @@ describe("bridge extension (real module, real socket)", () => {
     expect(await response.json()).toEqual({
       ok: true,
       hasSessionModes: true,
+      // The serving session, so a caller can refuse an answer that belongs to a
+      // session its conversation does not own (B02).
+      sessionId: "sess-1",
       modes: STATE,
       tools: ["read", "edit"],
       model: "test/test-model",

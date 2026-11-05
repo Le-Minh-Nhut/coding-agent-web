@@ -66,6 +66,22 @@ export interface NativeSessionHeader {
  * last step, and it is append-only, so "did it commit" is exactly "is there a
  * `compaction` entry carrying `method: "handoff"` newer than the paste".
  */
+/**
+ * Vibe worker ids proven by a session journal.
+ *
+ * `vibe-session-lifecycle` entries are `custom` entries, which the Collab
+ * replication allowlist excludes (`collab/host.ts:103-110`) — so a browser can
+ * never see them, and the worker/ordinary-subagent distinction is unprovable
+ * from the wire alone. This is the server-side read that supplies it.
+ *
+ * `ids` are the worker agent ids the director actually spawned.
+ */
+export interface NativeVibeWorkers {
+  ids: string[];
+  /** Journal entry timestamp of the newest lifecycle record seen, for change detection. */
+  timestamp: string | null;
+}
+
 export interface NativeHandoffCompaction {
   /** Entry id of the observed `compaction` record; the evidence itself. */
   entryId: string;
@@ -112,6 +128,14 @@ export interface NativeSessionCatalog {
    * in the bounded window", never "it did not commit".
    */
   readHandoffCompaction(sessionId: string, sinceMs: number): Promise<NativeHandoffCompaction | null>;
+  /**
+   * Worker ids recorded in this session's journal, or an empty list.
+   *
+   * An empty list means **no worker was proven** — never "all agents are workers".
+   * A reader failure is reported as an empty list by the caller, so the UI degrades
+   * to read-only rather than to unsafe.
+   */
+  readVibeWorkers?(sessionId: string): Promise<NativeVibeWorkers>;
  }
 
 // ─────────────────────────────────────────────────────────────────────────────
