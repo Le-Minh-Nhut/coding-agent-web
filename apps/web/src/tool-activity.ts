@@ -132,8 +132,12 @@ export function categoryLabel(category: ActivityCategory, count: number): string
     case "search": return `Search ${count} pattern${plural}`;
     case "command": return `Run ${count} command${plural}`;
     case "test": return `Run ${count} test${plural}`;
-    case "edit": return `Edit ${count} file${plural}`;
-    case "patch": return `Apply ${count} patch${plural}`;
+    // An edit *call* is an operation, not a changed file: the call may have
+    // failed, and one call can touch several files. Saying "Edit 3 files" here
+    // would assert a file count nothing has proven; the verified count is
+    // reported by `summarizeFileChanges` beside it, from real diff data.
+    case "edit": return count === 1 ? "Edit 1 operation" : `Edit ${count} operations`;
+    case "patch": return count === 1 ? "Apply 1 patch operation" : `Apply ${count} patch operations`;
     case "diff": return count === 1 ? "Inspect diff" : `Inspect ${count} diffs`;
     case "other": return count === 1 ? "Run 1 tool" : `Run ${count} tools`;
   }
@@ -180,13 +184,39 @@ export interface FileChange {
   /** Unified diff text, or `null` when the host sent none. */
   diff: string | null;
   moveFrom?: string;
+  /**
+   * The host reported this file's output as truncated (`meta.truncation`, or a
+   * bare `truncated: true`). Its diff is a prefix, so its counts are a floor and
+   * must never be printed as the file's total.
+   */
   truncated?: boolean;
+  /**
+   * This file's operation failed while its siblings succeeded (a partial
+   * multi-file edit). Nothing was applied to it: it carries no counts and its
+   * text is the host's error.
+   */
+  failed?: boolean;
+  /** The host's own error text for a failed file, when it sent one. */
+  error?: string;
+  /** The host's LSP diagnostics for this file, verbatim; never summarized away. */
+  diagnostics?: FileDiagnostics;
+}
+
+/** One file's diagnostics, in the shape the guest `edit` renderer reads. */
+export interface FileDiagnostics {
+  summary: string | null;
+  messages: string[];
+  errored: boolean;
 }
 
 export interface FileChangeSummary {
   files: FileChange[];
   additions: number | null;
   deletions: number | null;
+  /** Distinct paths in `files`: the workspace effect, as opposed to the event count. */
+  uniqueFiles: number;
+  /** How many of `files` are failed operations, none of which changed anything. */
+  failedFiles: number;
   /** Why the summary reads the way it does; shown to the user, never hidden. */
   note: string;
 }
@@ -222,12 +252,63 @@ function statusOf(raw: unknown, diff: string | null, moveFrom: string | null): F
   return diff !== null ? "modified" : "unknown";
 }
 
+function isRecordArray(value: unknown): value is unknown[] {
+  return Array.isArray(value) && value.length > 0;
+}
+
+/**
+ * One file's diagnostics, or `undefined` when the host sent none.
+ *
+ * OMP attaches them per file (`EditToolPerFileResult.diagnostics` →
+ * `{summary, messages, errored}`), and dropping them because the diff was
+ * rendered elsewhere would lose the one part of an edit's result that is not
+ * visible in the diff — a type error next to the change that caused it.
+ */
+function diagnosticsOf(entry: Record<string, unknown>): FileDiagnostics | undefined {
+  const raw = entry.diagnostics;
+  if (!isRecord(raw)) return undefined;
+  const messages: string[] = [];
+  if (Array.isArray(raw.messages)) {
+    for (const message of raw.messages) {
+      const text = str(message);
+      if (text !== null) messages.push(text);
+    }
+  }
+  const summary = str(raw.summary);
+  if (summary === null && messages.length === 0) return undefined;
+  return { summary, messages, errored: raw.errored === true };
+}
+
+/**
+ * True when the host flagged this entry's output as truncated.
+ *
+ * OMP states truncation structurally as `meta.truncation`
+ * (`packages/tui/src/tools/output-meta.ts:85`), and the edit renderer also
+ * honours a bare `truncated` boolean; both mean "the diff I sent you is a
+ * prefix", so counts derived from it are a floor.
+ */
+function truncatedFrom(entry: Record<string, unknown>): boolean {
+  if (entry.truncated === true) return true;
+  const meta = entry.meta;
+  return isRecord(meta) && isRecord(meta.truncation);
+}
+
 function fileChangeFrom(entry: Record<string, unknown>, fallbackPath: string | null): FileChange | null {
   const path = str(entry.path) ?? str(entry.filePath) ?? fallbackPath;
   if (path === null) return null;
+  const failed = entry.isError === true;
   const diff = str(entry.diff);
-  const moveFrom = str(entry.move) ?? str(entry.moveFrom);
-  const stats = diff === null ? null : diffStats(diff);
+  // Upstream names the pre-move path `sourcePath` and sets `move` to the *new*
+  // path (`packages/coding-agent/src/edit/index.ts:236-245`), so `move` is the
+  // destination and cannot be printed as the source. Older payloads are accepted
+  // only when `move` actually names a *different* path, so a modify is never
+  // relabelled a rename and no arrow ever points from a path to itself.
+  const moved = str(entry.move);
+  const moveFrom = str(entry.sourcePath) ?? str(entry.moveFrom) ?? (moved !== null && moved !== path ? moved : null);
+  const truncated = truncatedFrom(entry);
+  // A failed file's diff is not an applied change, and a truncated diff's counts
+  // are a prefix. Neither may be printed as the file's +/−.
+  const stats = failed || truncated || diff === null ? null : diffStats(diff);
   return {
     path,
     status: statusOf(entry.op ?? entry.status, diff, moveFrom),
@@ -239,17 +320,34 @@ function fileChangeFrom(entry: Record<string, unknown>, fallbackPath: string | n
     deletions: stats === null ? null : stats.deletions,
     diff,
     ...(moveFrom === null ? {} : { moveFrom }),
-    ...(entry.truncated === true ? { truncated: true } : {}),
+    ...(truncated ? { truncated: true } : {}),
+    ...(failed ? { failed: true } : {}),
+    ...(str(entry.displayErrorText) === null && str(entry.errorText) === null
+      ? {}
+      : { error: str(entry.displayErrorText) ?? str(entry.errorText) ?? undefined }),
+    ...(diagnosticsOf(entry) === undefined ? {} : { diagnostics: diagnosticsOf(entry) }),
   };
 }
 
-/** One row's file changes, read from `toolResult.details` only. */
+/**
+ * One row's file changes, read from `toolResult.details` only.
+ *
+ * A row that failed carries no applied change, so when the call as a whole is an
+ * error and the host sent no per-file results, nothing is returned: the row's own
+ * error is the whole truth for it. When per-file results *are* present they win
+ * even on a partially failed call, because each entry states its own outcome
+ * (`perFileResults[i].isError`) — a multi-file edit that applied some files and
+ * failed others must show the successes, not lose them to the call-level flag.
+ */
 export function fileChangesOf(row: ToolActivityRow): FileChange[] {
   const details = row.toolResult?.details;
   if (!isRecord(details)) return [];
+  const rowFailed = row.isError === true || row.toolResult?.isError === true;
+  const perFile = isRecordArray(details.perFileResults);
+  if (rowFailed && !perFile) return [];
   const files: FileChange[] = [];
-  if (Array.isArray(details.perFileResults)) {
-    for (const entry of details.perFileResults) {
+  if (perFile) {
+    for (const entry of details.perFileResults as unknown[]) {
       if (!isRecord(entry)) continue;
       const change = fileChangeFrom(entry, null);
       if (change) files.push(change);
@@ -265,6 +363,17 @@ export function fileChangesOf(row: ToolActivityRow): FileChange[] {
 /**
  * Sum a set of rows into one file-change summary.
  *
+ * The counts are kept apart on purpose, because they answer different questions
+ * and conflating them is how a UI lies:
+ *
+ *  - `files.length` is the number of *file-change events* — one per edit the
+ *    transport proved, so editing one file twice is two events.
+ *  - `uniqueFiles` is the workspace effect: how many distinct paths changed.
+ *  - `additions`/`deletions` are the sum of real diff counts, and are `null`
+ *    (never a partial sum printed as a total) when any file's counts are missing
+ *    or truncated. Failed files carry no counts at all, so their presence also
+ *    makes the totals unavailable unless they are excluded.
+ *
  * The same file changed twice stays two rows: merging them would claim a change
  * set the transport never proved, and the second edit's counts are not the final
  * workspace diff.
@@ -273,15 +382,28 @@ export function summarizeFileChanges(rows: readonly ToolActivityRow[]): FileChan
   const files: FileChange[] = [];
   for (const row of rows) files.push(...fileChangesOf(row));
   if (files.length === 0) return null;
-  const counted = files.filter((file) => file.additions !== null && file.deletions !== null);
-  const complete = counted.length === files.length;
+  const counted = files.filter((file) => file.failed !== true && file.additions !== null && file.deletions !== null);
+  const applied = files.filter((file) => file.failed !== true);
+  const complete = applied.length > 0 && counted.length === applied.length;
+  const uniqueFiles = new Set(applied.map((file) => file.path)).size;
+  const failedFiles = files.length - applied.length;
+  const parts = [
+    `Changed ${uniqueFiles} file${uniqueFiles === 1 ? "" : "s"}`,
+    // Two events on one file is not two files changed: say which number is which
+    // rather than printing the event count as the file count. Only *applied*
+    // events count here — a failed file changed nothing, and is reported as a
+    // failure instead.
+    ...(applied.length > uniqueFiles ? [`${applied.length} operations`] : []),
+    ...(failedFiles > 0 ? [`${failedFiles} failed`] : []),
+    ...(complete ? [] : ["counts incomplete"]),
+  ];
   return {
     files,
     additions: complete ? counted.reduce((sum, file) => sum + (file.additions ?? 0), 0) : null,
     deletions: complete ? counted.reduce((sum, file) => sum + (file.deletions ?? 0), 0) : null,
-    note: complete
-      ? `Changed ${files.length} file${files.length === 1 ? "" : "s"}`
-      : `Changed ${files.length} file${files.length === 1 ? "" : "s"} · counts incomplete`,
+    uniqueFiles,
+    failedFiles,
+    note: parts.join(" · "),
   };
 }
 

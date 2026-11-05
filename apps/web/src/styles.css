@@ -918,10 +918,82 @@ details[open] summary {
 }
 
 .tv-file-change {
+  display: block;
+  min-width: 0;
+}
+
+.tv-file-change-head {
   display: flex;
   align-items: baseline;
   gap: 8px;
   min-width: 0;
+  width: 100%;
+  min-height: var(--touch-min);
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.tv-file-change-head:disabled {
+  cursor: default;
+  /* A row with nothing to open is not a control, but it keeps the same height so
+     the list does not jitter between rows. */
+}
+
+.tv-note {
+  margin: 0;
+  font-size: 0.75rem;
+  color: var(--warning);
+}
+
+.tv-note--err {
+  color: var(--danger-text);
+}
+
+.tv-file-status--failed {
+  color: var(--danger-text);
+}
+
+.tv-file-change-body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 4px 0 4px 3ch;
+  min-width: 0;
+}
+
+.tv-file-chevron {
+  flex: none;
+  color: var(--text-muted);
+}
+
+.tv-file-error {
+  margin: 0;
+  padding: 6px 8px;
+  overflow-x: auto;
+  font-size: 0.75rem;
+  white-space: pre-wrap;
+  color: var(--danger-text);
+  background: var(--surface);
+  border-radius: 6px;
+}
+
+.tv-file-error--err {
+  border-left: 2px solid var(--danger-text);
+}
+
+.tv-file-change--failed .tv-file-path {
+  color: var(--danger-text);
+}
+
+.activity-group-note {
+  flex: none;
+  font-size: 0.75rem;
+  color: var(--text-muted);
 }
 
 .tv-file-status {

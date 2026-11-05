@@ -406,10 +406,12 @@ Tool call được gom lại theo nhóm **cùng loại, liền kề nhau**, mỗ
 - `✓ Search 3 patterns` — tìm kiếm
 - `✓ Run 2 commands` — chạy lệnh
 - `✓ Run 1 test` — chạy test
-- `✓ Edit 2 files` — sửa/tạo tệp
-- `✓ Apply 1 patch` — áp patch
+- `✓ Edit 2 operations` — sửa/tạo tệp
+- `✓ Apply 1 patch operation` — áp patch
 - `✓ Inspect diff` — xem diff
 - `✓ Run 1 tool` — tool chưa có cách hiển thị riêng (nhóm "khác")
+
+**Vì sao nhóm sửa tệp đếm `operations` chứ không phải `files`:** một *tool call* là một thao tác, không phải một tệp. Một lần gọi có thể sửa nhiều tệp, và cũng có thể thất bại mà không sửa gì. Ghi `Edit 3 files` ở đây là khẳng định một con số tệp mà chưa có gì chứng minh. Con số tệp **có bằng chứng** nằm ngay cạnh đó (xem bên dưới) và được đếm từ diff thật.
 
 Ba trạng thái, đọc ở ký tự đầu dòng:
 
@@ -419,25 +421,49 @@ Ba trạng thái, đọc ở ký tự đầu dòng:
 | `✓` | Đã xong, không có lỗi |
 | `✕` | Có lỗi — dòng này đọc được ngay cả khi chưa mở nhóm |
 
-Nhóm chưa mở **không** dựng nội dung bên trong vào trang, nên conversation dài vẫn nhẹ. Chạm vào nhóm để mở danh sách tool call; chạm vào từng dòng tool để mở chi tiết. Khi một tool báo lỗi, nội dung lỗi hiện ngay dưới dòng nhóm dù bạn chưa mở, để lỗi không bị bỏ sót.
+Nhóm chưa mở **không** dựng nội dung bên trong vào trang, nên conversation dài vẫn nhẹ. Chạm vào nhóm để mở danh sách tool call; chạm vào từng dòng tool để mở chi tiết. Khi một tool báo lỗi, nội dung lỗi hiện ngay dưới dòng nhóm dù bạn chưa mở, để lỗi không bị sót.
 
-**Nhóm sửa tệp hiện luôn số dòng ngay trên dòng gọn**, ví dụ `✓ Edit 3 files +128 −34` — bạn thấy quy mô thay đổi mà không cần mở gì. Con số này được cộng từ **diff thật** của từng tệp trong nhóm; nếu có tệp nào thiếu diff thì nhóm không hiện số nào cả, thay vì hiện số thiếu.
+**Nhóm sửa tệp hiện luôn một dòng mô tả ngay trên dòng gọn**, ví dụ `✓ Edit 3 operations · Changed 2 files · 4 operations +128 −34`. Dòng mô tả nói rõ ba con số khác nhau:
+
+| Con số | Nghĩa |
+| --- | --- |
+| `Edit N operations` | Số **lần gọi** tool sửa tệp trong nhóm. |
+| `Changed N files` | Số **tệp khác nhau** (unique path) thực sự được chứng minh là đã đổi. |
+| `N operations` (trong dòng mô tả) | Số **sự kiện thay đổi tệp** — chỉ hiện khi nhiều hơn số tệp, ví dụ sửa cùng một tệp hai lần. |
+| `N failed` | Số tệp mà thao tác **thất bại** — không tệp nào trong số đó bị thay đổi. |
+| `+x −y` | Tổng dòng thêm/bớt, cộng từ **diff thật** của từng tệp. Chỉ hiện khi **mọi** tệp đều có số đầy đủ; nếu thiếu hoặc bị cắt, con số bị bỏ và dòng mô tả thêm `counts incomplete`. |
+
+Vì vậy `✓ Edit 2 operations · Changed 2 files` khác hẳn `✓ Edit 2 operations · Changed 2 files · 4 operations`: trường hợp sau là cùng hai tệp bị sửa hai lần mỗi tệp. CAW không gộp chúng thành một "diff cuối cùng" — xem [chương 18](#18-phân-biệt-thay-đổi-của-agent-và-thay-đổi-của-workspace).
 
 ## 16. Tóm tắt thay đổi tệp và ý nghĩa của +/−
 
-Khi một tool sửa tệp và OMP gửi kèm diff thật, dòng tool sẽ hiện số dòng **thêm** và **bớt**, dạng `M src/auth.ts +42 −12`.
+Khi một tool sửa tệp và OMP gửi kèm diff thật, danh sách **Changes** trong dòng tool liệt kê từng tệp dạng `M src/auth.ts +42 −12`.
 
 - **+x màu xanh** = số dòng **được thêm**.
 - **−y màu đỏ** = số dòng **bị bỏ**.
-- Chữ cái đầu = trạng thái tệp: `A` thêm mới, `M` sửa, `D` xoá, `R` đổi tên, `bin` nhị phân, `?` chưa xác định.
+- Chữ cái đầu = trạng thái tệp: `A` thêm mới, `M` sửa, `D` xoá, `R` đổi tên, `bin` nhị phân, `?` chưa xác định, `✕` **thao tác thất bại**.
 
-Các con số này được **đếm từ diff thật** mà host gửi, không phải đoán từ văn bản mô tả hay từ số lượng tool call. Nếu không có diff, CAW **không bịa số**: dòng đó ghi `counts unavailable` (không có số để hiển thị).
+Các con số này được **đếm từ diff thật** mà host gửi, không phải đoán từ văn bản mô tả hay từ số lượng tool call. Nếu không có diff, CAW **không bịa số**: dòng đó ghi `counts unavailable`.
 
-**Chỉ tin khi có bằng chứng.** `✓` nghĩa là tool kết thúc không lỗi — **không** có nghĩa là test đã pass, và cũng không có nghĩa là tệp chắc chắn đã đổi. Muốn biết kết quả thật, mở diff hoặc mở output đầy đủ.
+**Ba trường hợp CAW cố ý không hiện số, thay vì hiện số sai:**
+
+| Ghi trên dòng tệp | Nghĩa |
+| --- | --- |
+| `counts unavailable` | Không có diff cho tệp này (host không gửi, hoặc workspace không phải git). |
+| `counts partial` | Host báo output bị **cắt** (`truncation`), nên diff nhận được chỉ là **phần đầu**. Mọi con số đếm từ nó chỉ là **mức tối thiểu**, không phải tổng — nên CAW không hiện số nào và ghi rõ `statistics partial — output truncated`. |
+| `not applied` | Tệp này **thất bại** giữa một loạt nhiều tệp. Không có gì được ghi vào tệp đó, nên nó không được tính là thay đổi: không có +/−, và văn bản lỗi của host nằm ngay trong dòng đó (chạm để xem). Các tệp **thành công** trong cùng lần gọi vẫn giữ nguyên số của chúng. |
+
+**Chỉ tin khi có bằng chứng.** `✓` nghĩa là tool kết thúc không lỗi — **không** có nghĩa là test đã pass, và cũng không có nghĩa là tệp chắc chắn đã đổi. Một tệp thất bại sẽ **không bao giờ** được mô tả như đã áp dụng, kể cả khi lần gọi đó có tệp khác thành công. Muốn biết kết quả thật, mở diff hoặc mở output đầy đủ.
+
+**Tên tệp đổi tên đọc theo chiều `nguồn → đích`.** Với thao tác move/rename, dòng tệp hiện `R src/old.ts → src/new.ts`: bên trái là đường dẫn **trước khi đổi tên**, bên phải là đường dẫn **sau khi đổi**. Không bao giờ hiện cùng một đường dẫn hai lần.
 
 ## 17. Mở diff: dòng thêm, dòng bỏ, ngữ cảnh
 
-Chạm vào dòng tool có thay đổi tệp để mở. Phần **Changes** liệt kê từng tệp kèm trạng thái và số dòng. Bên dưới mỗi tệp là **unified diff**:
+Chạm vào dòng tool có thay đổi tệp để mở. Phần **Changes** liệt kê **từng tệp thành một dòng riêng**, chỉ gồm: tên tệp, trạng thái (`A`/`M`/`D`/`R`/`bin`/`?`/`✕`) và số dòng `+x −y`.
+
+**Mở tệp nào thì xem diff tệp đó.** Chạm vào một dòng tệp để mở **đúng diff của tệp đó** — không phải diff của mọi tệp cùng lúc. Một lần sửa 5 tệp là 5 dòng gọn; bạn mở từng dòng khi cần. Đóng/mở xen kẽ nhiều dòng cùng lúc cũng được.
+
+Trong diff:
 
 - Dòng bắt đầu bằng `+` = dòng được thêm (nền xanh).
 - Dòng bắt đầu bằng `-` = dòng bị bỏ (nền đỏ).
@@ -445,9 +471,15 @@ Chạm vào dòng tool có thay đổi tệp để mở. Phần **Changes** li�
 - Dòng không có dấu = **ngữ cảnh** (không đổi), giúp bạn hiểu xung quanh.
 - Dấu `…` = khoảng trống giữa các đoạn không liền nhau.
 
-Nút **Copy patch** sao chép nguyên đoạn diff để dán vào nơi khác. Diff dài: CAW chỉ dựng một phần rồi mở rộng khi cần, nên mở tệp lớn không làm treo điện thoại. Muốn xem trọn output: chạm **View tool details**.
+Nút **Copy patch** sao chép nguyên đoạn diff của **tệp đang mở**. Diff dài: CAW chỉ dựng một phần rồi mở rộng khi cần, nên mở tệp lớn không làm treo điện thoại.
 
-**Hàng nghìn dòng không dựng sẵn.** Thân tool đóng lại thì **không** được nạp vào trang; mở ra mới nạp. Vì vậy một conversation rất dài vẫn cuộn mượt.
+**Chẩn đoán LSP của tệp nằm ngay trong dòng tệp đó.** Nếu host kèm `diagnostics` cho một tệp (ví dụ lỗi biên dịch sau khi sửa), CAW hiện nguyên văn chúng bên trong diff của chính tệp đó — không gộp vào tệp khác và không lược bỏ.
+
+**Xem trọn bản ghi thô: chạm `View tool details`.** Nút này nằm ở cuối phần thân tool và mở ra **nguyên văn bản transport** mà server nhận được, cùng **tham số (arguments) thô** của lần gọi tool đó ở dạng JSON. Đây là đường đi để kiểm tra khi bạn nghi ngờ phần tóm tắt: không có phần nào của bản ghi bị bỏ khỏi giao diện, chỉ bị **trì hoãn** cho tới khi bạn yêu cầu.
+
+**Hàng nghìn dòng không dựng sẵn.** Thân tool đóng lại thì **không** được nạp vào trang; mở ra mới nạp, và diff của từng tệp càng phải mở mới nạp. Vì vậy một conversation rất dài vẫn cuộn mượt.
+
+**Diff chỉ xuất hiện một lần.** Cùng một đoạn diff không bao giờ được vẽ hai lần trên cùng một màn hình (một lần ở danh sách tệp và một lần nữa ở khung xem của tool).
 
 ## 18. Phân biệt "thay đổi của agent" và "thay đổi của workspace"
 
@@ -464,7 +496,9 @@ Nút **Copy patch** sao chép nguyên đoạn diff để dán vào nơi khác. D
 Nếu workspace không phải git, hoặc host không gửi diff, hoặc tệp quá lớn, CAW hiển thị thật đúng tình trạng đó thay vì một khung diff trống:
 
 - `File operation completed / Diff unavailable / View tool details` — thao tác tệp đã xong, nhưng không có diff để xem.
-- `counts unavailable` — không có số dòng để hiển thị.
+- `counts unavailable` — không có số dòng để hiển thị cho tệp này.
+- `counts partial` + `statistics partial — output truncated` — host báo output bị **cắt**, nên diff chỉ là phần đầu và mọi con số đếm từ nó chỉ là mức tối thiểu. CAW **không** hiện `+x −y` trong trường hợp này.
+- `not applied` — tệp này thất bại (giữa một loạt nhiều tệp): không có gì được ghi, và văn bản lỗi của host nằm ngay trong dòng tệp.
 - `Structured result unavailable — this is the raw transport text` — CAW không nhận được kết quả có cấu trúc, nên nó chỉ hiện nguyên văn bản thô mà nó nhận được.
 
 Một màn hình **rỗng** không bao giờ được coi là "thành công": nếu không biết, CAW nói là không biết.

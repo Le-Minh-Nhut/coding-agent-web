@@ -234,20 +234,56 @@ export function argsDigest(args: unknown, maxLen = 96): string {
 /**
  * `+`/`-` counts from a real unified diff. Never estimated.
  *
- * The `+++`/`---` file headers are part of the diff's framing, not its content,
- * so they must not be counted; the count then comes from the line prefixes
- * alone. OMP's own payloads prefix every line with a `NN|` gutter (e.g. `+12|`,
- * `-7|`), so nothing in them ever starts with `+++`/`---` and the skip is inert
- * for those — this is the one implementation both the guest renderer and the web
- * app must use, so their numbers can never disagree on a conventional diff.
+ * The `+++`/`---` file headers are framing, not content, so they must not be
+ * counted — but a *content* line may legitimately begin with `+++` or `---`
+ * (adding a line that itself starts with `++`, removing one that starts with
+ * `--`), so a prefix test alone silently drops real changes. The `@@ -o,ol +n,nl
+ * @@` header is authoritative about how many lines the hunk body holds, so the
+ * count consumes exactly that many and is immune to both directions.
+ *
+ * Between hunks the `---`/`+++` pair is framing again, which is what makes a
+ * concatenation of several per-file diffs — exactly what OMP produces for a
+ * multi-file edit — count correctly: the second file's headers arrive after the
+ * first file's last hunk and are skipped as headers, not read as deletions.
+ *
+ * OMP's own payloads carry no `@@` at all and prefix every line with a `NN|`
+ * gutter (`+12|`, `-7|`), where the `---`/`+++` skip is inert. This is the one
+ * implementation both the guest renderer and the web app use, so their numbers
+ * can never disagree.
  */
+const HUNK_HEADER_RE = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
+
 export function diffStats(diff: string): { additions: number; deletions: number } {
   let additions = 0;
   let deletions = 0;
+  // Remaining body lines owed to the current hunk's old and new sides.
+  let oldLeft = 0;
+  let newLeft = 0;
   for (const line of diff.split("\n")) {
-    if (line.startsWith("+++") || line.startsWith("---")) continue;
-    if (line.startsWith("+")) additions++;
-    else if (line.startsWith("-")) deletions++;
+    if (oldLeft <= 0 && newLeft <= 0) {
+      const hunk = HUNK_HEADER_RE.exec(line);
+      if (hunk) {
+        oldLeft = hunk[2] === undefined ? 1 : Number(hunk[2]);
+        newLeft = hunk[4] === undefined ? 1 : Number(hunk[4]);
+        continue;
+      }
+      // Not inside a hunk: the only lines here are file headers (or the gutter
+      // form's bare `+`/`-` lines, which fall through and count below).
+      if (line.startsWith("---") || line.startsWith("+++")) continue;
+    }
+    if (line.startsWith("+")) {
+      additions++;
+      newLeft--;
+    } else if (line.startsWith("-")) {
+      deletions++;
+      oldLeft--;
+    } else if (line.startsWith("\\")) {
+      // "\ No newline at end of file" belongs to the previous line, not the count.
+    } else {
+      // Context, or an empty separator line: consumes one line from each side.
+      oldLeft--;
+      newLeft--;
+    }
   }
   return { additions, deletions };
 }

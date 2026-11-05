@@ -296,13 +296,18 @@ test("a group expands, a diff opens, and the draft survives the round trip", asy
   await expect(page.locator(".tool-row").first()).toBeVisible();
   await page.screenshot({ path: join(DIR, "grouped-expanded.png") });
 
-  // Open the edit group, then the edit row, then the diff it carries.
+  // Open the edit group, then the edit row, then the file row, then its diff.
   const editGroup = page.locator(".activity-group").filter({ hasText: "Edit" });
   await editGroup.getByRole("button").first().click();
   const editRow = editGroup.locator(".tool-row").first();
   await expect(editRow).toBeVisible();
   await editRow.locator(".tool-row-head").click();
-  await expect(editRow.locator(".tv-file-change")).toBeVisible();
+  // Level one is the file list: filename, status, +/−. The diff itself is a
+  // second, per-file disclosure, so no diff is mounted until a file is opened.
+  const fileRow = editRow.locator(".tv-file-change").first();
+  await expect(fileRow).toBeVisible();
+  await expect(editRow.locator(".tv-diff")).toHaveCount(0);
+  await fileRow.locator(".tv-file-change-head").click();
   await expect(editRow.locator(".tv-diff-row--add").first()).toBeVisible();
   await page.screenshot({ path: join(DIR, "diff-open.png") });
 

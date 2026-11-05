@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true
+  },
+  // Typecheck scope for the opt-in real-OMP suite only.
+  //
+  // `pnpm -r typecheck` runs each package's own tsconfig, and every one of those
+  // includes `src/**/*` only — so nothing in this repository typechecked `tests/`
+  // at all. That gap is not cosmetic: `tests/compat/*.test.ts` build a
+  // `RuntimeAdapters` literal by hand, and when the interface gained a required
+  // `isProcessDescendant` member both files silently stopped providing it. The
+  // suite still ran (vitest strips types), was skipped by default in CI, and
+  // therefore reported nothing while every one of its launches quietly returned
+  // after the publish timeout. This config is the gate that turns that class of
+  // drift into a compile error.
+  //
+  // The whole of `tests/` is deliberately NOT included here: it carries
+  // pre-existing type errors that are a separate, larger piece of work, and
+  // gating on them today would ship a red check instead of a working one.
+  "include": ["tests/compat/**/*"]
+}

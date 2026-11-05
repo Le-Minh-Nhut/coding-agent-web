@@ -165,6 +165,11 @@ maybe("real OMP: managed launch, terminal continuity, duplicate-writer refusal",
           }),
         killTmux: (id: string, expectedServerIdentity: string) => tmux.kill(id, { expectedIdentity: expectedServerIdentity }),
         isSessionLive: (id: string) => lease.isLive(id),
+        // Required by the adapter interface and used by the supervisor's publish
+        // match: without it every candidate host reads as "unknown lineage", no
+        // host is ever matched, and a launch lands `nativeSessionId: null` after
+        // the publish timeout. Uses the real probe, not a stub.
+        isProcessDescendant: (candidatePid: number, panePid: number) => tmux.isProcessDescendant(candidatePid, panePid),
         newestSessionFor: async (cwd: string) => {
           const sessions = await catalog.listForCwd(cwd);
           const newest = sessions[0];

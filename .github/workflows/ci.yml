@@ -31,6 +31,13 @@ jobs:
       - name: Typecheck every package
         run: pnpm -r typecheck
 
+      # `pnpm -r typecheck` only covers each package's `src/**/*`, so nothing here
+      # typechecked `tests/`. The opt-in real-OMP suite builds adapter literals by
+      # hand and silently lost a required member that way; this closes that gap for
+      # that directory (the rest of `tests/` still carries known type debt).
+      - name: Typecheck the real-OMP compat suite fixtures
+        run: pnpm typecheck:compat
+
       # Unit, integration and protocol/component tests. This tier must stay free:
       # it spawns no agent and spends no provider credits.
       - name: Tests (unit, integration, web)

@@ -953,22 +953,18 @@ export function buildApp(deps: AppDependencies): FastifyInstance<HttpServer> {
    * yields `null`, which callers must treat as "no verdict" rather than "zero".
    */
   async function latestHandoffMarker(conversationId: string): Promise<{ startedAt: number; refusalBaseline: number | null } | null> {
-    let events;
-    try {
-      events = await deps.store.listEventsTail<{ sessionId?: unknown; startedAt?: unknown; refusalBaseline?: unknown }>(conversationId, Number.POSITIVE_INFINITY, 50);
-    } catch {
-      return null;
-    }
-    for (let index = events.length - 1; index >= 0; index -= 1) {
-      const event = events[index]!;
-      if (event.type === "handoff-cancelled") return null;
-      if (event.type !== "handoff-start") continue;
-      const startedAt = event.payload?.startedAt;
-      if (typeof startedAt !== "number" || !Number.isFinite(startedAt)) return null;
-      const baseline = event.payload?.refusalBaseline;
-      return { startedAt, refusalBaseline: typeof baseline === "number" && Number.isFinite(baseline) ? baseline : null };
-    }
-    return null;
+    // One uncapped lookup, not a fixed-size window over every event type: the
+    // runtime writes many unrelated events into this same stream, and 50 of them
+    // would hide a standing marker — which reads exactly like "no marker" and
+    // admits a second paste. A read failure is NOT caught here: it must reach
+    // `recordHandoffStarted`'s outer catch and become `unreadable`, because a
+    // store we could not read is not evidence that no marker stands.
+    const event = await deps.store.latestEventOfTypes<{ startedAt?: unknown; refusalBaseline?: unknown }>(conversationId, ["handoff-start", "handoff-cancelled"]);
+    if (event === null || event.type === "handoff-cancelled") return null;
+    const startedAt = event.payload?.startedAt;
+    if (typeof startedAt !== "number" || !Number.isFinite(startedAt)) return null;
+    const baseline = event.payload?.refusalBaseline;
+    return { startedAt, refusalBaseline: typeof baseline === "number" && Number.isFinite(baseline) ? baseline : null };
   }
 
   /**

@@ -15,6 +15,18 @@ accordingly — lifecycle and safety first, pixels last.
 The compatibility layer is gated by environment variable on purpose: a normal
 `pnpm test` must never start an agent or spend the owner's provider credits.
 
+Because that suite does not run in CI, CI typechecks its fixtures instead
+(`pnpm typecheck:compat`, scope `tests/compat/**`). `pnpm -r typecheck` only
+covers each package's `src/**/*`, so without this step nothing at all
+typechecked `tests/` — and a hand-built adapter literal in
+`tests/compat/reconciliation.test.ts` silently lost a required interface member
+when `RuntimeAdapters` gained `isProcessDescendant`. Every one of its launches
+then returned after the publish timeout with `nativeSessionId: null` while the
+skipped suite reported nothing. The scoped config is the compile-time gate that
+turns that drift into a visible failure; the rest of `tests/` still carries
+known type debt and is not covered yet.
+
+
 ## What each layer must prove
 
 ### Unit — the invariants we cannot afford to get wrong
@@ -68,7 +80,16 @@ Runs against the installed `omp` with disposable directories:
 3. confirm the browser deep link's relay origin is ours;
 4. attach with `tmux` and assert the same process answers;
 5. stop it, assert the journal survives and a later `--resume` reads it;
-6. assert no second writer was created (lease probe before/after).
+6. assert no second writer was created (lease probe before/after);
+7. after a simulated backend restart, `reconcile()` adopts the live managed
+   agent, marks a dead one stopped with its journal intact, reports a foreign
+   writer `unknown` without launching a duplicate, and keeps an unreadable
+   registry `unknown` without killing or adopting anything.
+
+Each case launches a real `omp` in a private tmux socket but sends no prompt, so
+these launches are credit-free; only a case that types a prompt would spend
+provider credits. Every launch asserts `started.nativeSessionId` itself, so a
+publish-timeout regression fails here rather than passing silently.
 
 ## Failure injection
 

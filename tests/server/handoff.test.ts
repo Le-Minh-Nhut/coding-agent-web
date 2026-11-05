@@ -8,6 +8,7 @@ import { DefaultNativeSessionCatalog, encodeSessionDirName, type HandoffResult }
 import { createAuthenticationService } from "../../apps/server/src/auth";
 import { buildApp } from "../../apps/server/src/app";
 import { createMetadataStore } from "../../apps/server/src/store";
+import type { MetadataStore, StoreEvent } from "../../apps/server/src/store";
 import type { ServerConfig } from "../../apps/server/src/config";
 
 /**
@@ -49,6 +50,8 @@ async function fixture(options: {
   stateDir?: string;
   /** Skip creating the project/conversation (they are replayed from the journal). */
   existingConversationId?: string;
+  /** Fault injection: wrap the real store the app is built over (the raw one is returned). */
+  wrapStore?: (store: MetadataStore) => MetadataStore;
 } = {}) {
   const dir = options.stateDir ?? (await mkdtemp(join(tmpdir(), "caw-handoff-route-")));
   if (!options.stateDir) dirs.push(dir);
@@ -61,7 +64,7 @@ async function fixture(options: {
   };
   const store = createMetadataStore(dir);
   const app = buildApp({
-    config, auth, store, originAllowlist: ["https://workspace.test"],
+    config, auth, store: options.wrapStore ? options.wrapStore(store) : store, originAllowlist: ["https://workspace.test"],
     sendHandoff: options.handoff ?? (async () => ({ delivered: true, sessionId: "$0", paneId: "%0", panePid: 42 })),
     tmuxServerIdentity: async () => (options.liveIdentity === undefined ? "sock:1:2" : options.liveIdentity),
     findLiveHost: async () => (options.host === undefined
@@ -306,6 +309,67 @@ describe("handoff route", () => {
       expect(events.filter((event) => event.type === "handoff-cancelled")).toHaveLength(0);
       await app.close();
     }
+  });
+
+  it("keeps the marker standing past 50 unrelated events, so runtime traffic cannot admit a second paste", async () => {
+    // The marker is one event among many in the same per-conversation stream:
+    // the runtime appends agent.launched / agent.exited / launch.refused / ...
+    // A lookup answered from a fixed-size window over *all* event types loses
+    // the marker the moment 50 unrelated events land after it, and a lost
+    // marker reads exactly like "no marker" — which would paste into a session
+    // OMP may still be compacting, well inside the 150-minute TTL.
+    const { app, headers, conversation, store } = await fixture({ evidence: async () => null, probe: async () => 0 });
+    expect((await post(app, conversation.id, headers)).json().data.state).toBe("delivered");
+    for (let index = 0; index < 80; index += 1) {
+      await store.recordEvent(conversation.id, index % 2 === 0 ? "agent.launched" : "agent.exited", { tmuxSessionId: "$0", tmuxSessionName: "caw-c" });
+    }
+    const second = await post(app, conversation.id, headers);
+    expect(second.statusCode, JSON.stringify(second.json())).toBe(409);
+    expect(second.json().error.code).toBe("handoff_in_flight");
+    // The refusal is real: no second marker was taken behind it.
+    const events = await store.listEventsTail(conversation.id, Number.POSITIVE_INFINITY, 200);
+    expect(events.filter((event) => event.type === "handoff-start")).toHaveLength(1);
+    await app.close();
+  });
+
+  it("refuses when the marker read itself fails, so a store blip cannot overwrite a live marker", async () => {
+    // "I could not read the store" is not "no marker stands". Mapping the
+    // failure to `null` would make the route write a fresh `handoff-start` over
+    // a marker it never evaluated, and admit the paste that marker was refusing.
+    // The wrapper fails the marker read through whichever store method performs
+    // it (`latestEventOfTypes` now, `listEventsTail` before this change), so
+    // this case fails first for the reason it names rather than for a missing
+    // method.
+    let failReads = false;
+    const unreadable = () => Object.assign(new Error("EIO: metadata journal unreadable"), { code: "EIO" });
+    const { app, headers, conversation, store } = await fixture({
+      evidence: async () => null,
+      probe: async () => 0,
+      // Both store reads the marker lookup could use are redirected to the same
+      // real journal while healthy and made to fail together afterwards, so the
+      // case exercises "the marker read failed" rather than "the method the app
+      // happens to call is missing".
+      wrapStore: (real) => ({
+        ...real,
+        latestEventOfTypes: <T>(conversationId: string, types: readonly string[]): Promise<StoreEvent<T> | null> =>
+          failReads
+            ? Promise.reject(unreadable())
+            : real.listEventsTail<T>(conversationId, Number.POSITIVE_INFINITY, 1000)
+              .then((events) => events.filter((event) => types.includes(event.type)).at(-1) ?? null),
+        listEventsTail: <T>(conversationId: string, beforeSeq?: number, limit?: number) =>
+          failReads ? Promise.reject(unreadable()) : real.listEventsTail<T>(conversationId, beforeSeq, limit),
+      }),
+    });
+    expect((await post(app, conversation.id, headers)).json().data.state).toBe("delivered");
+    failReads = true;
+    const second = await post(app, conversation.id, headers);
+    expect(second.statusCode, JSON.stringify(second.json())).toBe(409);
+    expect(second.json().error.code).toBe("handoff_in_flight");
+    // The marker that could not be evaluated is still the only one standing:
+    // the failed read bought no paste and wrote no replacement.
+    const events = await store.listEventsTail(conversation.id, Number.POSITIVE_INFINITY, 20);
+    expect(events.filter((event) => event.type === "handoff-start")).toHaveLength(1);
+    await app.close();
   });
 
   it("refuses a second handoff after the first request ends, because the marker is durable", async () => {

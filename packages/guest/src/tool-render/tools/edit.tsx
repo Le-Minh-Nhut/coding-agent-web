@@ -72,16 +72,26 @@ interface DiagnosticsEntry {
 
 /** One file's outcome — top-level `details` and `perFileResults[i]` share this shape. */
 interface FileEntry {
+  /** Path *after* a move/rename — the destination the host reports as `path`. */
   path: string | null;
+  /** Pre-move path; the header renders `sourcePath → path`. */
+  sourcePath: string | null;
   diff: string | null;
   firstChangedLine: number | null;
   op: string | null;
   move: string | null;
+  /** Host reported truncated output: anything derived from the surfaced diff is partial. */
+  truncated: boolean;
   isError: boolean;
   errorText: string | null;
   diagnostics: DiagnosticsEntry | null;
 }
 
+/**
+ * Truncation arrives two ways: `OutputMeta.truncation` on `meta`, or the flat
+ * `truncated` boolean some entries carry instead. Either one means the diff
+ * that reached the client is a prefix, so its `+`/`−` counts are partial.
+ */
 function fileEntry(d: Record<string, unknown>): FileEntry {
   const diag = isRecord(d.diagnostics) ? d.diagnostics : null;
   const messages: string[] = [];
@@ -90,10 +100,12 @@ function fileEntry(d: Record<string, unknown>): FileEntry {
   }
   return {
     path: str(d.path),
+    sourcePath: str(d.sourcePath),
     diff: str(d.diff),
     firstChangedLine: num(d.firstChangedLine),
     op: str(d.op),
     move: str(d.move),
+    truncated: d.truncated === true || (isRecord(d.meta) && isRecord(d.meta.truncation)),
     isError: d.isError === true,
     errorText: str(d.displayErrorText) ?? str(d.errorText),
     diagnostics: diag
@@ -101,6 +113,9 @@ function fileEntry(d: Record<string, unknown>): FileEntry {
       : null,
   };
 }
+
+/** Stands in for `+`/`−` counts the host truncated away; shown in both views. */
+const PARTIAL_STATS_NOTE = "statistics partial — output truncated";
 
 function Summary({ args, result }: ToolRenderProps): ReactNode {
   const input = str(args.input) ?? str(args._input);
@@ -115,8 +130,12 @@ function Summary({ args, result }: ToolRenderProps): ReactNode {
   }
   const opCount = input ? countOps(input) : 0;
   const details = detailsRecord(result);
-  const diff = details && result?.isError !== true ? str(details.diff) : null;
-  const stats = diff ? diffStats(diff) : null;
+  const entry = details ? fileEntry(details) : null;
+  // A truncated diff is a prefix of the real one: its counts are not the file's
+  // totals, so they must not be shown as badges at all.
+  const partial = entry !== null && entry.truncated;
+  const diff = entry !== null && result?.isError !== true ? entry.diff : null;
+  const stats = diff && !partial ? diffStats(diff) : null;
   const firstLine = input
     ? truncate(normalizeWs(input.split("\n", 1)[0] ?? ""), 80)
     : "";
@@ -153,6 +172,12 @@ function Summary({ args, result }: ToolRenderProps): ReactNode {
           <Badge tone="err">−{stats.deletions}</Badge>
         </>
       )}
+      {partial && (
+        <>
+          {" "}
+          <span className="tv-muted">{PARTIAL_STATS_NOTE}</span>
+        </>
+      )}
       {result?.isError === true && (
         <>
           {" "}
@@ -171,6 +196,7 @@ function FileSection({
   fallbackPath?: string | null;
 }): ReactNode {
   const path = entry.path ?? fallbackPath ?? null;
+  const source = entry.sourcePath;
   const op = entry.op === "create" || entry.op === "delete" ? entry.op : null;
   const diag = entry.diagnostics;
   return (
@@ -178,17 +204,17 @@ function FileSection({
       {(path !== null || op !== null || entry.move !== null) && (
         <div className="tv-row">
           <span className="tv-row-val">
+            {source !== null && (
+              <>
+                <PathText path={source} />
+                {path !== null && " → "}
+              </>
+            )}
             {path !== null && (
               <PathText
                 path={path}
                 from={entry.isError ? null : entry.firstChangedLine}
               />
-            )}
-            {entry.move !== null && (
-              <>
-                {" → "}
-                <PathText path={entry.move} />
-              </>
             )}
             {op !== null && (
               <>
@@ -204,6 +230,9 @@ function FileSection({
             )}
           </span>
         </div>
+      )}
+      {entry.truncated && (
+        <div className="tv-muted">{PARTIAL_STATS_NOTE}</div>
       )}
       {entry.isError
         ? entry.errorText !== null && (

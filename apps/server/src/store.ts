@@ -127,6 +127,14 @@ export interface MetadataStore {
    * Ascending matches `listEvents` so the caller can slice/annotate identically.
    */
   listEventsTail<T = unknown>(conversationId: string, beforeSeq?: number, limit?: number): Promise<Array<StoreEvent<T>>>;
+  /**
+   * The newest event (highest `seq`) of any of `types` for this conversation, or
+   * `null`. Uncapped on purpose: a question like "is a handoff marker standing?"
+   * must not be answered from a fixed-size window of *all* event types, because
+   * unrelated traffic can push the only event that matters out of it. Unknown
+   * conversation id is `null`, not a throw (matching `listEventsTail`).
+   */
+  latestEventOfTypes<T = unknown>(conversationId: string, types: readonly string[]): Promise<StoreEvent<T> | null>;
   recordCommandOnce(idempotencyKey: string, conversationId: string, kind: string, payload: Record<string, unknown>): Promise<{ first: boolean; command: StoredCommand }>;
 }
 
@@ -606,6 +614,16 @@ export function createMetadataStore(stateDir: string, now: () => Date = () => ne
       const older = (events.get(conversationId) ?? []).filter((event) => event.seq < beforeSeq);
       // The list is stored in ascending seq order, so the newest `limit` are its tail.
       return older.slice(-capped) as Array<StoreEvent<T>>;
+    },
+    async latestEventOfTypes<T = unknown>(conversationId: string, types: readonly string[]) {
+      await load();
+      const wanted = new Set(types);
+      const list = events.get(conversationId) ?? [];
+      for (let index = list.length - 1; index >= 0; index -= 1) {
+        const event = list[index]!;
+        if (wanted.has(event.type)) return event as StoreEvent<T>;
+      }
+      return null;
     },
     recordCommandOnce(idempotencyKey, conversationId, kind, payload) {
       return serialize(async () => {

@@ -19,6 +19,7 @@
     "dev": "pnpm --filter @caw/server dev",
     "start": "pnpm --filter @caw/server start",
     "compat": "node scripts/compat-check.mjs",
+    "typecheck:compat": "tsc -p tsconfig.compat.json --noEmit",
     "guest:build": "node scripts/build-guest.mjs",
     "format": "prettier --write .",
     "format:check": "prettier --check ."

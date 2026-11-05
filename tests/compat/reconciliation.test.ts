@@ -170,6 +170,13 @@ function createAdapters(
       await tmux.kill(id, { expectedIdentity: expectedServerIdentity });
     },
     isSessionLive: (id) => lease.isLive(id),
+    // The supervisor proves a published host belongs to *this* pane by process
+    // lineage before it will record the host's session id on the row. Omitting
+    // this adapter member (the interface requires it) made every match "unknown",
+    // so no host was ever positively matched and `start()` always returned after
+    // the publish timeout with `nativeSessionId: null`. The real probe is used,
+    // not a stub, so this suite still tests the runtime against real lineage.
+    isProcessDescendant: (candidatePid, panePid) => tmux.isProcessDescendant(candidatePid, panePid),
     newestSessionFor: async (cwd) => {
       const sessions = await catalog.listForCwd(cwd);
       const newest = sessions[0];
@@ -377,7 +384,19 @@ maybe("real OMP: reconciliation after backend restart", () => {
       fixture.tracking.killCalls.length = 0;
       const report = await createSupervisor({ store: fixture.store, adapters, maxActive: 2 }).reconcile();
       const conversation = fixture.conversations.get("managed")!;
-      expect(report).toEqual({ adopted: 0, external: 0, stopped: 0, unknown: 1, registered: 0 });
+      // The safety properties, asserted directly rather than through one whole
+      // object shape. `adopted` is deliberately NOT pinned: the interface defines
+      // it as "a live managed process we adopted", and a live managed pane is one,
+      // so it is 1 whether or not the registry read succeeded — its value is not
+      // a safety claim. What must hold when the registry is unreadable:
+      //   - the turn state is unknown (an unreadable registry proves nothing);
+      //   - the row is not relabelled external or stopped;
+      //   - no host identity is invented (`registered`);
+      //   - nothing is killed and the process is still alive.
+      expect(report.unknown).toBe(1);
+      expect(report.external).toBe(0);
+      expect(report.stopped).toBe(0);
+      expect(report.registered).toBe(0);
       expect(conversation.state).toBe("unknown");
       expect(conversation.statusDetail).toContain("registry could not be read");
       expect(fixture.tracking.killCalls).toEqual([]);

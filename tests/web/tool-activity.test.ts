@@ -219,14 +219,21 @@ describe("file changes", () => {
     expect(summarizeFileChanges([row])?.additions).toBe(0);
   });
 
-  it("carries a truncated flag through without counting the missing hunks", () => {
+  it("refuses to print counts derived from a truncated diff as totals", () => {
+    // R03: `truncated: true` means the diff is a prefix, so any count taken from
+    // it is a floor. Printing it as the file's +/− would state a total the host
+    // never sent. (Superseded the earlier expectation that the counts ride
+    // through unchanged — that was the defect.)
     const row = toolRow({ id: "u5", toolName: "edit", toolResult: { content: [], details: {
       path: "src/big.ts", op: "edit", truncated: true,
       diff: "--- a/src/big.ts\n+++ b/src/big.ts\n@@ -1 +1 @@\n-a\n+b\n",
     } } });
     const [file] = fileChangesOf(row);
     expect(file!.truncated).toBe(true);
-    expect(file!.additions).toBe(1);
+    expect(file!.additions).toBeNull();
+    expect(file!.deletions).toBeNull();
+    expect(summarizeFileChanges([row])?.additions).toBeNull();
+    expect(summarizeFileChanges([row])?.note).toContain("counts incomplete");
   });
 
   it("scales to many files and a large diff without losing a file", () => {
