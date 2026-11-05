@@ -1816,17 +1816,22 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
    */
   const refreshVibe = useCallback(async (): Promise<void> => {
     const target = conversationIdRef.current;
-    // A missing method is a real configuration error, but it must never surface as
-    // an unhandled rejection from a frame handler (this runs on every welcome, and
-    // a bare `await` on a missing method throws asynchronously). Guarded and
-    // reported like any other read failure.
-    const read = typeof api.getVibe === "function"
-      ? await api.getVibe(target).catch(() => null)
-      : null;
+    // A throw here must never surface as an unhandled rejection from a frame
+    // handler (this runs on every welcome). It is caught and reported as the
+    // failure it is — NOT as "unavailable in this build": a transient network
+    // fault and a build without the endpoint are different facts, and saying the
+    // second when the first happened is the kind of mislabel this app avoids.
+    let read: Awaited<ReturnType<typeof api.getVibe>> | null = null;
+    if (typeof api.getVibe === "function") {
+      read = await api.getVibe(target).catch((error: unknown) => ({
+        ok: false as const,
+        error: { code: "internal" as const, message: error instanceof Error ? error.message : String(error) },
+      }));
+    }
     if (read === null) {
       if (conversationIdRef.current === target) {
         setVibeWorkerIdsFromServer([]);
-        setVibeState((previous) => previous ?? { available: false, reason: "The vibe control is unavailable in this build.", modes: null, tools: null, model: null, thinkingLevel: null, workerIds: [] });
+        setVibeState((previous) => previous ?? { available: false, reason: "This build has no vibe control endpoint.", modes: null, tools: null, model: null, thinkingLevel: null, workerIds: [] });
       }
       return;
     }
@@ -1881,7 +1886,21 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     setVibeBusy(true);
     setVibeError(null);
     void api.setVibe(target, action).then((result) => {
-      if (conversationIdRef.current !== target) return;
+      // B03 (the loss half): if the user switched conversations while this was in
+      // flight, the UI state below belongs to a conversation nobody is looking at
+      // — but a directive the user typed must never simply vanish. It is recorded
+      // in the recovery list, which `App` keeps **per conversation**, so it is
+      // waiting for them when they return. This is the one thing that must survive
+      // the early return; everything else is correctly dropped.
+      if (conversationIdRef.current !== target) {
+        if (directive !== undefined && directive !== "") {
+          setRefusedRecoveries([
+            ...refusedRecoveriesRef.current,
+            { id: Date.now(), text: directive, unconfirmed: true },
+          ]);
+        }
+        return;
+      }
       setVibeBusy(false);
       if (!result.ok) { setVibeError(result.error?.message ?? "The control bridge did not answer."); return; }
       const verdict: NativeModeResult = result.data;

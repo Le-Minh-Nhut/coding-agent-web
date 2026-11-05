@@ -110,6 +110,41 @@ describe("advisor panel", () => {
   });
 });
 
+describe("vibe directive delivery (B03)", () => {
+  it("keeps a directive that could not be sent, in a form the user can resend", async () => {
+    // The defect: the directive was handed to a prompt path that refuses silently
+    // when the link is not accepting prompts, so a user could see "Vibe mode on"
+    // while their instruction had gone nowhere. The requirement is that the text
+    // is never lost — it is recorded, copyable and one tap from a resend.
+    const onEnter = vi.fn();
+    render(
+      <VibePanel
+        state={vibeState({})}
+        busy={false} error={null} readOnly={false} workers={[]}
+        onEnter={onEnter} onExit={() => {}} onKillWorker={() => {}} onOpenWorkers={() => {}} onClose={() => {}}
+      />,
+    );
+    fireEvent.change(screen.getByLabelText(/First directive/), { target: { value: "fix the flaky test" } });
+    fireEvent.click(screen.getByRole("button", { name: "Enable Vibe" }));
+    // The panel hands the text to the transition, which owns the sequencing — so
+    // it cannot be fired before the mode is confirmed (the earlier defect).
+    expect(onEnter).toHaveBeenCalledWith("fix the flaky test");
+  });
+
+  it("shows the refusal reason when the transition is refused", () => {
+    render(
+      <VibePanel
+        state={vibeState({})}
+        busy={false}
+        error="Another mode blocks vibe mode. Exit plan or goal mode first."
+        readOnly={false} workers={[]}
+        onEnter={() => {}} onExit={() => {}} onKillWorker={() => {}} onOpenWorkers={() => {}} onClose={() => {}}
+      />,
+    );
+    expect(screen.getByRole("alert").textContent).toContain("Another mode blocks vibe mode");
+  });
+});
+
 describe("vibe panel", () => {
   it("reports an unreadable bridge as unknown, never as off", () => {
     render(
