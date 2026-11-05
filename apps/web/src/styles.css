@@ -830,6 +830,16 @@ textarea::placeholder {
   text-align: left;
 }
 
+.markdown-table-scroll th {
+  background-color: var(--surface-secondary);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.markdown-table-scroll tbody tr:nth-child(even) td {
+  background-color: rgba(255, 255, 255, 0.03);
+}
+
 .markdown-code-block {
   min-width: 0;
 }
@@ -1494,15 +1504,17 @@ details[open] summary {
   font-size: 0.8rem;
 }
 
-/* The guest design system's host-token bridge. The scope is `.tool-row`, not
-   `.tv-card`: the web bundle never emits `.tv-card` (only the standalone guest's
-   `ToolView` does, and `apps/web` deliberately does not import it), so a
-   `.tv-card` bridge matched nothing here and every `--tv-*` consumer resolved to
-   the empty value. A tool row is the single container wrapping both guest
-   surfaces — `Summary` in `.tool-row-head` and `Body` in `.tool-body`, which
-   holds `DiffBlock` — so the tokens reach both. Without them the guest falls back
-   to its own oklch palette, which happens to be dark-on-dark against this theme. */
-.tool-row {
+/* The guest design system's host-token bridge. The scope is `:root`, not
+   `.tv-card` and not `.tool-row`: the web bundle never emits `.tv-card` (only the
+   standalone guest's `ToolView` does, and `apps/web` deliberately does not import
+   it), so a `.tv-card` bridge matched nothing here and every `--tv-*` consumer
+   resolved to the empty value. `:root` is the one scope both the conversation
+   tool rows (`Summary` in `.tool-row-head`, `Body` in `.tool-body` holding
+   `DiffBlock`) and the Files Center diff viewer sit under, so a single
+   declaration reaches every guest surface and cannot drift between them.
+   Without them the guest falls back to its own oklch palette, which happens to
+   be dark-on-dark against this theme. */
+:root {
   --tv-fg: var(--text);
   --tv-muted: var(--text-muted);
   --tv-faint: var(--text-muted);
@@ -1519,10 +1531,12 @@ details[open] summary {
 
 /* Added and deleted lines must read as green/red text, not only as a wash of
    tint: the guest default mixes its accent 70% toward `--tv-fg`, which lands pale
-   enough to lose the signal. Scoped to the production chain (`.tool-row` →
-   `.tool-body`) and left off the hunk rows, which keep their own muted colour. */
-.tool-row .tv-diff-row--add { color: #3fb950; }
-.tool-row .tv-diff-row--del { color: var(--danger-text); }
+   enough to lose the signal. Declared once, unscoped, for the same reason the
+   `--tv-*` bridge is: the conversation tool rows and the Files Center diff viewer
+   are both production guest surfaces, and a second scoped copy is how the two came
+   to disagree. The hunk rows stay out of it and keep their own muted colour. */
+.tv-diff-row--add { color: #3fb950; }
+.tv-diff-row--del { color: var(--danger-text); }
 
 .tool-body .tv-head { min-height: var(--touch-min); }
 .tool-body .tv-expand { min-height: var(--touch-min); }

@@ -172,9 +172,9 @@ async function openFilesLayerFromCard(page: Page): Promise<{ cardText: string; c
 /** Where the visual-verification captures land (Phase 10 keeps a PNG per screen). */
 const CAPTURES = join(homedir(), ".cache", "caw-screens");
 
-/** Computed background colour of the first row matching a selector, as `rgb(...)`. */
-async function rowBackground(page: Page, selector: string): Promise<string> {
-  return page.locator(selector).first().evaluate((element) => getComputedStyle(element).backgroundColor);
+/** Computed value of one CSS property on the first row matching a selector, as the browser reports it. */
+async function rowCss(page: Page, selector: string, property: "backgroundColor" | "color"): Promise<string> {
+  return page.locator(selector).first().evaluate((element, prop) => getComputedStyle(element)[prop], property);
 }
 
 test.beforeEach(async ({ request }) => {
@@ -230,13 +230,22 @@ test("tapping a file shows its diff with add/del row backgrounds distinct from c
   await expect(page.locator(".tv-diff-row--add").first()).toBeVisible();
   await expect(page.locator(".tv-diff-row--del").first()).toBeVisible();
 
-  const [add, del, ctx] = await Promise.all([
-    rowBackground(page, ".tv-diff-row--add"),
-    rowBackground(page, ".tv-diff-row--del"),
-    rowBackground(page, ".files-diff-row:not(.tv-diff-row--add):not(.tv-diff-row--del):not(.tv-diff-row--hunk):not(.tv-diff-row--gap)"),
+  const [add, del, ctx, addColor, delColor, ctxColor] = await Promise.all([
+    rowCss(page, ".tv-diff-row--add", "backgroundColor"),
+    rowCss(page, ".tv-diff-row--del", "backgroundColor"),
+    rowCss(page, ".files-diff-row:not(.tv-diff-row--add):not(.tv-diff-row--del):not(.tv-diff-row--hunk):not(.tv-diff-row--gap)", "backgroundColor"),
+    rowCss(page, ".tv-diff-row--add", "color"),
+    rowCss(page, ".tv-diff-row--del", "color"),
+    rowCss(page, ".files-diff-row:not(.tv-diff-row--add):not(.tv-diff-row--del):not(.tv-diff-row--hunk):not(.tv-diff-row--gap)", "color"),
   ]);
-  const colours = { add, del, ctx };
+  const colours = { add, del, ctx, addColor, delColor, ctxColor };
   console.log("[files-center diff colours]", JSON.stringify(colours));
+
+  // The glyph colour is the same single declaration the conversation diff rows
+  // resolve, so an added line can never be one green here and another there.
+  // `#3fb950` is the conversation's measured add colour; `--danger-text` is #f87171.
+  expect(addColor, "add glyphs must match the conversation's #3fb950").toBe("rgb(63, 185, 80)");
+  expect(delColor, "del glyphs must match the conversation's --danger-text").toBe("rgb(248, 113, 113)");
 
   // Measured, not eyeballed. A context row carries no tint by design, so it may be
   // transparent; what must hold is that both signals actually PAINT and that no two

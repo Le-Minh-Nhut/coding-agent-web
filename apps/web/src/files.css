@@ -2,10 +2,9 @@
    File name for the main agent's import: apps/web/src/files.css.
 
    Everything here comes from the design tokens in `styles.css`; no raw hex is
-   used for a diff row. The `--tv-*` bridge is redeclared below on purpose: the
-   app's own bridge in `styles.css` is scoped to `.tool-row`, which this layer is
-   not, so without it every `var(--tv-ok)`/`var(--tv-err)` inside a diff row would
-   resolve to nothing and the added/deleted washes would disappear. */
+   used for a diff row. The `--tv-*` bridge now lives once at `:root` in
+   `styles.css`, the scope both the conversation tool rows and this layer sit
+   under, so both surfaces inherit one identical set of values. */
 
 .files-layer {
   position: fixed;
@@ -16,19 +15,6 @@
   flex-direction: column;
   min-height: 0;
   overflow: hidden;
-
-  --tv-fg: var(--text-primary);
-  --tv-muted: var(--text-secondary);
-  --tv-faint: var(--text-muted);
-  --tv-accent: var(--primary);
-  --tv-ok: var(--success);
-  --tv-err: var(--danger-text);
-  --tv-warn: var(--warning);
-  --tv-border: var(--border-subtle);
-  --tv-inset: var(--surface-primary);
-  --tv-raised: var(--surface-secondary);
-  --tv-ring: var(--primary);
-  --tv-mono: var(--font-mono);
 }
 
 .files-center,
@@ -326,12 +312,6 @@ button.files-diff-nav button {
 .files-diff-scroll--wrap {
   overflow-x: hidden;
 }
-
-/* Added/deleted must read as green/red TEXT, not only as a tint: the guest
-   default mixes its accent 70% toward `--tv-fg`, which lands pale enough to lose
-   the signal on this dark inset. */
-.files-layer .tv-diff-row--add { color: var(--success); }
-.files-layer .tv-diff-row--del { color: var(--danger-text); }
 
 .files-show-all {
   display: block;
