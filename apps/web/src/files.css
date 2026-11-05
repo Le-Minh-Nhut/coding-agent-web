@@ -1,0 +1,372 @@
+/* Files Center (level 2) and the per-file diff viewer (level 3).
+   File name for the main agent's import: apps/web/src/files.css.
+
+   Everything here comes from the design tokens in `styles.css`; no raw hex is
+   used for a diff row. The `--tv-*` bridge is redeclared below on purpose: the
+   app's own bridge in `styles.css` is scoped to `.tool-row`, which this layer is
+   not, so without it every `var(--tv-ok)`/`var(--tv-err)` inside a diff row would
+   resolve to nothing and the added/deleted washes would disappear. */
+
+.files-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  background: var(--app-bg);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+
+  --tv-fg: var(--text-primary);
+  --tv-muted: var(--text-secondary);
+  --tv-faint: var(--text-muted);
+  --tv-accent: var(--primary);
+  --tv-ok: var(--success);
+  --tv-err: var(--danger-text);
+  --tv-warn: var(--warning);
+  --tv-border: var(--border-subtle);
+  --tv-inset: var(--surface-primary);
+  --tv-raised: var(--surface-secondary);
+  --tv-ring: var(--primary);
+  --tv-mono: var(--font-mono);
+}
+
+.files-center,
+.files-diff {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: calc(var(--safe-top) + 8px) calc(var(--safe-right) + 12px) calc(var(--safe-bottom) + 16px) calc(var(--safe-left) + 12px);
+}
+
+.files-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  min-width: 0;
+}
+
+.files-back {
+  flex: none;
+  min-width: var(--touch-min);
+  min-height: var(--touch-min);
+  background: none;
+  border: 0;
+  color: var(--text-primary);
+  font-size: 1.2rem;
+  cursor: pointer;
+}
+
+.files-head-titles {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.files-head h2 {
+  font-size: 1.1rem;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.files-count,
+.files-diff-dir {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.files-window-note {
+  flex: none;
+  font-size: 0.78rem;
+  line-height: 1.45;
+  color: var(--text-muted);
+}
+
+.files-chips {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  flex: none;
+}
+
+button.files-chip,
+button.files-toggle {
+  min-height: var(--touch-min);
+  padding: 0 14px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-control);
+  background: var(--surface-primary);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+button.files-chip[aria-pressed="true"] {
+  background: var(--primary-action);
+  border-color: var(--primary-action);
+  color: #ffffff;
+}
+
+.files-toolbar {
+  display: flex;
+  gap: 8px;
+  flex: none;
+  min-width: 0;
+}
+
+.files-search {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: var(--touch-min);
+  padding: 0 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-control);
+  background: var(--surface-primary);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 0.9rem;
+}
+
+.files-list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex: none;
+}
+
+.files-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 44px;
+  padding: 8px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-card);
+  background: var(--surface-primary);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.files-row:hover {
+  background: var(--surface-hover);
+}
+
+.files-row-titles {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.files-row-name {
+  font-size: 0.95rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.files-row-dir {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.files-row-meta {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  flex: none;
+  font-size: 0.75rem;
+}
+
+.files-row-counts {
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.files-row-edits,
+.files-row-flag {
+  color: var(--text-muted);
+}
+
+.files-row-flag--failed {
+  color: var(--danger-text);
+}
+
+.files-row-flag--truncated {
+  color: var(--warning);
+}
+
+.files-status,
+.files-row-status {
+  flex: none;
+  width: 18px;
+  text-align: center;
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+.files-status--modified { color: var(--warning); }
+.files-status--added { color: var(--success); }
+.files-status--deleted { color: var(--danger-text); }
+.files-status--renamed { color: var(--primary); }
+.files-status--binary { color: var(--text-muted); }
+.files-status--unknown { color: var(--text-muted); }
+.files-status--failed { color: var(--danger-text); }
+
+.files-empty,
+.files-note {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
+.files-error {
+  flex: none;
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--danger);
+  border-radius: var(--radius-control);
+  background: var(--surface-primary);
+  color: var(--danger-text);
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* ── the diff viewer ───────────────────────────────────────────────────────── */
+
+.files-diff-meta,
+.files-diff-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  flex: none;
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+}
+
+.files-diff-nav {
+  display: inline-flex;
+  gap: 6px;
+  margin-left: auto;
+}
+
+button.files-diff-nav button {
+  min-width: var(--touch-min);
+  min-height: var(--touch-min);
+}
+
+.files-diff-scroll {
+  /* The viewer's own scroll container: hunk navigation scrolls THIS, never the
+     page above it, and a long line scrolls here instead of widening the phone.
+     Bounded so the meta line, the copy controls and the raw disclosure stay
+     reachable when the diff is taller than the screen. */
+  flex: 1 1 auto;
+  min-height: 240px;
+  max-height: 70vh;
+  overflow: auto;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-card);
+  background: var(--tv-inset);
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  line-height: 1.5;
+  padding: 6px 0;
+}
+
+.files-diff-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  white-space: pre;
+  min-width: 0;
+}
+
+.files-diff-gutter {
+  flex: none;
+  width: 2.6em;
+  text-align: right;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+  user-select: none;
+}
+
+.files-diff-code {
+  flex: 1 1 auto;
+}
+
+/* Off (the default): a long line scrolls inside this container rather than
+   widening the page. On: it wraps, and the container stops scrolling sideways. */
+.files-diff-scroll--wrap .files-diff-row {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.files-diff-scroll--wrap {
+  overflow-x: hidden;
+}
+
+/* Added/deleted must read as green/red TEXT, not only as a tint: the guest
+   default mixes its accent 70% toward `--tv-fg`, which lands pale enough to lose
+   the signal on this dark inset. */
+.files-layer .tv-diff-row--add { color: var(--success); }
+.files-layer .tv-diff-row--del { color: var(--danger-text); }
+
+.files-show-all {
+  display: block;
+  width: calc(100% - 16px);
+  margin: 8px;
+  min-height: var(--touch-min);
+}
+
+.files-raw {
+  flex: none;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-card);
+  background: var(--surface-primary);
+}
+
+.files-raw > summary {
+  min-height: var(--touch-min);
+  display: flex;
+  align-items: center;
+  padding: 0 12px;
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.files-raw-json {
+  margin: 0;
+  padding: 12px;
+  overflow-x: auto;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
+.files-copy-note--failed {
+  color: var(--danger-text);
+}
