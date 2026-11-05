@@ -117,8 +117,9 @@ body {
   overflow: hidden;
 }
 
-/* The header's title/copy block plus its chips: the copy shrinks and ellipsises,
-   the chips never do, and the row cannot widen the document at 320px. */
+/* Chips live in the header's fixed action cluster, not inside the title block:
+   the copy shrinks and ellipsises, the chips and the buttons never do, and the
+   row cannot widen the document at 320px. */
 .header-chips {
   display: flex;
   align-items: center;
@@ -460,7 +461,11 @@ button.composer-send {
   white-space: nowrap;
 }
 
-.conversation-header-actions button {
+/* Direct children only: this cluster now also CONTAINS the header chips and the
+   overflow sheet, and `button` matched every row inside them. In the media query
+   below that meant `width: 44px` on a full menu row, whose label then spilled
+   outside the sheet at 390px. The rule is about the cluster's own icon buttons. */
+.conversation-header-actions > button {
   min-height: 44px;
   min-width: 44px;
   padding: 4px 8px;
@@ -1137,7 +1142,9 @@ details[open] summary {
     gap: 4px;
   }
 
-  .conversation-header-actions button {
+  /* Direct children only — see the note on the rule above. This is the declaration
+     that was squeezing every menu row to 44px wide at the default phone width. */
+  .conversation-header-actions > button {
     width: 44px;
     padding: 4px;
   }
@@ -1311,9 +1318,10 @@ details[open] summary {
   min-width: 0;
 }
 
+/* One line per file in an edit's flattened body: whole row is the control. */
 .tv-file-change-head {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 8px;
   min-width: 0;
   width: 100%;
@@ -1331,6 +1339,62 @@ details[open] summary {
   cursor: default;
   /* A row with nothing to open is not a control, but it keeps the same height so
      the list does not jitter between rows. */
+}
+
+.tv-file-change-head:hover {
+  background: var(--surface-hover);
+}
+
+/* Filename primary, directory secondary on one line: an absolute path is never
+   printed twice, and the part that distinguishes two files is the part that
+   survives the ellipsis. */
+.tv-file-titles {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+}
+
+.tv-file-name {
+  flex: none;
+  max-width: 60%;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.tv-file-dir {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  /* Ellipsise from the LEFT so the deepest directory survives: the tail of the
+     path (the part nearest the file) is what tells two lookalike trees apart. */
+  direction: rtl;
+  text-align: left;
+}
+
+/* The failed call's own reason, verbatim: a failure with no message is one the
+   user cannot act on. */
+.tool-body-error {
+  margin: 0;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--surface);
+  border-left: 2px solid var(--danger-text);
+  color: var(--danger-text);
+  font-size: 0.8rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* The raw `details` payload, one disclosure per edit row. */
+.tool-raw-details {
+  margin: 0;
 }
 
 .tv-note {
@@ -1430,9 +1494,15 @@ details[open] summary {
   font-size: 0.8rem;
 }
 
-/* The guest design system's host-token bridge: without these it falls back to its
-   own oklch palette, which happens to be dark-on-dark against this theme. */
-.tv-card {
+/* The guest design system's host-token bridge. The scope is `.tool-row`, not
+   `.tv-card`: the web bundle never emits `.tv-card` (only the standalone guest's
+   `ToolView` does, and `apps/web` deliberately does not import it), so a
+   `.tv-card` bridge matched nothing here and every `--tv-*` consumer resolved to
+   the empty value. A tool row is the single container wrapping both guest
+   surfaces — `Summary` in `.tool-row-head` and `Body` in `.tool-body`, which
+   holds `DiffBlock` — so the tokens reach both. Without them the guest falls back
+   to its own oklch palette, which happens to be dark-on-dark against this theme. */
+.tool-row {
   --tv-fg: var(--text);
   --tv-muted: var(--text-muted);
   --tv-faint: var(--text-muted);
@@ -1446,6 +1516,13 @@ details[open] summary {
   --tv-ring: var(--primary);
   --tv-mono: var(--font-mono);
 }
+
+/* Added and deleted lines must read as green/red text, not only as a wash of
+   tint: the guest default mixes its accent 70% toward `--tv-fg`, which lands pale
+   enough to lose the signal. Scoped to the production chain (`.tool-row` →
+   `.tool-body`) and left off the hunk rows, which keep their own muted colour. */
+.tool-row .tv-diff-row--add { color: #3fb950; }
+.tool-row .tv-diff-row--del { color: var(--danger-text); }
 
 .tool-body .tv-head { min-height: var(--touch-min); }
 .tool-body .tv-expand { min-height: var(--touch-min); }
@@ -1500,20 +1577,52 @@ details[open] summary {
   line-height: 1;
 }
 
+/* The overflow sheet: a grouped disclosure that must not outgrow the viewport.
+   `top` clears the header (safe-top + 56px header height + 4px gap) so the sheet
+   never overlaps the row that opens it. `max-height` leaves room for the safe area
+   and a bottom margin; `overscroll-behavior: contain` keeps a flick inside the
+   sheet from scrolling the transcript behind it. z-index 45 clears the composer
+   (10) and the Latest button (15) inside the header's own stacking context. */
 .header-menu {
   position: absolute;
-  top: calc(var(--safe-top) + 52px);
+  top: calc(var(--safe-top) + 60px);
   right: calc(var(--safe-right) + 8px);
-  z-index: 40;
+  z-index: 45;
   display: flex;
   flex-direction: column;
-  min-width: 200px;
+  /* min() so the sheet narrows on a 320px phone instead of taking 51% of it. */
+  width: min(280px, calc(100vw - 16px));
   padding: 4px;
+  max-height: calc(100dvh - var(--safe-top) - 60px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-bottom: calc(4px + var(--safe-bottom));
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 8px;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
-  overscroll-behavior: contain;
+}
+
+.header-menu-group {
+  display: flex;
+  flex-direction: column;
+}
+
+/* Groups are separated by a rule, not padding alone, so the Session group (whose
+   two entries both end something) reads as its own block. */
+.header-menu-group + .header-menu-group {
+  margin-top: 4px;
+  border-top: 1px solid var(--border);
+  padding-top: 4px;
+}
+
+.header-menu-heading {
+  padding: 6px 12px 2px;
+  color: var(--text-muted);
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
 }
 
 .header-menu button {
@@ -1550,6 +1659,71 @@ details[open] summary {
 .activity-group > .tool-output-preview {
   margin: 0 12px 12px;
   font-size: 0.8rem;
+}
+
+/* ── Activity timeline rows ──────────────────────────────────────────────────
+   The panel used to render ~15 inline styles per row; these are those styles,
+   named. The row states what was RECORDED, so the tone only marks how loud the
+   record is — it never claims an outcome. `details summary` already carries the
+   44px touch minimum (see the `details summary` rule above), so the raw-record
+   disclosure satisfies touch size without any rule here. */
+.activity-date-heading {
+  margin: 12px 0 4px;
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.activity-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.activity-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.activity-label {
+  font-weight: 600;
+  font-size: 0.95rem;
+}
+
+.activity-time {
+  flex: none;
+  color: var(--text-muted);
+  font-size: 0.75rem;
+}
+
+.activity-detail {
+  color: var(--text-muted);
+  font-size: 0.8rem;
+}
+
+.activity-item--success .activity-label { color: var(--success); }
+.activity-item--warning .activity-label { color: var(--warning); }
+.activity-item--error .activity-label { color: var(--danger-text); }
+/* Internal bookkeeping: present, since it is still the only record the step
+   happened, but visibly quieter than a step the user can act on. */
+.activity-item--internal .activity-label {
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+.activity-raw-body {
+  margin: 4px 0 0;
+  padding: 6px 8px;
+  background-color: var(--surface-alt);
+  border-radius: 4px;
+  overflow-x: auto;
+  font-size: 0.75rem;
 }
 
 /* ── Mode chips + advisor card + native mode panels (round 51) ───────────────
