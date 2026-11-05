@@ -12,6 +12,45 @@
   padding: calc(var(--safe-top) + 8px) calc(var(--safe-right) + 12px) calc(var(--safe-bottom) + 16px) calc(var(--safe-left) + 12px);
 }
 
+/*
+ * Agent Detail is a FIXED column: its header, status line and Task section are
+ * flex:none, and the transcript section takes the remaining height. Its own
+ * `.agent-chat-scroll` is then the only scrolling box on the screen.
+ *
+ * The page-level `overflow-y: auto` above still applies to the Agents Center, and
+ * remains the fallback here for a viewport too short to honour the minimums — so a
+ * 320x568 phone scrolls the page rather than clipping a control out of reach.
+ */
+.agent-detail {
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.agent-detail > .agents-head,
+.agent-detail > .agent-status-line,
+.agent-detail > .agent-section {
+  flex: none;
+}
+
+/*
+ * The transcript section hugs its content and shrinks when the viewport leaves less
+ * room than that (`0 1 auto`), rather than expanding to fill. With `1 1 auto` a
+ * three-message chat stretched to the bottom of the screen and left a screen-tall
+ * dead gap above the Actions section — visible in the 390x844 screenshot. It can
+ * still shrink to release room, and `.agent-chat-scroll`'s `min-height` is the floor.
+ *
+ * `overflow: hidden` is load-bearing: an OPEN Diagnostics disclosure holds a raw
+ * `<pre>` whose height is unrelated to the space left, and without this it painted
+ * straight over the Actions section below (caught in the 390x844 screenshot).
+ * Nothing is hidden by it — the disclosure keeps its own internal scroller.
+ */
+.agent-detail > .agent-section--transcript {
+  flex: 0 1 auto;
+  min-height: 0;
+  overflow: hidden;
+}
+
 .agents-head {
   display: flex;
   align-items: center;

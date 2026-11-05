@@ -206,6 +206,76 @@ describe("Collab transcript reducer", () => {
     expect(state.transcripts["agent-a"]).toMatchObject({ text: "first\npartial\n", carry: "", newSize: 14 });
   });
 
+  /**
+   * A poll that found nothing new must not invalidate the agent's transcript object.
+   *
+   * The view memoises its parse on that object (or on the strings inside it), and the
+   * host polls every 1200 ms whether or not the journal grew. Rebuilding the object
+   * anyway meant re-parsing the whole journal on every tick — measured at +1945
+   * `JSON.parse` calls per unchanged poll on a 4.4 MB journal, ~130 ms of blocked
+   * main thread, forever, on a phone.
+   *
+   * Identity, not deep equality, is the contract: `toBe` fails if the reducer ever
+   * goes back to handing out a fresh object for unchanged bytes, which `toEqual`
+   * would not catch.
+   */
+  describe("an unchanged poll", () => {
+    /** State holding one agent whose last reply had already landed. */
+    function settled(): TranscriptState {
+      let state = trackTranscriptRequest(createTranscriptState(), 1, "agent-a", 0);
+      return apply(state, { t: "transcript", reqId: 1, text: "kept\n", newSize: 5 });
+    }
+
+    it("returns the identical transcripts[agentId] object and commits the request", () => {
+      const before = settled();
+      const previousEntry = before.transcripts["agent-a"];
+      const state = trackTranscriptRequest(before, 2, "agent-a", 5);
+      const result = apply(state, { t: "transcript", reqId: 2, text: "", newSize: 5 });
+
+      expect(result.transcripts["agent-a"], "unchanged bytes must not rebuild the entry").toBe(previousEntry);
+      // The request bookkeeping still lands: this reply answered reqId 2, so the
+      // correlation is retired rather than left to expire and pin the agent.
+      expect(result.transcriptRequests).toEqual({});
+    });
+
+    it("still appends bytes, as a NEW object", () => {
+      const before = settled();
+      const previousEntry = before.transcripts["agent-a"];
+      const state = trackTranscriptRequest(before, 2, "agent-a", 5);
+      const result = apply(state, { t: "transcript", reqId: 2, text: "more\n", newSize: 10 });
+
+      expect(result.transcripts["agent-a"]).not.toBe(previousEntry);
+      expect(result.transcripts["agent-a"]).toMatchObject({ text: "kept\nmore\n", newSize: 10, carry: "" });
+    });
+
+    it("still rewinds a shrunk file and reads its replacement", () => {
+      let state = trackTranscriptRequest(createTranscriptState(), 1, "agent-a", 0);
+      state = apply(state, { t: "transcript", reqId: 1, text: "oldtext\n", newSize: 8 });
+      const staleEntry = state.transcripts["agent-a"];
+      // A rotation: the new size is smaller AND the rewind arrives as empty text at
+      // EOF past the new size, which is how a truncated file is signalled.
+      const req = trackTranscriptRequest(state, 2, "agent-a", 8);
+      const rewound = apply(req, { t: "transcript", reqId: 2, text: "", newSize: 4 });
+
+      expect(rewound.transcripts["agent-a"]).not.toBe(staleEntry);
+      expect(rewound.transcripts["agent-a"]).toMatchObject({ text: "", newSize: 0, carry: "" });
+    });
+
+    it("drops a reply whose cursor does not match, without touching the entry", () => {
+      const before = settled();
+      const previousEntry = before.transcripts["agent-a"];
+      // `fromByte` 5 while the entry says 5 only matches; 4 is a stale re-send from a
+      // poll that raced the append, and must be discarded rather than appended twice.
+      const state = trackTranscriptRequest(before, 2, "agent-a", 4);
+      const result = apply(state, { t: "transcript", reqId: 2, text: "twice\n", newSize: 11 });
+
+      expect(result.transcripts["agent-a"], "a stale reply must not rewrite the entry").toBe(previousEntry);
+      // Dropped replies still clear their correlation; the sibling test at "ignores
+      // transcript replies after panel close" covers the closed-request case.
+      expect(result.transcriptRequests).toEqual({});
+    });
+  });
+
   it("cleans expired and panel-closed transcript request correlations", () => {
     let state = trackTranscriptRequest(createTranscriptState(), 10, "agent-a");
     state = trackTranscriptRequest(state, 11, "agent-b");

@@ -497,8 +497,17 @@ describe("mobile reading behavior", () => {
     expect(fetchedBytes().at(-1)).toBe(0);
 
     // And the rendered transcript is the replacement content, not the old bytes.
-    await act(async () => { socket?.onFrame?.({ t: "transcript", reqId: shrinkReqId + 1, text: "new\n", newSize: 4 }); });
-    expect(container.querySelector(".agent-transcript")?.textContent).toContain("new\n");
+    //
+    // The reply body is native OMP JSONL — the shape this channel has always
+    // carried on the wire. A single-line journal decodes to exactly one row, so the
+    // claim "the replacement content is shown, not the old bytes" is the row's own
+    // text. Prose would decode to no rows at all and would now be reported as an
+    // unreadable record rather than rendered, which is what this test caught.
+    const replacement = '{"type":"message","id":"new-1","parentId":null,"timestamp":"2026-11-06T00:00:01.000Z","message":{"role":"assistant","content":[{"type":"text","text":"new"}]}}\n';
+    await act(async () => { socket?.onFrame?.({ t: "transcript", reqId: shrinkReqId + 1, text: replacement, newSize: replacement.length }); });
+    expect(container.querySelector(".message-card.assistant")?.textContent).toContain("new");
+    // The old bytes really are gone: the shrinking reply replaced them.
+    expect(container.querySelector(".message-card.assistant")?.textContent).not.toContain("oldtext");
   });
 
   it("keeps Latest in a dock row outside transcript scroll area", async () => {

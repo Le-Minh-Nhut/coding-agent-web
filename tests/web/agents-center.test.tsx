@@ -179,6 +179,30 @@ describe("AgentDetail", () => {
     expect(getByText("The host reported no task for this agent.")).toBeTruthy();
   });
 
+  it("shows conversation rows in the default view and keeps the session header behind Diagnostics", () => {
+    const journal = [
+      '{"type":"title","v":1,"title":"","updatedAt":"2026-11-06T00:00:00.000Z","pad":"  "}',
+      '{"type":"session","version":3,"id":"s1","timestamp":"2026-11-06T00:00:00.000Z","cwd":"/tmp"}',
+      '{"type":"message","id":"m1","parentId":null,"timestamp":"2026-11-06T00:00:01.000Z","message":{"role":"assistant","content":[{"type":"text","text":"a committed reply"}]}}',
+    ].join("\n") + "\n";
+    const view = render(
+      <AgentDetail {...props("sub-1", { transcript: { text: journal, newSize: journal.length, carry: "" } })} />,
+    );
+
+    // The default view is the conversation.
+    expect(view.container.querySelector(".message-card.assistant")?.textContent).toContain("a committed reply");
+    // The raw session bytes are NOT in the default view...
+    const chatPanel = view.container.querySelector('[role="tabpanel"]') as HTMLElement;
+    expect(chatPanel.textContent).not.toContain('{"type":"session"');
+    expect(view.container.querySelector("details.agent-chat-raw pre")).toBeNull();
+
+    // ...and Diagnostics does contain them.
+    const details = view.container.querySelector("details.agent-chat-raw") as HTMLDetailsElement;
+    details.open = true;
+    fireEvent(details, new Event("toggle"));
+    expect(view.container.querySelector("details.agent-chat-raw pre")?.textContent).toContain('{"type":"session"');
+  });
+
   it("names the model as not reported, because the wire snapshot has none", () => {
     const { getByText } = render(<AgentDetail {...props("sub-1")} />);
     expect(getByText(/model: not reported/)).toBeTruthy();
@@ -233,6 +257,9 @@ describe("AgentDetail", () => {
       <AgentDetail {...props("sub-1", { transcriptError: "Transcript request timed out." })} />,
     );
     expect(getByRole("alert").textContent).toContain("Transcript request timed out.");
+    // The claim is unchanged: a failed fetch renders the failure and nothing that
+    // could read as content. The chat surface is simply not mounted at all.
+    expect(container.querySelector(".agent-chat")).toBeNull();
     expect(container.querySelector("pre.agent-transcript")).toBeNull();
   });
 
@@ -263,18 +290,24 @@ describe("AgentDetail", () => {
     vi.useFakeTimers();
     try {
       const onFetchTranscript = vi.fn();
+      // The bytes are native OMP JSONL, which is what the wire actually carries:
+      // the original claim ("the received bytes are shown") is preserved, but the
+      // payload is now a real record instead of prose. Prose is not a journal —
+      // it decodes to nothing and is correctly counted as an unreadable record.
+      const journal = '{"type":"message","id":"m1","parentId":null,"timestamp":"2026-11-06T00:00:01.000Z","message":{"role":"assistant","content":[{"type":"text","text":"hello"}]}}\n';
+      const reply = { text: journal, newSize: journal.length, carry: "" };
       const view = render(
-        <AgentDetail {...props("sub-1", { onFetchTranscript, transcript: { text: "hello\n", newSize: 6, carry: "" } })} />,
+        <AgentDetail {...props("sub-1", { onFetchTranscript, transcript: reply })} />,
       );
-      expect(onFetchTranscript).toHaveBeenCalledWith("sub-1", 6);
+      expect(onFetchTranscript).toHaveBeenCalledWith("sub-1", journal.length);
       view.rerender(
-        <AgentDetail
-          {...props("sub-1", { onFetchTranscript, transcript: { text: "hello\n", newSize: 6, carry: "" } })}
-        />,
+        <AgentDetail {...props("sub-1", { onFetchTranscript, transcript: reply })} />,
       );
       vi.advanceTimersByTime(2400);
       expect(onFetchTranscript.mock.calls.length).toBeGreaterThanOrEqual(2);
-      expect(view.getByText(/hello/)).toBeTruthy();
+      expect(view.container.querySelector(".message-card.assistant")?.textContent).toContain("hello");
+      // And the bytes really are the record, not an unreadable blob.
+      expect(view.queryByText(/could not be read/)).toBeNull();
     } finally {
       vi.useRealTimers();
     }

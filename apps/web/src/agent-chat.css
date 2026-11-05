@@ -1,0 +1,248 @@
+/**
+ * The agent-detail chat surface.
+ *
+ * Only layout for this component lives here. Row typography, tool cards and
+ * activity groups are `MessageRow`/`ToolActivity`'s own and stay in `styles.css`,
+ * which the app already loads; re-declaring them here would create the second
+ * convention this repo avoids. Colours come from the existing tokens, so a theme
+ * change moves this screen with the rest of the app.
+ */
+
+.agent-chat {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  /* The rest of the `min-height: 0` chain that starts in `agents.css`: without it
+     this box would size to its content and the scroller below would never shrink. */
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.agent-chat-tabs {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid var(--border);
+  flex: none;
+}
+
+/* The visible panel takes the height the tabs left. `hidden` panels are out of
+   flow entirely, so they contribute nothing while another tab is selected.
+   `overflow: hidden` bounds the panel to that height: an open Diagnostics holds the
+   whole raw journal, and without it the bytes would paint over the page below. */
+.agent-chat-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.agent-chat-panel[hidden] {
+  display: none;
+}
+
+.agent-chat-tabs [role="tab"] {
+  min-height: var(--touch-min);
+  padding: 0 14px;
+  background: none;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 0.95rem;
+  cursor: pointer;
+}
+
+.agent-chat-tabs [role="tab"][aria-selected="true"] {
+  color: var(--text-primary);
+  border-bottom-color: var(--primary);
+}
+
+.agent-chat-tabs [role="tab"]:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: -2px;
+}
+
+/*
+ * The transcript scrolls inside a bounded box, and it is the ONLY scroll container
+ * on the screen.
+ *
+ * `flex: 0 1 auto` — it HUGS its content and shrinks only when the viewport leaves
+ * less room than that, and `max-height` bounds it by the viewport. The earlier
+ * `flex: 1 1 auto` made it grow to fill, so a three-message chat sat inside a 320px
+ * box with a screen-tall dead gap under it. `min-height: 120px` is the floor that
+ * keeps a usable reading area when the header, status line and Task section have
+ * eaten the viewport.
+ */
+.agent-chat-scroll {
+  flex: 0 1 auto;
+  min-height: 120px;
+  max-height: 52vh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-right: 2px;
+}
+
+/* Without this the flex layout lets a long row push the scroller wider than the
+   section instead of wrapping inside it. */
+.agent-chat-scroll > * {
+  flex: none;
+  min-width: 0;
+}
+
+.agent-chat-empty,
+.agent-chat-note,
+.agent-chat-provenance {
+  margin: 0;
+  font-size: 0.9rem;
+  color: var(--text-muted);
+}
+
+/* A count of unreadable records is a warning about the file, not a failed read. */
+.agent-chat-note {
+  color: var(--warning);
+}
+
+.agent-chat-earlier {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+
+.agent-chat-earlier button {
+  min-height: var(--touch-min);
+  padding: 0 12px;
+  background-color: var(--surface-secondary);
+  color: var(--text-primary);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-control);
+  font: inherit;
+  cursor: pointer;
+}
+
+/* Visually attributed to the transport, not to the agent: muted and unboxed so a
+   half-written record can never be mistaken for a message the agent committed. */
+.agent-chat-carry {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  color: var(--text-faint);
+  font-style: italic;
+  border-left: 2px solid var(--border-strong);
+  padding-left: 8px;
+}
+
+.agent-chat-carry-label {
+  flex: none;
+  text-transform: lowercase;
+}
+
+.agent-chat-carry-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-chat-raw {
+  margin-top: 8px;
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  /* Takes no height from the transcript while closed, and is never a flex
+     container: Chrome wraps a disclosure's children in an internal
+     `::details-content` box, so no rule here may rely on flex to bound its content. */
+  flex: none;
+}
+
+.agent-chat-raw summary {
+  cursor: pointer;
+  /* Padded to the touch target rather than flex-centred: the summary is a
+     sentence containing an inline `<code>`, and a flex row would break that
+     sentence into separate boxes at the code element. */
+  display: block;
+  padding: 10px 0;
+  line-height: 1.5;
+}
+
+/*
+ * Open, the disclosure becomes its own scrolling box, sized by the flex algorithm.
+ *
+ * `flex: 1 1 0` is load-bearing. A disclosure's children sit in an internal
+ * `::details-content` box, so they cannot be made to shrink; the DISCLOSURE must
+ * therefore be the thing whose height is definite. With `flex: 1 1 0` it takes a
+ * share of the panel's leftover height (measured at 129px) and scrolls its own
+ * content, so layout and paint agree — an earlier attempt capped the `<pre>`
+ * instead, leaving the disclosure as tall as its content and the bytes painting
+ * over the Actions section.
+ */
+.agent-chat-raw[open] {
+  flex: 1 1 0;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.agent-chat-raw pre.agent-transcript {
+  /* The disclosure above scrolls; the shared `.agent-transcript` block cap and its
+     own scroller would be a second, nested scroll region fighting it. */
+  max-height: none;
+  overflow: visible;
+}
+
+.agent-chat-activity {
+  margin: 8px 0 0;
+  padding-left: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 0.85rem;
+}
+
+.agent-chat-activity-line {
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+}
+
+.agent-chat-activity-line.failed {
+  color: var(--danger-text);
+}
+
+.agent-chat-activity-name {
+  font-weight: 600;
+  margin-right: 6px;
+}
+
+.agent-chat-activity-state {
+  color: var(--text-muted);
+  margin-right: 6px;
+}
+
+.agent-chat-activity-line.failed .agent-chat-activity-state {
+  color: var(--danger-text);
+}
+
+.agent-chat-activity-outcome {
+  display: block;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+
+.agent-chat-result {
+  max-height: 320px;
+  overflow: auto;
+  margin: 8px 0 0;
+  padding: 10px;
+  background-color: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

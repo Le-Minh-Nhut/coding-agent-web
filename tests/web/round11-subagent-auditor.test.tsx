@@ -10,6 +10,8 @@
  * that no longer exists.
  */
 import React from "react";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { afterEach, it, expect, vi } from "vitest";
 import { act, cleanup, render } from "@testing-library/react";
 import { AgentDetail } from "../../apps/web/src/components/AgentDetail.js";
@@ -70,4 +72,65 @@ it("does not poll an agent that has no transcript file", async () => {
   await act(async () => { await vi.advanceTimersByTimeAsync(3600); });
   // Nothing to fetch: an explicit unavailable state instead of empty polling.
   expect(p.onFetchTranscript).not.toHaveBeenCalled();
+});
+
+/**
+ * Polling an unchanged journal must not re-parse it.
+ *
+ * `applyTranscript` returns a NEW transcript object on every poll — even one that
+ * carried no bytes — so a memo keyed on that object re-ran the whole JSONL parse on
+ * every 1200 ms tick. On a real phone-sized journal that was ~130 ms of blocked main
+ * thread, forever. The memo is now keyed on `text`/`carry`, the two strings the
+ * parser actually reads.
+ *
+ * Counted through `JSON.parse`, which is also what the audit measured, on the real
+ * captured journal rather than a toy: a synthesized 3-line file would pass even if
+ * the memo key were still wrong.
+ */
+it("does not re-parse the journal on a poll that carried no new bytes", async () => {
+  const text = readFileSync(resolve(__dirname, "../fixtures/omp-session/real-subagent-LaneLockCheck.jsonl"), "utf8");
+  const reply: TranscriptReply = { text, newSize: Buffer.byteLength(text), carry: "" };
+
+  let calls = 0;
+  const realParse = JSON.parse;
+  (JSON as unknown as { parse: typeof JSON.parse }).parse = (input: string, reviver?: (key: string, value: unknown) => unknown) => {
+    calls += 1;
+    return reviver === undefined ? realParse(input) : realParse(input, reviver);
+  };
+  try {
+    const rendered = render(<AgentDetail {...props({ transcript: reply })} />);
+    const afterFirst = calls;
+    expect(afterFirst, "the first render must parse the bytes it was given").toBeGreaterThan(0);
+
+    for (let poll = 0; poll < 4; poll += 1) {
+      // The same bytes as a fresh object: exactly what an unchanged poll delivers.
+      rendered.rerender(<AgentDetail {...props({ transcript: { text, newSize: reply.newSize, carry: "" } })} />);
+      // Identical rows out, and crucially no second parse of 3.2 MB.
+      expect(calls, `poll ${poll + 1} re-parsed an unchanged journal`).toBe(afterFirst);
+    }
+
+    // New bytes MUST re-parse: the guard is on the bytes, not on "never again".
+    // The appended line is the fixture's OWN first message record, with only its
+    // identity fields rewritten (so React keys stay unique); the record shape and
+    // every other field are the real file's, not something this test invented.
+    const realMessageLine = text.split("\n").find((line) => {
+      try { return (JSON.parse(line) as { type?: string }).type === "message"; } catch { return false; }
+    });
+    if (realMessageLine === undefined) throw new Error("fixture has no message record to append");
+    const record = JSON.parse(realMessageLine) as Record<string, unknown>;
+    const appended = JSON.stringify({ ...record, id: "probe-appended-1", parentId: "main" });
+    const grown = `${text}${appended}\n`;
+    rendered.rerender(<AgentDetail {...props({ transcript: { text: grown, newSize: Buffer.byteLength(grown), carry: "" } })} />);
+    expect(calls, "appended bytes must be parsed").toBeGreaterThan(afterFirst);
+
+    // A rotation (different, smaller text) must also re-parse: the old rows are not
+    // the new file's rows, so a byte-identity guard must not swallow it. Cut on a
+    // record boundary so the fixture stays a real journal, just a rewound one.
+    const rotated = text.slice(0, text.lastIndexOf("\n", 12_000) + 1);
+    const beforeRotation = calls;
+    rendered.rerender(<AgentDetail {...props({ transcript: { text: rotated, newSize: Buffer.byteLength(rotated), carry: "" } })} />);
+    expect(calls, "a rewound file must be re-parsed").toBeGreaterThan(beforeRotation);
+  } finally {
+    (JSON as unknown as { parse: typeof JSON.parse }).parse = realParse;
+  }
 });

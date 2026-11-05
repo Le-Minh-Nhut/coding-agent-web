@@ -597,6 +597,13 @@ function applyTranscript(state: TranscriptState, frame: Extract<HostFrame, { t: 
     };
   }
   if (request.fromByte !== previous.newSize) return { ...state, transcriptRequests };
+  // A reply that carried no new bytes must not rebuild the transcript object.
+  // The view keys its parse on it (and the reducer's own consumers key on the
+  // agent's entry), so a fresh identity re-parsed the entire journal on every
+  // 1200 ms poll. Same bytes in, same object out, nothing re-parsed.
+  if (frame.text === "" && frame.newSize === previous.newSize) {
+    return { ...state, transcriptRequests };
+  }
   const reset = frame.newSize < previous.newSize;
   if (reset && frame.text === "" && request.fromByte >= frame.newSize) {
     return {

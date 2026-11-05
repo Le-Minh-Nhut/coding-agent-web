@@ -280,6 +280,33 @@ function diagnosticsOf(entry: Record<string, unknown>): FileDiagnostics | undefi
 }
 
 /**
+ * The host's error text for one `details` object, in read order.
+ *
+ * OMP names it `error` (`EditToolResult.error`): a real failed edit carries
+ * `{diff, errorKind, error}` and nothing else, so reading only the older
+ * `displayErrorText`/`errorText` display fields renders a failure with no reason
+ * at all — a census of 2454 journals found those two keys zero times and `error`
+ * on every failed edit. The legacy keys stay behind it so an older payload is not
+ * regressed.
+ */
+function errorTextOf(entry: Record<string, unknown>): string | null {
+  return str(entry.error) ?? str(entry.displayErrorText) ?? str(entry.errorText);
+}
+
+/**
+ * The call-level error text for a row, from its own `details`. `null` when the
+ * host sent no message, so a caller prints nothing rather than an empty alert.
+ *
+ * `errorKind` is deliberately NOT a fallback here: it classifies the failure
+ * (`apply`), it is not a reason, and showing it as one would be a worse lie than
+ * showing nothing.
+ */
+export function toolResultError(row: ToolActivityRow): string | null {
+  const details = row.toolResult?.details;
+  return isRecord(details) ? errorTextOf(details) : null;
+}
+
+/**
  * True when the host flagged this entry's output as truncated.
  *
  * OMP states truncation structurally as `meta.truncation`
@@ -306,6 +333,7 @@ function fileChangeFrom(entry: Record<string, unknown>, fallbackPath: string | n
   const moved = str(entry.move);
   const moveFrom = str(entry.sourcePath) ?? str(entry.moveFrom) ?? (moved !== null && moved !== path ? moved : null);
   const truncated = truncatedFrom(entry);
+  const reportedError = errorTextOf(entry);
   // A failed file's diff is not an applied change, and a truncated diff's counts
   // are a prefix. Neither may be printed as the file's +/−.
   const stats = failed || truncated || diff === null ? null : diffStats(diff);
@@ -322,9 +350,7 @@ function fileChangeFrom(entry: Record<string, unknown>, fallbackPath: string | n
     ...(moveFrom === null ? {} : { moveFrom }),
     ...(truncated ? { truncated: true } : {}),
     ...(failed ? { failed: true } : {}),
-    ...(str(entry.displayErrorText) === null && str(entry.errorText) === null
-      ? {}
-      : { error: str(entry.displayErrorText) ?? str(entry.errorText) ?? undefined }),
+    ...(reportedError === null ? {} : { error: reportedError }),
     ...(diagnosticsOf(entry) === undefined ? {} : { diagnostics: diagnosticsOf(entry) }),
   };
 }

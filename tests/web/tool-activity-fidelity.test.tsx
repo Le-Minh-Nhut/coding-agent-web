@@ -17,7 +17,7 @@
  *    a `truncated` boolean (`packages/tui/src/tools/output-meta.ts:85`).
  */
 import React from "react";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render } from "@testing-library/react";
 import { ActivityGroupRow, ToolRow } from "../../apps/web/src/components/ToolActivity.js";
 import {
@@ -62,8 +62,8 @@ const TRUNCATION_META = {
   outputBytes: 0,
 };
 
-function mountRow(over: Partial<ToolActivityRow> & { id: string }) {
-  const view = render(<ToolRow row={row(over)} pairedArgs={pairedArgs} />);
+function mountRow(over: Partial<ToolActivityRow> & { id: string }, onOpenFile?: (path: string) => void) {
+  const view = render(<ToolRow row={row(over)} pairedArgs={pairedArgs} onOpenFile={onOpenFile} />);
   fireEvent.click(view.container.querySelector(".tool-row-head") as HTMLElement);
   return view;
 }
@@ -75,20 +75,47 @@ const diffs = (container: HTMLElement) => [...container.querySelectorAll(".tv-di
 afterEach(cleanup);
 
 describe("R02 — one diff, drawn once", () => {
-  it("renders an edit's diff exactly once, not once for the row and once for the guest body", () => {
+  it("keeps an edit's patch out of the conversation entirely: the file row is a tap into the viewer", () => {
+    // The claim changed shape with the flattening, and strengthened: it is no
+    // longer "drawn once" but "not drawn here at all". The patch belongs to the
+    // dedicated viewer, so an expanded edit row must mount zero diff rows.
+    const onOpenFile = vi.fn();
+    const view = mountRow(
+      {
+        id: "r02",
+        toolResult: {
+          content: [{ type: "text", text: "Edited src/alpha.ts" }],
+          details: { perFileResults: [{ path: "src/alpha.ts", op: "update", diff: ALPHA_DIFF }] },
+        },
+        toolArgs: { file_path: "src/alpha.ts" },
+      },
+      onOpenFile,
+    );
+
+    const list = view.container.querySelector(".tv-file-changes") as HTMLElement;
+    expect(diffs(view.container)).toHaveLength(0);
+    expect(list.textContent).toContain("alpha.ts");
+    fireEvent.click(fileHeads(view.container)[0]!);
+    expect(onOpenFile).toHaveBeenCalledWith("src/alpha.ts");
+  });
+
+  it("still draws a non-edit tool's diff on demand, the accordion it always had", () => {
+    // `write` carries a diff but has no dedicated viewer, so the per-file
+    // disclosure is still how its patch is reached — and still once.
     const view = mountRow({
-      id: "r02",
+      id: "r02-write",
+      toolName: "write",
       toolResult: {
-        content: [{ type: "text", text: "Edited src/alpha.ts" }],
-        details: { perFileResults: [{ path: "src/alpha.ts", op: "update", diff: ALPHA_DIFF }] },
+        content: [{ type: "text", text: "Wrote src/alpha.ts" }],
+        details: { perFileResults: [{ path: "src/alpha.ts", op: "add", diff: ALPHA_DIFF }] },
       },
       toolArgs: { file_path: "src/alpha.ts" },
     });
 
-    const list = view.container.querySelector(".tv-file-changes") as HTMLElement;
+    expect(diffs(view.container)).toHaveLength(0);
     fireEvent.click(fileHeads(view.container)[0]!);
     expect(diffs(view.container)).toHaveLength(1);
-    expect(list.textContent).toContain("alpha.ts");
+    expect(diffs(view.container)[0]!.textContent).toContain("alphaSentinel");
   });
 });
 
@@ -117,9 +144,11 @@ describe("R01 — a failed edit is never reported as applied", () => {
     expect(rows[1]!.querySelector(".tv-count-add")).toBeNull();
     expect(rows[1]!.querySelector(".tv-count-del")).toBeNull();
     expect(rows[1]!.textContent).toContain("not applied");
-    // Its own error is one tap away, on its own row.
-    fireEvent.click(fileHeads(view.container)[1]!);
-    expect(rows[1]!.textContent).toContain("stale tag");
+    // Its own error is on the row's alert, labelled by the path it belongs to —
+    // the flattened row has no second disclosure to hide it behind.
+    expect(view.container.querySelector('[role="alert"]')?.textContent).toBe(
+      "src/beta.ts: stale tag: re-read src/beta.ts",
+    );
     expect(summarizeFileChanges([row({
       id: "r01-partial",
       isError: true,
@@ -255,12 +284,22 @@ describe("R05 — rename direction", () => {
       },
     });
 
-    const list = view.container.querySelector(".tv-file-changes") as HTMLElement;
-    const text = list.textContent ?? "";
-    expect(text).toContain("src/old.ts");
-    expect(text).toContain("src/new.ts");
-    expect(text.indexOf("src/old.ts")).toBeLessThan(text.indexOf("src/new.ts"));
-    expect(text.split("src/new.ts")).toHaveLength(2);
+    const rows = fileRows(view.container);
+    const renamed = rows[0]!;
+    const name = renamed.querySelector(".tv-file-name")?.textContent ?? "";
+    // Source leads the arrow, destination follows, each named exactly once.
+    expect(name).toBe("old.ts → new.ts");
+    expect(name.split("new.ts")).toHaveLength(2);
+    expect(name.indexOf("old.ts")).toBeLessThan(name.indexOf("new.ts"));
+    // The path is still fully recoverable — name plus its directory line — so
+    // shortening the label dropped no information.
+    const dir = renamed.querySelector(".tv-file-dir")?.textContent ?? "";
+    expect(dir).toBe("src");
+    expect(`${dir}/${"new.ts"}`).toBe("src/new.ts");
+    // The sibling that did not move carries no arrow.
+    const other = rows[1]!;
+    expect(other.querySelector(".tv-file-name")?.textContent).toBe("other.ts");
+    expect(other.textContent).not.toContain("→");
     expect(fileChangesOf(row({
       id: "r05-parse",
       toolResult: {
@@ -296,7 +335,8 @@ describe("R06 — operations, file changes and unique files are not one number",
 });
 
 describe("R07 — per-file drill-down, and the full record behind one more tap", () => {
-  it("opens one file's own diff, not every file's diff at once", () => {
+  it("lists every file once, with no diff in the conversation and one tap per file", () => {
+    const onOpenFile = vi.fn();
     const view = mountRow({
       id: "r07",
       text: "RAW_TRANSPORT_SENTINEL",
@@ -310,25 +350,24 @@ describe("R07 — per-file drill-down, and the full record behind one more tap",
           ],
         },
       },
-    });
+    }, onOpenFile);
 
-    // Level one: filenames, status and counts only.
+    // Level one is ALL there is now: two file rows, no diff, no nested disclosure.
     expect(fileRows(view.container)).toHaveLength(2);
     expect(diffs(view.container)).toHaveLength(0);
-    expect(fileHeads(view.container).map((element) => element.getAttribute("aria-expanded"))).toEqual(["false", "false"]);
+    expect(view.container.querySelector(".tv-file-change-body")).toBeNull();
+    expect(fileHeads(view.container).map((element) => element.getAttribute("aria-expanded"))).toEqual([null, null]);
 
+    // Each file opens the viewer for its OWN path, never the other's.
     fireEvent.click(fileHeads(view.container)[0]!);
-    expect(diffs(view.container)).toHaveLength(1);
-    expect(diffs(view.container)[0]!.textContent).toContain("alphaSentinel");
-    expect(diffs(view.container)[0]!.textContent).not.toContain("betaSentinel");
-    expect(fileHeads(view.container)[0]!.getAttribute("aria-expanded")).toBe("true");
-
+    expect(onOpenFile).toHaveBeenCalledWith("src/alpha.ts");
     fireEvent.click(fileHeads(view.container)[1]!);
-    expect(diffs(view.container)).toHaveLength(2);
-    expect(diffs(view.container)[1]!.textContent).toContain("betaSentinel");
+    expect(onOpenFile).toHaveBeenLastCalledWith("src/beta.ts");
+    // Still no diff mounted after both taps.
+    expect(diffs(view.container)).toHaveLength(0);
   });
 
-  it("keeps the diagnostics the host attached to a file", () => {
+  it("keeps the diagnostics the host attached to a file, on that file's row", () => {
     const view = mountRow({
       id: "r07-diagnostics",
       toolResult: {
@@ -343,9 +382,11 @@ describe("R07 — per-file drill-down, and the full record behind one more tap",
         },
       },
     });
-    fireEvent.click(fileHeads(view.container)[0]!);
+    // No tap needed: flattening the list must not bury the LSP verdict, which is
+    // the one part of an edit result a diff cannot show.
     expect(view.container.textContent).toContain("DIAGNOSTIC_SENTINEL");
     expect(view.container.textContent).toContain("2 errors");
+    expect(fileRows(view.container)[0]!.querySelector(".tv-note--err")).not.toBeNull();
   });
 
   it("still reaches the whole raw record — transport text and wire arguments", () => {
@@ -359,8 +400,13 @@ describe("R07 — per-file drill-down, and the full record behind one more tap",
       },
     });
 
+    // Closed: nothing of the record is mounted.
     expect(view.container.querySelector(".tool-raw-output")).toBeNull();
-    fireEvent.click(view.getByRole("button", { name: /View tool details/ }));
+    const details = view.container.querySelector("details.tool-raw-details") as HTMLDetailsElement;
+    expect(details).not.toBeNull();
+    expect(details.querySelector("summary")?.textContent).toBe("View technical details");
+    details.open = true;
+    fireEvent(details, new Event("toggle"));
     const raw = [...view.container.querySelectorAll(".tool-raw-output")];
     expect(raw.map((element) => element.textContent).join("\n")).toContain("RAW_TRANSPORT_SENTINEL");
     expect(view.container.querySelector(".tool-args-json")?.textContent).toContain("INPUT_SENTINEL");

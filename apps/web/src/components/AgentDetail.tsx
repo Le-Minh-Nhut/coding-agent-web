@@ -16,9 +16,11 @@
  * from journal evidence; a main agent or an ordinary subagent gets the reason
  * string instead of a button (round53 B01, P1).
  */
-import { useEffect, useRef } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import type { AgentView } from "../agent-model.js";
+import { agentTranscriptFromReply } from "../agent-transcript.js";
 import type { AgentActivity, TranscriptReply } from "../transcript.js";
+import { AgentChat } from "./AgentChat.js";
 import "../agents.css";
 
 export interface AgentDetailProps {
@@ -71,7 +73,41 @@ export function AgentDetail({
   const loadingRef = useRef(loading);
   loadingRef.current = loading;
 
-  const task = activity?.task ?? "";
+  /**
+   * The fetched bytes, decoded once per reply.
+   *
+   * Keyed on the two strings the parser actually reads, NOT on the `transcript`
+   * object. The reducer rebuilds that object on every poll — including a poll that
+   * carried no new bytes — so an identity key re-parsed the whole journal on every
+   * 1200 ms tick (measured: +1945 `JSON.parse` calls per unchanged poll on a 4.4 MB
+   * journal). Keying on the text makes "same bytes, same rows" literal: a poll that
+   * changed nothing is not re-parsed.
+   *
+   * The rotation case is still correct. A reset (file truncated/rewound) makes the
+   * reducer *replace* `text` from `""` and re-append, so the text differs and the
+   * memo re-runs; and if a rotation ever produced byte-identical text, the rows
+   * would be identical too, so skipping the parse changes nothing.
+   */
+  const transcriptText = transcript?.text;
+  const transcriptCarry = transcript?.carry;
+  const parsed = useMemo(
+    // `transcript` is read for the current bytes; the deps below are the only two
+    // fields the parser consumes, so a re-run always sees the matching object and a
+    // poll with no new bytes never re-parses.
+    () => (transcript === undefined ? null : agentTranscriptFromReply(transcript)),
+    [transcriptText, transcriptCarry],
+  );
+
+  /**
+   * The task text, preferring the journal's own durable copy.
+   *
+   * `activity` arrives on the live bus and is the only source while the session is
+   * running; `session_init.task` is the same text as OMP persisted it. The durable
+   * copy wins when both exist because it survives a reconnect, and the live-only
+   * caveat below is then no longer true and must not be shown.
+   */
+  const durableTask = parsed?.task ?? null;
+  const task = durableTask ?? activity?.task ?? "";
   const running = view.status === "running";
 
   /* Same shape as SubagentPanel: fetch immediately, then keep asking. A finished
@@ -113,14 +149,16 @@ export function AgentDetail({
         <h2 id="agent-detail-title">{view.displayName}</h2>
       </div>
 
-      {/* Status line. Model/tier is not in the wire snapshot, so it is named as
-          missing rather than invented (AGENTS.md rule 6). */}
+      {/* Status line. Tier is not in the wire snapshot and stays unstated; the
+          model is read from the journal's own `model_change`/`session_init`
+          records when they exist, and named as missing when they do not —
+          never guessed (AGENTS.md rule 6). */}
       <p className="agent-status-line">
         <span className={`badge ${view.status}`}>{view.status}</span>
         <span>·</span>
         <span>{view.class}</span>
         <span>·</span>
-        <span>model: not reported</span>
+        <span>{parsed?.model === null || parsed?.model === undefined ? "model: not reported" : `model: ${parsed.model}`}</span>
       </p>
 
       <section className="agent-section" aria-labelledby="agent-task-heading">
@@ -135,15 +173,23 @@ export function AgentDetail({
         ) : (
           <pre className="agent-task-full"><code>{task}</code></pre>
         )}
-        {activity?.liveOnly ? (
+        {/* The caveat is a claim about THIS text. Once the durable copy is the one
+            being shown, the text provably survives a reconnect, so the warning
+            would be false. */}
+        {activity?.liveOnly && durableTask === null ? (
           <p className="agent-note" role="note">
             This task text is live-only: OMP does not persist it, so it may not survive a reconnect.
           </p>
         ) : null}
       </section>
 
-      <section className="agent-section" aria-labelledby="agent-transcript-heading">
+      <section className="agent-section agent-section--transcript" aria-labelledby="agent-transcript-heading">
         <h3 id="agent-transcript-heading">Transcript</h3>
+        {/* Rigorously ordered: every branch that states an absence keeps its exact
+            sentence, because an empty transcript panel reads as "this agent said
+            nothing", which may be false. A reply that carried no bytes at all
+            keeps its own sentence too, through `emptyReason` — the chat surface
+            must never rephrase it as the agent having been silent. */}
         {!view.hasSessionFile ? (
           <p className="agent-absent" role="status">
             No session file was reported for this agent, so there is no transcript to read.
@@ -152,8 +198,15 @@ export function AgentDetail({
           <p role="alert" className="agent-absent">{transcriptError}</p>
         ) : transcript?.error ? (
           <p role="alert" className="agent-absent">{transcript.error}</p>
-        ) : transcript ? (
-          <pre className="agent-transcript"><code>{transcript.text}{transcript.carry}</code></pre>
+        ) : parsed !== null && transcript !== undefined ? (
+          <AgentChat
+            rows={parsed.rows}
+            carry={transcript.carry ?? ""}
+            unreadableRecords={parsed.unreadableRecords}
+            hasRawText={transcript.text !== ""}
+            rawText={transcript.text}
+            emptyReason={transcript.text === "" ? "No transcript bytes received yet." : null}
+          />
         ) : (
           <p className="agent-absent" role="status">
             {loading ? "Loading transcript…" : "No transcript bytes received yet."}
