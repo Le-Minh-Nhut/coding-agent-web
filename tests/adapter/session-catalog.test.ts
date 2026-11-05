@@ -1,4 +1,4 @@
-import { chmod, mkdir, rm, stat, symlink, utimes, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, rm, stat, symlink, utimes, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -319,6 +319,60 @@ describe("session-catalog", () => {
     const makeCatalog = (sessionsRoot: string) => new DefaultNativeSessionCatalog({
       sessionsRoot,
       leaseProbe: { isLive: async () => false, liveSet: async () => new Map(), leaseName: (id) => id },
+    });
+    /**
+     * `readHandoffCompaction` is the only evidence that a `/handoff` committed,
+     * so these cases pin its two failure modes: claiming a commit that is not
+     * there, and losing one that is.
+     */
+    it("finds a handoff compaction only when it is newer than the paste, and ignores other methods", async () => {
+      const cwd = path.join(testRoot, "handoff-evidence-project");
+      const sessionsRoot = path.join(testRoot, "handoff-evidence-sessions");
+      await mkdir(cwd, { recursive: true });
+      await mkdir(sessionsRoot, { recursive: true });
+      const bucket = path.join(sessionsRoot, encodeSessionDirName(cwd));
+      await mkdir(bucket, { recursive: true });
+      const file = path.join(bucket, "2026-10-26_handoff-session.jsonl");
+      const before = "2026-10-26T00:00:00.000Z";
+      const after = "2026-10-26T01:00:00.000Z";
+      await writeFile(file, [
+        JSON.stringify({ type: "session", id: "handoff-session", cwd, timestamp: before, version: 3 }),
+        // An earlier handoff: real evidence, but not for a paste made later.
+        JSON.stringify({ type: "compaction", id: "old", parentId: null, timestamp: before, summary: "s", firstKeptEntryId: "x", tokensBefore: 1, method: "handoff" }),
+        // A newer compaction from a different method is NOT handoff evidence.
+        JSON.stringify({ type: "compaction", id: "snap", parentId: null, timestamp: after, summary: "s", firstKeptEntryId: "x", tokensBefore: 1, method: "snapcompact" }),
+        JSON.stringify({ type: "compaction", id: "new", parentId: null, timestamp: after, summary: "s", firstKeptEntryId: "x", tokensBefore: 1, method: "handoff" }),
+      ].join("\n") + "\n", "utf8");
+      const catalog = makeCatalog(sessionsRoot);
+
+      expect(await catalog.readHandoffCompaction("handoff-session", Date.parse(before))).toEqual({ entryId: "new", timestamp: after });
+      // A paste made after every entry finds nothing — absence is not a commit.
+      expect(await catalog.readHandoffCompaction("handoff-session", Date.parse("2026-10-27T00:00:00.000Z"))).toBeNull();
+      // An unknown session is "no evidence", never a throw.
+      expect(await catalog.readHandoffCompaction("no-such-session", 0)).toBeNull();
+      // A malformed trailing line cannot be read as evidence.
+      await writeFile(file, (await readFile(file, "utf8")) + '{"type":"compaction","id":"torn","method":"hand\n', "utf8");
+      expect(await catalog.readHandoffCompaction("handoff-session", Date.parse(before))).toEqual({ entryId: "new", timestamp: after });
+    });
+
+    /**
+     * The journal file name is not identity. A journal copied, or a bucket that
+     * merely shares a stem, must not be able to answer for another session —
+     * otherwise a foreign commit is reported as this session's handoff.
+     */
+    it("refuses a journal whose header id is not the requested session", async () => {
+      const cwd = path.join(testRoot, "handoff-foreign-project");
+      const sessionsRoot = path.join(testRoot, "handoff-foreign-sessions");
+      await mkdir(cwd, { recursive: true });
+      await mkdir(sessionsRoot, { recursive: true });
+      const bucket = path.join(sessionsRoot, encodeSessionDirName(cwd));
+      await mkdir(bucket, { recursive: true });
+      // The file is named for `sess-1`, but its header says otherwise.
+      await writeFile(path.join(bucket, "2026-10-26_sess-1.jsonl"), [
+        JSON.stringify({ type: "session", id: "totally-other-session", cwd, timestamp: "2026-10-26T00:00:00.000Z", version: 3 }),
+        JSON.stringify({ type: "compaction", id: "FOREIGN-COMMIT", parentId: null, timestamp: "2026-10-26T01:00:00.000Z", summary: "s", firstKeptEntryId: "x", tokensBefore: 1, method: "handoff" }),
+      ].join("\n") + "\n", "utf8");
+      expect(await makeCatalog(sessionsRoot).readHandoffCompaction("sess-1", 0)).toBeNull();
     });
     async function createJournal(cwd: string, sessionId: string, body: string, sessionsRoot: string): Promise<string> {
       const bucketDir = path.join(sessionsRoot, encodeSessionDirName(cwd));

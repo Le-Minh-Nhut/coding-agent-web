@@ -37,7 +37,7 @@ interface FakePane {
 }
 
 /** A tmux that answers the handoff probes from a config file and logs its argv. */
-async function fakeTmux(options: { panes?: FakePane[]; identity?: string; listPanesFails?: string } = {}) {
+async function fakeTmux(options: { panes?: FakePane[]; identity?: string; listPanesFails?: string; attachedNow?: string; capture?: string; captureFails?: string } = {}) {
   const dir = await mkdtemp(path.join(tmpdir(), "caw-handoff-"));
   dirs.push(dir);
   const configPath = path.join(dir, "config.json");
@@ -47,6 +47,10 @@ async function fakeTmux(options: { panes?: FakePane[]; identity?: string; listPa
     identity: options.identity ?? "fake.sock:111:222",
     panes: options.panes ?? [{ panePid }],
     listPanesFails: options.listPanesFails ?? null,
+    // The pre-paste attach re-check reads this; absent means "0" (nobody attached).
+    attachedNow: options.attachedNow ?? "0",
+    capture: options.capture ?? "",
+    captureFails: options.captureFails ?? null,
   }));
   await writeFile(logPath, "");
   const binary = path.join(dir, "tmux");
@@ -55,7 +59,16 @@ const fs = require("node:fs");
 const cfg = JSON.parse(fs.readFileSync(process.env.FAKE_TMUX_CONFIG, "utf8"));
 const args = process.argv.slice(2);
 fs.appendFileSync(process.env.FAKE_TMUX_LOG, JSON.stringify(args) + "\\n");
-if (args.includes("display-message")) { process.stdout.write(cfg.identity + "\\n"); process.exit(0); }
+if (args.includes("display-message")) {
+  const format = args[args.length - 1] ?? "";
+  process.stdout.write((format.includes("session_attached") ? (cfg.attachedNow ?? "0") : cfg.identity) + "\\n");
+  process.exit(0);
+}
+if (args.includes("capture-pane")) {
+  if (cfg.captureFails) { process.stderr.write(cfg.captureFails + "\\n"); process.exit(1); }
+  process.stdout.write(cfg.capture + "\\n");
+  process.exit(0);
+}
 if (args.includes("list-panes")) {
   if (cfg.listPanesFails) { process.stderr.write(cfg.listPanesFails + "\\n"); process.exit(1); }
   const rows = cfg.panes.map((p) => [
@@ -126,6 +139,23 @@ describe("sendHandoff", () => {
       expect(result).toMatchObject({ delivered: false, refusal: "terminal_attached" });
       // Nothing was staged or pasted: the refusal happens before any keystroke.
       expect((await fake.argv()).some((row) => row.includes("paste-buffer") || row.includes("load-buffer"))).toBe(false);
+    } finally {
+      fake.restore();
+    }
+  });
+
+  it("refuses when a terminal attaches between the pane listing and the paste", async () => {
+    // The first check reads `list-panes` (attached: "0"); the terminal attaches
+    // afterwards, so only the single-call re-check before the paste can see it.
+    const fake = await fakeTmux({ attachedNow: "1" });
+    try {
+      const result = await fake.service().sendHandoff("$0", { expectedIdentity: identity, expectedPanePid: panePid, assertIdle: async () => true });
+      expect(result).toMatchObject({ delivered: false, refusal: "terminal_attached" });
+      // The re-check sits immediately before the paste, so nothing reached the
+      // pane: no `paste-buffer` and no Enter.
+      const argv = await fake.argv();
+      expect(argv.some((row) => row.includes("paste-buffer"))).toBe(false);
+      expect(argv.some((row) => row.includes("send-keys"))).toBe(false);
     } finally {
       fake.restore();
     }
@@ -234,7 +264,11 @@ describe("sendHandoff", () => {
 const fs = require("node:fs");
 const cfg = JSON.parse(fs.readFileSync(process.env.FAKE_TMUX_CONFIG, "utf8"));
 const args = process.argv.slice(2);
-if (args.includes("display-message")) { process.stdout.write(cfg.identity + "\\n"); process.exit(0); }
+if (args.includes("display-message")) {
+  const format = args[args.length - 1] ?? "";
+  process.stdout.write((format.includes("session_attached") ? (cfg.attachedNow ?? "0") : cfg.identity) + "\\n");
+  process.exit(0);
+}
 if (args.includes("list-panes")) {
   process.stdout.write(cfg.panes.map((p) => [
     p.sessionId ?? "$0", p.paneId ?? "%0", String(p.panePid ?? 0), p.command ?? "omp", p.dead ?? "0", p.attached ?? "0",
@@ -273,6 +307,64 @@ setTimeout(() => process.exit(0), 1500);
       await expect(fake.service().sendHandoff("caw-agent", { expectedIdentity: identity, expectedPanePid: panePid })).rejects.toThrow(/Invalid tmux session id/);
       await expect(fake.service().sendHandoff("$0", { expectedIdentity: "not-an-identity", expectedPanePid: panePid })).rejects.toThrow(/Invalid expected tmux server identity/);
       await expect(fake.service().sendHandoff("$0", { expectedIdentity: identity, expectedPanePid: 0 })).rejects.toThrow(/recorded pane process id/);
+    } finally {
+      fake.restore();
+    }
+  });
+});
+
+/**
+ * The refusal probe is the one place an adapter reads *output* rather than
+ * process facts, so what it counts — and what it refuses to count — has to be
+ * pinned exactly: a false positive retires a live marker. It reports a *count*
+ * rather than a verdict, because a refusal line is not self-dating: the caller
+ * must compare it against a baseline taken before the paste it is judging.
+ */
+describe("countHandoffRefusals", () => {
+  it("counts OMP's own refusal lines and nothing else", async () => {
+    const fake = await fakeTmux({ capture: "> \u2502\nWarning: Nothing to hand off (no messages yet)" });
+    try {
+      expect(await fake.service().countHandoffRefusals("$0")).toBe(1);
+      // The probe is read-only: only `capture-pane` may appear.
+      const argv = await fake.argv();
+      expect(argv).toHaveLength(1);
+      expect(argv[0]).toContain("capture-pane");
+    } finally {
+      fake.restore();
+    }
+  });
+
+  it("counts each refusal separately, so a rise is observable", async () => {
+    // The anchoring rule is "more refusals than before this paste". A count that
+    // saturated at 1 could never show that rise, so the multiplicity is pinned.
+    const stale = "Warning: Nothing to hand off (no messages yet)";
+    const fake = await fakeTmux({ capture: `${stale}\n${stale}\nError: No model selected.` });
+    try {
+      expect(await fake.service().countHandoffRefusals("$0")).toBe(3);
+    } finally {
+      fake.restore();
+    }
+  });
+
+  it("reports zero for ordinary output, so a live generation is never retired", async () => {
+    for (const capture of ["", "Thinking…\nI will summarize the session", "@@@ compacting 42%"]) {
+      const fake = await fakeTmux({ capture });
+      try {
+        expect(await fake.service().countHandoffRefusals("$0"), JSON.stringify(capture)).toBe(0);
+      } finally {
+        fake.restore();
+      }
+    }
+  });
+
+  it("throws when the pane cannot be read, so 'could not look' is not 'zero'", async () => {
+    // Returning 0 here would let an unreadable pane masquerade as "no refusal",
+    // which is exactly the inversion the caller's baseline comparison must be
+    // protected from. A throw forces the caller to fail closed.
+    const fake = await fakeTmux({ captureFails: "can't find pane: %0" });
+    try {
+      const service = fake.service();
+      await expect(service.countHandoffRefusals("$0")).rejects.toThrow();
     } finally {
       fake.restore();
     }

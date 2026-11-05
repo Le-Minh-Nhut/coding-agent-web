@@ -17,6 +17,14 @@ Tài liệu dành cho người mới dùng Coding Agent Web (CAW) trên Ubuntu c
 11. [Giới hạn và bảo mật](#11-giới-hạn-và-bảo-mật)
 12. [Troubleshooting](#12-troubleshooting)
 13. [FAQ](#13-faq)
+14. [Giao diện di động mới (thanh trên, menu, nút Latest)](#14-giao-diện-di-động-mới-thanh-trên-menu-nút-latest)
+15. [Nhóm hoạt động tool (agent activity)](#15-nhóm-hoạt-động-tool-agent-activity)
+16. [Tóm tắt thay đổi tệp và ý nghĩa của +/−](#16-tóm-tắt-thay-đổi-tệp-và-ý-nghĩa-của--)
+17. [Mở diff: dòng thêm, dòng bỏ, ngữ cảnh](#17-mở-diff-dòng-thêm-dòng-bỏ-ngữ-cảnh)
+18. [Phân biệt "thay đổi của agent" và "thay đổi của workspace"](#18-phân-biệt-thay-đổi-của-agent-và-thay-đổi-của-workspace)
+19. [Khi không có diff](#19-khi-không-có-diff)
+20. [Nội dung bị ẩn, bị cắt, hay không có](#20-nội-dung-bị-ẩn-bị-cắt-hay-không-có)
+21. [Bàn phím và cuộn trên điện thoại](#21-bàn-phím-và-cuộn-trên-điện-thoại)
 
 ## 1. Giới thiệu
 
@@ -173,11 +181,11 @@ Giao diện hiển thị tin nhắn người dùng/trợ lý, nội dung streami
 
 Khi OMP cần phản hồi UI, CAW hiển thị yêu cầu/approval cùng các lựa chọn hoặc ô nhập. Người dùng có thể gửi phản hồi hoặc hủy; link read-only không thể trả lời, gửi prompt, **Stop generating** hay **Stop OMP session**. Không tự động phê duyệt khi điện thoại mất kết nối. Panel **Agents** cho phép xem agent con và transcript được yêu cầu theo từng phần.
 
-Giao diện có ô prompt, gợi ý một số slash command, trạng thái kết nối, nút **Latest** khi đã cuộn khỏi cuối transcript, lựa chọn model và transcript lịch sử đọc-only. Khu vực hành động của conversation gồm **Stop generating**, **Handoff context** và **Stop OMP session** (mỗi nút có thể bị vô hiệu kèm lý do khi không dùng được). Khi gõ một lệnh gốc của OMP như `/handoff`, CAW không gửi nó như prompt mà hiển thị hộp xác nhận; xem [chương 10](#10-lệnh-handoff--nén-ngữ-cảnh-tại-chỗ). Khi gửi prompt chưa được xác nhận, CAW có thể báo chưa rõ host đã nhận hay chưa; đừng gửi lại một cách mù quáng vì prompt có thể đã chạy.
+Giao diện có ô prompt, gợi ý một số slash command, trạng thái kết nối, nút **Latest** nổi khi đã cuộn khỏi cuối transcript, lựa chọn model và transcript lịch sử đọc-only. Thanh trên gọn: **Stop generating** luôn hiện trực tiếp khi agent đang chạy, còn **Handoff context** và **Stop OMP session** nằm trong menu **⋯ More actions** (mỗi mục có thể bị vô hiệu kèm lý do khi không dùng được). Chi tiết: [chương 14](#14-giao-diện-di-động-mới-thanh-trên-menu-nút-latest). Khi gõ một lệnh gốc của OMP như `/handoff`, CAW không gửi nó như prompt mà hiển thị hộp xác nhận; xem [chương 10](#10-lệnh-handoff--nén-ngữ-cảnh-tại-chỗ). Khi gửi prompt chưa được xác nhận, CAW có thể báo chưa rõ host đã nhận hay chưa; đừng gửi lại một cách mù quáng vì prompt có thể đã chạy.
 
 **Giới hạn khác:** nếu mục tracked không hiển thị **Open conversation**, giao diện ghi “Tracked conversation ID is unavailable” (nút chỉ xuất hiện khi session có conversation ID). Khi đó dùng **Projects** để mở project và chọn conversation.
 
-**Hạn chế:** không thấy chức năng đính kèm tệp từ giao diện chat; chia sẻ đường dẫn trong prompt không phải upload tệp. Không thấy trình xem diff chuyên biệt; nếu agent trả diff dưới dạng văn bản thì nó chỉ hiện như nội dung transcript. Không hứa rằng mọi tool output, nội dung lịch sử cũ, trạng thái con hoặc sự kiện đều có mặt: OMP/Collab có thể không gửi, trang transcript có thể bị giới hạn hoặc một bản ghi quá lớn bị bỏ qua khi hiển thị. Chi tiết giao diện này có thể mở rộng khi các phần đang được cải thiện.
+**Hạn chế:** không thấy chức năng đính kèm tệp từ giao diện chat; chia sẻ đường dẫn trong prompt không phải upload tệp. Tool call giờ được gom theo nhóm và có trình xem diff cho thay đổi tệp — xem [chương 15](#15-nhóm-hoạt-động-tool-agent-activity), [16](#16-tóm-tắt-thay-đổi-tệp-và-ý-nghĩa-của--) và [17](#17-mở-diff-dòng-thêm-dòng-bỏ-ngữ-cảnh). Nếu host không gửi diff, CAW nói rõ là không có diff thay vì tự bịa số dòng. Không hứa rằng mọi tool output, nội dung lịch sử cũ, trạng thái con hoặc sự kiện đều có mặt: OMP/Collab có thể không gửi, trang transcript có thể bị giới hạn hoặc một bản ghi quá lớn bị bỏ qua khi hiển thị. Chi tiết giao diện này có thể mở rộng khi các phần đang được cải thiện.
 
 ## 10. Lệnh `/handoff` — nén ngữ cảnh tại chỗ
 
@@ -204,7 +212,18 @@ Cả hai đều ghi một **compaction entry tại chỗ trên cùng một sessi
 2. Chọn một trong hai cách:
    - gõ `/handoff` trong ô chat. Chuỗi này **không** được gửi như prompt cho model: CAW nhận ra đây là lệnh gốc, hiển thị hộp xác nhận rồi yêu cầu server gõ lệnh vào terminal managed của session;
    - hoặc bấm nút **Handoff context** trong khu vực hành động của conversation, rồi bấm **Run handoff**.
-3. Xác nhận. Khi thành công, banner sẽ báo “Handoff committed — context compacted in place; session unchanged.”
+3. Xác nhận. Có **ba** kết quả khác nhau, và CAW phân biệt rõ ràng:
+   - **“Handoff delivered — OMP may still be generating; the transcript will show the compression when it commits.”** — lệnh đã được gõ vào pane, nhưng CAW **chưa thấy** compaction entry nào trong journal. OMP có thể còn đang sinh nội dung, có thể đã từ chối (`Nothing to hand off`), hoặc có thể không nhận ra lệnh. Đây **không** phải là “đã nén xong”.
+   - **“Handoff refused — the agent declined it (nothing to hand off). Nothing was compacted…”** — OMP **tự nói** nó từ chối (văn bản từ chối của agent được thấy trong pane). Đây là bằng chứng chắc chắn rằng lần này không nén gì cả, nên **không** có lượt nào đang chạy phía sau: bạn có thể chạy lại ngay khi đã có ngữ cảnh để nén. Banner hiện màu vàng (cảnh báo) để không bị đọc nhầm thành “đã gửi thành công”.
+   - **“Handoff committed — the journal records the compaction.”** — journal của session đã có entry `compaction` với `method: "handoff"`, kèm id bằng chứng. Chỉ khi đó mới là đã nén xong thật.
+
+**Rủi ro với bản nháp chưa gửi trong terminal.** `/handoff` được dán vào pane đang chạy. Nếu trong editor của terminal đó còn **bản nháp chưa gửi**, phần dán sẽ nối vào giữa dòng:
+
+```
+UNSENT_DRAFT_SENTINEL_alpha /handoff
+```
+
+Và khi nhấn Enter, **cả dòng đó được gửi đi như một prompt**. Hậu quả: (a) bản nháp của bạn bị phá, và (b) nội dung đó **có thể được gửi tới model** như một prompt, chứ không phải chạy lệnh `/handoff`. Vì CAW không thể kiểm tra được editor có trống hay không, lần bấm **Run handoff** đầu tiên **không** tự xác nhận: server trả `draft_unconfirmed`, và CAW hiển thị rõ rủi ro này. Muốn đi tiếp, bạn phải tự bấm **“I checked — the editor is empty”** — đây là một lần bấm riêng, không bao giờ tự động.
 
 **Truyền focus instructions — hiện chưa hỗ trợ.** CAW chỉ gửi đúng chuỗi `/handoff`. Mọi tham số kèm theo (ví dụ nội dung focus) bị từ chối với mã `capability_missing` và thông báo “Only the bare /handoff command is supported; focus instructions are not.” Đây là **giới hạn có chủ đích vì lý do an toàn**: `/handoff` được gõ vào terminal bằng bracketed paste, và CAW không cho phép bất kỳ văn bản tuỳ ý nào từ request đi vào pane. Nếu bạn cần focus cụ thể, hãy attach vào terminal của session và chạy `/handoff` tại đó.
 
@@ -224,7 +243,8 @@ Cả hai đều ghi một **compaction entry tại chỗ trên cùng một sessi
 
 | Mã lỗi | Nghĩa | Việc cần làm |
 |---|---|---|
-| `terminal_attached` | Có terminal đang attach vào session này, nên keystroke sẽ không tới input của agent. | Detach terminal đó (`Ctrl-b` rồi `d`) rồi thử lại, hoặc chạy `/handoff` ngay tại terminal đang attach. |
+| `terminal_attached` | Có terminal đang attach vào session này, nên keystroke sẽ không tới input của agent. Đây là **từ chối cứng** — CAW không hiển thị nút xác nhận. | Detach terminal đó (`Ctrl-b` rồi `d`) rồi thử lại, hoặc chạy `/handoff` ngay tại terminal đang attach. |
+| `draft_unconfirmed` | Terminal có thể còn **bản nháp chưa gửi**. Nếu đúng, phần dán sẽ nối vào dòng đó và có thể **gửi bản nháp tới model** kèm `/handoff`. | Kiểm tra terminal: xoá sạch editor nếu còn nội dung (hoặc gửi/lưu bản nháp trước). Xong rồi bấm **“I checked — the editor is empty”**. Nút này chỉ hiện cho đúng lỗi `draft_unconfirmed`, và không bao giờ tự bấm. |
 | `handoff_in_flight` | Đã có một handoff đang chạy cho conversation này. | Chờ handoff hiện tại kết thúc rồi thử lại. |
 | `conflict_owner` | Không chứng minh được process cần gõ vào: session external, không có tmux session/pane đã ghi nhận, identity server đã đổi, hoặc session không idle. | Đọc thông báo cụ thể, làm mới conversation; nếu là session external hoặc terminal thủ công, chạy `/handoff` tại terminal đó thay vì trong CAW. |
 | `capability_missing` | Server chưa cấu hình handoff, hoặc request kèm tham số focus. | Gửi đúng lệnh `/handoff` không tham số; nếu server thiếu cấu hình, xem log service và [triển khai](operations/deployment.md). |
@@ -264,6 +284,7 @@ Các lệnh dưới đây chỉ kiểm tra/truy vấn, ngoại trừ `restart` �
 | Danh sách model trống | Kiểm tra `omp models` trong terminal. UI hỗ trợ model ID tùy chỉnh; catalog rỗng/không sẵn sàng không làm mất lựa chọn đã lưu. |
 | Attach terminal lỗi | Dùng nguyên lệnh CAW hiển thị, gồm socket riêng và ID `$N`; kiểm tra `tmux -S /home/heheboiz/.local/state/coding-agent-web/tmux.sock ls`. Không dùng tmux socket mặc định của cá nhân. |
 | `/handoff` báo `terminal_attached` | Có terminal đang attach vào session đó. Detach (`Ctrl-b` rồi `d`) rồi thử lại, hoặc chạy `/handoff` tại terminal đang attach. |
+| `/handoff` báo `draft_unconfirmed` | CAW không thể biết editor của terminal có trống không. Nếu còn bản nháp chưa gửi, thao tác này **phá bản nháp và có thể gửi nó tới model** như một prompt. Mở terminal của session, xoá sạch editor (hoặc gửi/lưu bản nháp đó trước), rồi bấm **“I checked — the editor is empty”**. |
 | `/handoff` báo `conflict_owner` | Không chứng minh được process/pane cần gõ vào, hoặc session không idle (có thể đang chạy lượt). Làm mới conversation và chỉ thử lại khi session idle; session external phải chạy `/handoff` tại terminal của nó. |
 | `/handoff` báo `capability_missing` | Request có kèm tham số focus, hoặc server chưa cấu hình handoff. Gửi đúng chuỗi `/handoff` không tham số; nếu vẫn lỗi, xem log service. |
 | `Stop generating` không kết thúc lượt | Có thể lệnh abort chưa gửi được (mất kết nối). Giao diện báo lỗi gửi; kiểm tra kết nối rồi thử lại. Process vẫn sống nên agent có thể vẫn đang chạy. |
@@ -341,6 +362,167 @@ Không tạo session mới: nó nén ngữ cảnh **tại chỗ**, cùng session
 
 Có terminal đang attach vào session, nên keystroke sẽ rơi vào draft của bạn chứ không tới agent. Detach bằng `Ctrl-b` rồi `d` và thử lại, hoặc chạy `/handoff` ngay tại terminal đang attach.
 
+### `/handoff` báo `draft_unconfirmed` — làm sao?
+
+CAW **không thể** kiểm tra editor của terminal có trống hay không. Nếu terminal đó còn bản nháp chưa gửi, lệnh `/handoff` sẽ bị nối vào giữa dòng nháp và **cả dòng đó có thể được gửi tới model như một prompt** — bản nháp bị phá, và lệnh gốc không hề chạy. Vì vậy CAW không tự xác nhận. Hãy mở terminal của session, xoá sạch editor (hoặc gửi/lưu bản nháp trước), rồi bấm riêng nút **“I checked — the editor is empty”**.
+
+### Nhận “Handoff refused” — có phải lỗi không?
+
+Không phải lỗi. Đây là trường hợp **tốt hơn** `delivered`: OMP tự nói nó từ chối, thường là vì chưa có gì để nén (`Nothing to hand off`). CAW biết chắc **không có compaction nào xảy ra**, và cũng **không** có lượt nào đang chạy phía sau — nên bạn chạy lại ngay được, không cần chờ. Banner hiện màu vàng vì đây là thông tin cảnh báo, không phải thành công.
+
+### Nhận “Handoff delivered” — vậy là nén xong chưa?
+
+**Chưa.** `delivered` chỉ chứng minh các keystroke đã tới pane. OMP có thể còn đang sinh nội dung, có thể đã từ chối (`Nothing to hand off`), hoặc có thể không nhận ra lệnh. Chỉ khi banner ghi **“Handoff committed — the journal records the compaction.”** thì journal của session mới thực sự có compaction entry, và đó mới là đã nén xong. Xem mục 10 để biết chi tiết hai trạng thái này.
+
 ### Luôn gửi được `/handoff` cho mọi conversation phải không?
 
 Không. Chỉ session **do CAW quản lý** mới dùng được: writer phải đang idle đã xác minh, không có terminal nào attach, không đang stream và không có handoff/compaction khác đang chạy. Session external luôn bị từ chối (`conflict_owner`); hãy chạy `/handoff` tại terminal của nó.
+
+## 14. Giao diện di động mới (thanh trên, menu, nút Latest)
+
+**Thanh trên gọn.** Phần đầu của conversation giờ chỉ còn: nút **←** quay lại, tên conversation, một dòng trạng thái nhỏ, và nút **⋯ More actions**. Dòng trạng thái gộp hai thông tin: trạng thái conversation mà CAW đang giữ (ví dụ `idle`, `running`, `stopped`) và trạng thái kết nối live (`connecting`, `live`/`idle`, `running`, `reconnecting`, `disconnected`, `unknown`). Chấm tròn đổi màu: xanh khi kết nối đang tốt, vàng khi đang kết nối lại, đỏ khi mất kết nối hoặc không xác định — nhờ vậy bạn thấy ngay "mất kết nối" mà không phải cuộn.
+
+**Menu ⋯ (More actions).** Các thao tác phụ nằm trong menu này, mỗi mục một lần chạm:
+
+| Mục | Việc nó làm |
+| --- | --- |
+| Activity | Mở timeline sự kiện hoạt động |
+| Agents (n) | Mở panel agent con (chỉ hiện khi có agent) |
+| Handoff context | Nén ngữ cảnh tại chỗ (xem [chương 10](#10-lệnh-handoff--nén-ngữ-cảnh-tại-chỗ)) |
+| Stop OMP session | Kết thúc tiến trình OMP do CAW quản lý |
+| Model & session info | Mở phần model và thông tin session |
+
+**Stop generating nằm NGOÀI menu.** Khi agent đang chạy, nút **Stop generating** luôn hiện trực tiếp trên thanh trên — một lần chạm, không phải mở menu. Đây là chủ đích: lúc cần dừng gấp thì không được bắt bạn đi tìm.
+
+**Yêu cầu phê duyệt (approval) cũng không nằm trong menu.** Thẻ approval luôn nằm trong transcript, ngay tại chỗ nó được hỏi, để không bao giờ bị giấu sau một menu.
+
+**Nút Latest giờ là nút nổi.** **↓ Latest** chỉ hiện khi bạn đã cuộn lên khỏi cuối transcript, và biến mất khi bạn đã ở cuối. Nó nổi phía trên ô nhập, không chiếm chỗ trong bố cục và không che ô prompt. Quan trọng: khi bạn đang đọc tin cũ, tin mới đến **không** tự cuộn màn hình của bạn. Chỉ khi bạn chạm **↓ Latest** (hoặc tự cuộn xuống cuối) thì CAW mới bám theo tin mới.
+
+## 15. Nhóm hoạt động tool (agent activity)
+
+Tool call được gom lại theo nhóm **cùng loại, liền kề nhau**, mỗi nhóm một dòng gọn:
+
+- `✓ Read 8 files` — đọc tệp
+- `✓ Search 3 patterns` — tìm kiếm
+- `✓ Run 2 commands` — chạy lệnh
+- `✓ Run 1 test` — chạy test
+- `✓ Edit 2 files` — sửa/tạo tệp
+- `✓ Apply 1 patch` — áp patch
+- `✓ Inspect diff` — xem diff
+- `✓ Run 1 tool` — tool chưa có cách hiển thị riêng (nhóm "khác")
+
+Ba trạng thái, đọc ở ký tự đầu dòng:
+
+| Ký hiệu | Nghĩa |
+| --- | --- |
+| `◌` | Đang chạy (chưa xong — **không** phải đã thành công) |
+| `✓` | Đã xong, không có lỗi |
+| `✕` | Có lỗi — dòng này đọc được ngay cả khi chưa mở nhóm |
+
+Nhóm chưa mở **không** dựng nội dung bên trong vào trang, nên conversation dài vẫn nhẹ. Chạm vào nhóm để mở danh sách tool call; chạm vào từng dòng tool để mở chi tiết. Khi một tool báo lỗi, nội dung lỗi hiện ngay dưới dòng nhóm dù bạn chưa mở, để lỗi không bị bỏ sót.
+
+**Nhóm sửa tệp hiện luôn số dòng ngay trên dòng gọn**, ví dụ `✓ Edit 3 files +128 −34` — bạn thấy quy mô thay đổi mà không cần mở gì. Con số này được cộng từ **diff thật** của từng tệp trong nhóm; nếu có tệp nào thiếu diff thì nhóm không hiện số nào cả, thay vì hiện số thiếu.
+
+## 16. Tóm tắt thay đổi tệp và ý nghĩa của +/−
+
+Khi một tool sửa tệp và OMP gửi kèm diff thật, dòng tool sẽ hiện số dòng **thêm** và **bớt**, dạng `M src/auth.ts +42 −12`.
+
+- **+x màu xanh** = số dòng **được thêm**.
+- **−y màu đỏ** = số dòng **bị bỏ**.
+- Chữ cái đầu = trạng thái tệp: `A` thêm mới, `M` sửa, `D` xoá, `R` đổi tên, `bin` nhị phân, `?` chưa xác định.
+
+Các con số này được **đếm từ diff thật** mà host gửi, không phải đoán từ văn bản mô tả hay từ số lượng tool call. Nếu không có diff, CAW **không bịa số**: dòng đó ghi `counts unavailable` (không có số để hiển thị).
+
+**Chỉ tin khi có bằng chứng.** `✓` nghĩa là tool kết thúc không lỗi — **không** có nghĩa là test đã pass, và cũng không có nghĩa là tệp chắc chắn đã đổi. Muốn biết kết quả thật, mở diff hoặc mở output đầy đủ.
+
+## 17. Mở diff: dòng thêm, dòng bỏ, ngữ cảnh
+
+Chạm vào dòng tool có thay đổi tệp để mở. Phần **Changes** liệt kê từng tệp kèm trạng thái và số dòng. Bên dưới mỗi tệp là **unified diff**:
+
+- Dòng bắt đầu bằng `+` = dòng được thêm (nền xanh).
+- Dòng bắt đầu bằng `-` = dòng bị bỏ (nền đỏ).
+- Dòng bắt đầu bằng `@@` = **hunk header**, cho biết đoạn này nằm ở đâu trong tệp.
+- Dòng không có dấu = **ngữ cảnh** (không đổi), giúp bạn hiểu xung quanh.
+- Dấu `…` = khoảng trống giữa các đoạn không liền nhau.
+
+Nút **Copy patch** sao chép nguyên đoạn diff để dán vào nơi khác. Diff dài: CAW chỉ dựng một phần rồi mở rộng khi cần, nên mở tệp lớn không làm treo điện thoại. Muốn xem trọn output: chạm **View tool details**.
+
+**Hàng nghìn dòng không dựng sẵn.** Thân tool đóng lại thì **không** được nạp vào trang; mở ra mới nạp. Vì vậy một conversation rất dài vẫn cuộn mượt.
+
+## 18. Phân biệt "thay đổi của agent" và "thay đổi của workspace"
+
+Đây là điểm dễ hiểu sai nhất, nên CAW nói rõ:
+
+- CAW hiện nhóm thay đổi tệp theo **Workspace changes** (thay đổi trong workspace), **không** khẳng định "những tệp do agent này sửa".
+- **Cách CAW chọn tiêu đề:** nếu **có ít nhất một diff thật** cho thao tác đó, tiêu đề ghi **Changes** — vì diff là bằng chứng đã xác minh cho chính lượt tool này. Nếu **không có diff nào**, tiêu đề ghi **Workspace changes**, kèm dòng `File operation completed · Diff unavailable`. Cách này không bao giờ nâng một thao tác chưa chứng minh lên thành "thay đổi của agent".
+- Lý do: muốn khẳng định "do agent này" thì phải **chứng minh** được từng thay đổi thuộc về lượt (turn) nào. Khi bằng chứng đó chưa có, CAW chọn cách nói đúng hơn là cách nói nghe hay.
+- **Không** có con số +/− nào được suy ra từ văn bản của agent, từ độ dài output, từ số lượng tool call, hay từ số token. Chỉ diff thật mới tạo ra số.
+- Một tệp bị sửa hai lần trong hai lượt khác nhau sẽ hiện **thành hai dòng riêng**, không được cộng gộp thành "diff cuối cùng của workspace" — vì cộng gộp như vậy là nói dối về thứ chưa được chứng minh.
+
+## 19. Khi không có diff
+
+Nếu workspace không phải git, hoặc host không gửi diff, hoặc tệp quá lớn, CAW hiển thị thật đúng tình trạng đó thay vì một khung diff trống:
+
+- `File operation completed / Diff unavailable / View tool details` — thao tác tệp đã xong, nhưng không có diff để xem.
+- `counts unavailable` — không có số dòng để hiển thị.
+- `Structured result unavailable — this is the raw transport text` — CAW không nhận được kết quả có cấu trúc, nên nó chỉ hiện nguyên văn bản thô mà nó nhận được.
+
+Một màn hình **rỗng** không bao giờ được coi là "thành công": nếu không biết, CAW nói là không biết.
+
+## 20. Nội dung bị ẩn, bị cắt, hay không có
+
+Bốn tình huống khác nhau, đừng lẫn:
+
+| Tình huống | Nghĩa |
+| --- | --- |
+| **UI collapsed** (giao diện thu gọn) | Nội dung **vẫn còn**, chỉ chưa mở. Chạm để xem đủ. |
+| **Source truncated** (nguồn bị cắt) | Bản ghi gốc đã bị giới hạn khi hiển thị/đọc; một phần không được gửi tới. |
+| **Source unavailable** (không có nguồn) | Host/Collab không gửi, hoặc không có gì để gửi. |
+| **Unauthorized / unsupported** | Link read-only, hoặc loại nội dung chưa hỗ trợ — không phải lỗi của bạn. |
+
+Lịch sử lưu (saved transcript) có thể bị phân trang: thấy **Load older** nghĩa là còn bản ghi cũ hơn. Một bản ghi quá lớn có thể bị bỏ qua khi hiện, kèm cảnh báo; journal trên đĩa vẫn nguyên vẹn.
+
+### Khi một root cấu hình không đọc được (dropped roots)
+
+Danh sách session toàn cục quét các thư mục trong `allowedRoots`. Nếu một root **không đọc được** (ổ đĩa/mount chưa gắn, quyền truy cập sai, mục cấu hình đã cũ), root đó bị tạm bỏ khỏi phép kiểm tra — và **mọi session nằm dưới root đó sẽ thiếu khỏi danh sách**.
+
+CAW hiển thị một banner riêng, luôn hiện khi có root bị bỏ, **không** phụ thuộc vào việc danh sách có bị cắt hay không:
+
+> **A configured root could not be read.** Sessions under these roots are missing from this list: `/mnt/data/projects`. The projects themselves may still be present.
+
+Điểm quan trọng: đây **không** phải "không có session nào". Nếu danh sách trống trong tình huống này, CAW sẽ nói rõ là không liệt kê được vì root chưa đọc được, kèm đường dẫn cụ thể — chứ **không** hiện "No sessions match." (một câu khẳng định sai về toàn bộ kho lưu trữ).
+
+Cách xử lý: kiểm tra đường dẫn được nêu trong banner (mount đã gắn chưa, quyền truy cập, mục `allowedRoots` trong `caw.config.json` còn đúng không), sửa xong thì tải lại danh sách.
+
+Phân biệt ba banner khác nhau, đừng lẫn:
+
+| Banner | Nghĩa |
+| --- | --- |
+| **Session list is incomplete** (kèm số liệu) | Enumeration chạm giới hạn: danh sách là một tiền tố trung thực, không phải toàn bộ. |
+| **Some journals could not be read** | Đã quét tới các journal đó nhưng **không đọc được** (quyền/I-O), nên thiếu session đáng lẽ phải có. |
+| **A configured root could not be read** | Cả một **root cấu hình** không xác minh được, nên toàn bộ session dưới nó bị thiếu — kèm đường dẫn. |
+| **Some sessions are missing** (unreadable cwd) | Journal đọc được nhưng `cwd` trong header thì không, nên session đó bị bỏ — lý do không thể thấy từ danh sách. |
+
+### Khi thư mục làm việc trong journal không đọc được
+
+Mỗi journal có ghi `cwd` (thư mục làm việc) trong phần header. Có trường hợp **bản thân header đọc được nhưng `cwd` thì không** — ví dụ symlink vòng lặp, hoặc thư mục cha không có quyền truy cập. Session đó bị bỏ khỏi danh sách, và CAW **không** gộp nó vào nhóm "ngoài workspace" (nhóm đó là chuyện hợp lệ, không phải lỗi).
+
+Khi có chuyện này, CAW hiện banner riêng, luôn hiện khi số lượng lớn hơn 0, **không** phụ thuộc vào việc danh sách có bị cắt hay không:
+
+> **Some sessions are missing.** 3 sessions were skipped because the working directory in their journal could not be read, so they are not listed here.
+
+Nếu danh sách trống trong tình huống này, CAW **không** hiện "No sessions match." (câu đó là khẳng định sai về toàn bộ kho lưu trữ); thay vào đó nó nói rõ là không liệt kê được vì thư mục làm việc không đọc được.
+
+Điểm cần phân biệt: **`excludedOutsideRoots`** là số journal nằm ngoài `allowedRoots` — đây là **quyết định phạm vi hợp lệ**, không phải lỗi, nên CAW **không** hiện banner lỗi cho nó. Còn **`unreadableCwds`** là trường hợp hệ thống tệp từ chối mô tả thư mục, nên mới phải báo.
+
+Cách xử lý: tìm đường dẫn/thư mục cha bị hỏng (symlink vòng, quyền truy cập), sửa xong thì tải lại danh sách.
+
+## 21. Bàn phím và cuộn trên điện thoại
+
+- Ô nhập cao 44px khi trống và **tự cao lên** khi bạn gõ nhiều dòng, tối đa 140px rồi tự cuộn bên trong — không đẩy trang đi ngang.
+- Bản nháp (draft) của bạn được giữ khi mở/đóng tool, mở diff, hay đổi màn hình. Chưa bấm Send thì chưa mất.
+- Trang **không bao giờ cuộn ngang**. Code block và bảng markdown rộng thì tự cuộn trong khung của chúng.
+- Khi bàn phím ảo mở, ô nhập vẫn nằm trên bàn phím; trên iPhone có notch, các vùng an toàn (`safe-area`) được tôn trọng.
+- Đang đọc tin cũ thì tin mới đến **không** kéo màn hình của bạn xuống. Chạm **↓ Latest** khi bạn muốn quay lại cuối.
+- Nếu bạn bật "giảm chuyển động" (Reduce Motion) trong iOS, các hiệu ứng quay/chuyển động được tắt.
+

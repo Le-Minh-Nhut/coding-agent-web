@@ -57,6 +57,22 @@ export interface NativeSessionHeader {
   title: string | null;
 }
 
+/**
+ * Native proof that a `/handoff` compaction really committed.
+ *
+ * A handoff is delivered as a keystroke, so the paste landing proves delivery
+ * and nothing else: OMP must still recognize the builtin, generate the summary,
+ * and append the compaction entry. The journal is the only authority for that
+ * last step, and it is append-only, so "did it commit" is exactly "is there a
+ * `compaction` entry carrying `method: "handoff"` newer than the paste".
+ */
+export interface NativeHandoffCompaction {
+  /** Entry id of the observed `compaction` record; the evidence itself. */
+  entryId: string;
+  /** Entry timestamp, so a caller can tell successive handoffs apart. */
+  timestamp: string;
+}
+
 export interface NativeSessionHistory {
   header: NativeSessionHeader;
   entries: Array<Record<string, unknown>>;
@@ -87,6 +103,15 @@ export interface NativeSessionCatalog {
   findBySessionId(sessionId: string): Promise<string | null>;
   /** Read one bounded journal page; before is an opaque cursor issued for this session and project. */
   readHistory(sessionId: string, expectedCwd: string, options?: number | { before?: string }): Promise<NativeSessionHistory>;
+  /**
+   * Bounded, non-blocking tail scan for native handoff evidence: the newest
+   * `compaction` entry with `method: "handoff"` stamped after `sinceMs`, or
+   * `null` when the journal carries none. No lease probe — a handoff is in
+   * flight *while the session is live*, so a liveness refusal here would make
+   * the only honest question unanswerable. `null` means "no evidence readable
+   * in the bounded window", never "it did not commit".
+   */
+  readHandoffCompaction(sessionId: string, sinceMs: number): Promise<NativeHandoffCompaction | null>;
  }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -8,7 +8,7 @@ import type { GlobalSessionSummary } from "@caw/contracts";
 
 vi.mock("../../apps/web/src/api.js", () => ({ api: { listGlobalSessions: vi.fn(), getSavedSessionHistory: vi.fn(), createConversation: vi.fn(), attachLiveSession: vi.fn() } }));
 const session = (over: Partial<GlobalSessionSummary> = {}): GlobalSessionSummary => ({ sessionId: "session-1", journalPath: "/journal", cwd: "/work", cwdAvailable: true, projectId: "p1", conversationId: null, title: null, updatedAt: null, startedAt: null, live: false, tracked: false, hasCollabHost: false, relayConnected: null, ...over });
-const page = (sessions: GlobalSessionSummary[], extra = {}) => ({ ok: true as const, data: { sessions, nextCursor: null, filesScanned: 2, truncated: false, excludedOutsideRoots: 0, skippedNonJournal: 0, unreadableJournals: 0, ...extra } });
+const page = (sessions: GlobalSessionSummary[], extra = {}) => ({ ok: true as const, data: { sessions, nextCursor: null, filesScanned: 2, truncated: false, excludedOutsideRoots: 0, skippedNonJournal: 0, unreadableJournals: 0, unreadableCwds: 0, ...extra } });
 
 beforeEach(() => { vi.useFakeTimers({ shouldAdvanceTime: true }); vi.clearAllMocks(); vi.mocked(api.listGlobalSessions).mockResolvedValue(page([session()]) as never); vi.mocked(api.getSavedSessionHistory).mockResolvedValue({ ok: true, data: { header: { sessionId: "session-1", cwd: "/work", timestamp: null, version: null, title: null }, entries: [], truncated: false, truncatedByBytes: false, truncatedByEntries: false, skippedOversized: false, hasOlder: false, nextCursor: null } } as never); });
 afterEach(() => { cleanup(); vi.useRealTimers(); });
@@ -33,6 +33,65 @@ describe("global session history", () => {
     render(<HistoryView onBack={() => {}} onSelectConversation={() => {}} />);
     expect(await screen.findByText("quiet-session")).toBeTruthy();
     expect(screen.queryByText(/could not be read/)).toBeNull();
+  });
+
+  it("warns about a dropped root even with truncated false and zero rows", async () => {
+    // The silent-loss case: a configured root could not be read, so sessions under
+    // it are missing, yet no cap was hit (`truncated: false`) and the page is
+    // empty. "No sessions match." would be a lie about the whole store.
+    vi.mocked(api.listGlobalSessions).mockResolvedValue(page([], { truncated: false, droppedRoots: ["/mnt/data/projects"] }) as never);
+    render(<HistoryView onBack={() => {}} onSelectConversation={() => {}} />);
+
+    const warning = (await screen.findByText(/A configured root could not be read\./)).closest("[role='alert']")!;
+    // The path is named, so the user can act on the specific mount.
+    expect(warning.textContent).toContain("/mnt/data/projects");
+    expect(warning.textContent).toContain("missing from this list");
+    // And the empty-store claim is not made.
+    expect(screen.queryByText("No sessions match.")).toBeNull();
+  });
+
+  it("warns about unreadable working directories even with truncated false and zero rows", async () => {
+    // Distinct from `excludedOutsideRoots`, which is a legitimate scope decision
+    // and must stay silent. Here the journal was readable but its own `cwd` was
+    // not, so rows are missing for a reason invisible from the sessions list.
+    vi.mocked(api.listGlobalSessions).mockResolvedValue(page([], { truncated: false, excludedOutsideRoots: 12, unreadableCwds: 3 }) as never);
+    render(<HistoryView onBack={() => {}} onSelectConversation={() => {}} />);
+
+    const warning = (await screen.findByText(/Some sessions are missing\./)).closest("[role='alert']")!;
+    expect(warning.textContent).toContain("3 sessions were skipped");
+    expect(warning.textContent).toContain("could not be read");
+    // The empty-store claim is not made, since rows were dropped.
+    expect(screen.queryByText("No sessions match.")).toBeNull();
+    expect(screen.getByText(/No sessions can be listed right now/)).toBeTruthy();
+    // `excludedOutsideRoots` on its own must not raise this banner.
+    expect(screen.queryByText(/excluded outside allowed roots: 12/)).toBeNull();
+  });
+
+  it("stays silent for a legitimately out-of-scope count", async () => {
+    // The 12-of-61 case: journals outside the workspace are not an error.
+    vi.mocked(api.listGlobalSessions).mockResolvedValue(page([session({ title: "in-scope" })], { truncated: false, excludedOutsideRoots: 12, unreadableCwds: 0 }) as never);
+    render(<HistoryView onBack={() => {}} onSelectConversation={() => {}} />);
+    expect(await screen.findByText("in-scope")).toBeTruthy();
+    expect(screen.queryByText(/Some sessions are missing\./)).toBeNull();
+  });
+
+  it("degrades when an older server omits droppedRoots entirely", async () => {
+    // `droppedRoots` is optional: a server that predates it must not crash, and
+    // must not be read as "roots failed" either.
+    const legacy = { ok: true as const, data: { sessions: [session({ title: "legacy" })], nextCursor: null, filesScanned: 1, truncated: false, excludedOutsideRoots: 0, skippedNonJournal: 0, unreadableJournals: 0 } };
+    vi.mocked(api.listGlobalSessions).mockResolvedValue(legacy as never);
+    render(<HistoryView onBack={() => {}} onSelectConversation={() => {}} />);
+    expect(await screen.findByText("legacy")).toBeTruthy();
+    expect(screen.queryByText(/configured root could not be read/)).toBeNull();
+  });
+
+  it("stays silent about dropped roots on a healthy listing", async () => {
+    vi.mocked(api.listGlobalSessions).mockResolvedValue(page([session({ title: "healthy-session" })], { truncated: false }) as never);
+    render(<HistoryView onBack={() => {}} onSelectConversation={() => {}} />);
+    expect(await screen.findByText("healthy-session")).toBeTruthy();
+    expect(screen.queryByText(/configured root could not be read/)).toBeNull();
+    // Absent field on an older server is the same healthy path, not a crash.
+    expect(screen.queryByText(/No sessions can be listed right now/)).toBeNull();
   });
 
   it("keeps the unreadable warning separate from the truncation banner", async () => {

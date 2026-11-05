@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { RuntimeError, createSupervisor } from "@caw/runtime";
@@ -75,6 +75,156 @@ describe("Fastify API security", () => {
     const second = await app.inject({ method: "GET", url: `/api/sessions?limit=1&cursor=${encodeURIComponent(cursor)}`, headers });
     expect(second.json().data.sessions.map((item: { sessionId: string }) => item.sessionId)).toEqual(["global-b"]);
     expect((await app.inject({ method: "GET", url: `/api/sessions?q=Beta&limit=1&cursor=${encodeURIComponent(cursor)}`, headers })).statusCode).toBe(403);
+    await app.close();
+  });
+
+  it("excludes a session whose cwd is a symlink inside a root pointing outside it", async () => {
+    // The header `cwd` is lexically inside the allowed root, so a lexical check
+    // lists it — but it is a symlink that resolves outside, and the reader
+    // canonicalizes and refuses it. Listing it would advertise a row that can
+    // never be opened (a scope leak plus a broken affordance), so the listing
+    // must apply the reader's rule.
+    const root = await mkdtemp(join(tmpdir(), "caw-app-symlink-root-")); dirs.push(root);
+    const outside = await mkdtemp(join(tmpdir(), "caw-app-symlink-outside-")); dirs.push(outside);
+    const escape = join(root, "escape");
+    await symlink(outside, escape);
+    const { app, headers } = await fixture({
+      allowedRoots: [root],
+      listGlobalSessions: async () => ({ sessions: [
+        { sessionId: "escaped", path: join(root, "escape.jsonl"), cwd: escape, title: "Escaped", updatedAt: "2026-01-02", live: false, tracked: false },
+        { sessionId: "inside", path: join(root, "inside.jsonl"), cwd: root, title: "Inside", updatedAt: "2026-01-01", live: false, tracked: false },
+      ], filesScanned: 2, filesSkippedNonJournal: 0, truncated: false }),
+      listCollabHosts: async () => [],
+    });
+    const response = await app.inject({ method: "GET", url: "/api/sessions", headers });
+    expect(response.statusCode, JSON.stringify(response.json())).toBe(200);
+    expect(response.json().data.sessions.map((item: { sessionId: string }) => item.sessionId)).toEqual(["inside"]);
+    expect(response.json().data.excludedOutsideRoots).toBe(1);
+    await app.close();
+  });
+
+  it("keeps a session whose working directory was deleted (history-only is supported)", async () => {
+    const root = await mkdtemp(join(tmpdir(), "caw-app-deleted-cwd-")); dirs.push(root);
+    const gone = join(root, "deleted-cwd");
+    const { app, headers } = await fixture({
+      allowedRoots: [root],
+      listGlobalSessions: async () => ({ sessions: [
+        { sessionId: "gone-cwd", path: join(root, "gone.jsonl"), cwd: gone, title: "Gone", updatedAt: "2026-01-01", live: false, tracked: false },
+      ], filesScanned: 1, filesSkippedNonJournal: 0, truncated: false }),
+      listCollabHosts: async () => [],
+    });
+    const response = await app.inject({ method: "GET", url: "/api/sessions", headers });
+    expect(response.statusCode, JSON.stringify(response.json())).toBe(200);
+    expect(response.json().data.sessions).toEqual([
+      expect.objectContaining({ sessionId: "gone-cwd", cwdAvailable: false, projectId: null }),
+    ]);
+    await app.close();
+  });
+
+  it("reports a dropped allowed root instead of silently emptying the listing", async () => {
+    // A root that is momentarily unreadable (a mount gone, a mode change) drops
+    // out of containment. Its sessions then vanish — which must be *said*, not
+    // shown as "no sessions match", or the user believes their history is gone.
+    const root = await mkdtemp(join(tmpdir(), "caw-app-drop-root-")); dirs.push(root);
+    const broken = await mkdtemp(join(tmpdir(), "caw-app-drop-broken-")); dirs.push(broken);
+    const missing = join(broken, "gone");
+    const { app, headers } = await fixture({
+      allowedRoots: [root, missing],
+      listGlobalSessions: async () => ({ sessions: [
+        { sessionId: "healthy", path: join(root, "h.jsonl"), cwd: root, title: "Healthy", updatedAt: "2026-01-01", live: false, tracked: false },
+      ], filesScanned: 1, filesSkippedNonJournal: 0, truncated: false }),
+      listCollabHosts: async () => [],
+    });
+    const response = await app.inject({ method: "GET", url: "/api/sessions", headers });
+    expect(response.statusCode, JSON.stringify(response.json())).toBe(200);
+    expect(response.json().data.droppedRoots).toEqual([missing]);
+    expect(response.json().data.sessions.map((item: { sessionId: string }) => item.sessionId)).toEqual(["healthy"]);
+    await app.close();
+  });
+
+  it("omits droppedRoots entirely when every configured root is healthy", async () => {
+    // Optional by contract: a healthy server's payload is unchanged.
+    const root = await mkdtemp(join(tmpdir(), "caw-app-drop-none-")); dirs.push(root);
+    const { app, headers } = await fixture({
+      allowedRoots: [root],
+      listGlobalSessions: async () => ({ sessions: [], filesScanned: 0, filesSkippedNonJournal: 0, truncated: false }),
+      listCollabHosts: async () => [],
+    });
+    const response = await app.inject({ method: "GET", url: "/api/sessions", headers });
+    expect(response.statusCode).toBe(200);
+    expect(response.json().data).not.toHaveProperty("droppedRoots");
+    await app.close();
+  });
+
+  it("reports an unreadable path as a policy refusal, not an internal failure", async () => {
+    // A path under a root whose mount vanished is a *configuration* problem.
+    // Answering 500 makes a broken CAW_ALLOWED_ROOTS entry look like a server bug.
+    const root = await mkdtemp(join(tmpdir(), "caw-app-deny-")); dirs.push(root);
+    const locked = join(root, "locked");
+    await mkdir(locked);
+    const { app, headers } = await fixture({ allowedRoots: [root] });
+    const readable = await app.inject({ method: "GET", url: `/api/browse?path=${encodeURIComponent(locked)}`, headers });
+    expect(readable.statusCode).toBe(200);
+    await chmod(locked, 0o000);
+    try {
+      const denied = await app.inject({ method: "GET", url: `/api/browse?path=${encodeURIComponent(locked)}`, headers });
+      expect(denied.statusCode, JSON.stringify(denied.json())).toBe(403);
+      expect(denied.json().error.code).toBe("path_forbidden");
+    } finally {
+      await chmod(locked, 0o755);
+    }
+    await app.close();
+  });
+
+  it("keeps the listing when a configured root is a broken entry", async () => {
+    // A stale entry in CAW_ALLOWED_ROOTS must not deny every unrelated row: the
+    // root list is a deny-direction input, so dropping a broken root can only
+    // shrink the allowlist, never widen it.
+    const root = await mkdtemp(join(tmpdir(), "caw-app-root-healthy-")); dirs.push(root);
+    const broken = await mkdtemp(join(tmpdir(), "caw-app-root-broken-")); dirs.push(broken);
+    const rootFile = join(broken, "regular-file");
+    const rootMissing = join(broken, "never-created");
+    const rootLoop = join(broken, "loop");
+    await writeFile(rootFile, "not a directory", "utf8");
+    await symlink(rootLoop, rootLoop);
+    for (const badRoot of [rootFile, rootMissing, rootLoop]) {
+      const { app, headers } = await fixture({
+        allowedRoots: [root, badRoot],
+        listGlobalSessions: async () => ({ sessions: [
+          { sessionId: "healthy", path: join(root, "h.jsonl"), cwd: root, title: "Healthy", updatedAt: "2026-01-01", live: false, tracked: false },
+        ], filesScanned: 1, filesSkippedNonJournal: 0, truncated: false }),
+        listCollabHosts: async () => [],
+      });
+      const response = await app.inject({ method: "GET", url: "/api/sessions", headers });
+      expect(response.statusCode, `${badRoot}: ${JSON.stringify(response.json())}`).toBe(200);
+      expect(response.json().data.sessions.map((item: { sessionId: string }) => item.sessionId)).toEqual(["healthy"]);
+      await app.close();
+    }
+  });
+
+  it("excludes only the row whose cwd is a symlink loop, keeping the rest of the page", async () => {
+    // `ELOOP` at the cwd is a per-row fact. It must hide its own row and leave
+    // the page — including the cursor's ordering — intact.
+    const root = await mkdtemp(join(tmpdir(), "caw-app-loop-root-")); dirs.push(root);
+    const loop = join(root, "loop");
+    await symlink(loop, loop);
+    const { app, headers } = await fixture({
+      allowedRoots: [root],
+      listGlobalSessions: async () => ({ sessions: [
+        { sessionId: "looping", path: join(root, "loop.jsonl"), cwd: loop, title: "Looping", updatedAt: "2026-01-02", live: false, tracked: false },
+        { sessionId: "fine", path: join(root, "fine.jsonl"), cwd: root, title: "Fine", updatedAt: "2026-01-01", live: false, tracked: false },
+        { sessionId: "outside", path: join(root, "out.jsonl"), cwd: `${root}-elsewhere`, title: "Outside", updatedAt: "2026-01-01", live: false, tracked: false },
+      ], filesScanned: 3, filesSkippedNonJournal: 0, truncated: false }),
+      listCollabHosts: async () => [],
+    });
+    const response = await app.inject({ method: "GET", url: "/api/sessions", headers });
+    expect(response.statusCode, JSON.stringify(response.json())).toBe(200);
+    expect(response.json().data.sessions.map((item: { sessionId: string }) => item.sessionId)).toEqual(["fine"]);
+    // A cwd the filesystem refuses to describe is not an out-of-scope row: it is
+    // counted separately so an empty page can name *why* it is empty. The
+    // legitimately-outside journal lands in the other counter, not this one.
+    expect(response.json().data.unreadableCwds).toBe(1);
+    expect(response.json().data.excludedOutsideRoots).toBe(1);
     await app.close();
   });
 

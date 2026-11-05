@@ -15,6 +15,7 @@ export {
   encodeSessionDirName,
   SESSION_HEADER_PREFIX_BYTES,
   SESSION_HISTORY_MAX_BYTES,
+  HANDOFF_EVIDENCE_MAX_BYTES,
   SESSION_HISTORY_MAX_ENTRIES,
 } from "./session-catalog.js";
 export type { SessionCatalogOptions } from "./session-catalog.js";

@@ -15,6 +15,20 @@ const execFileAsync = promisify(execFile);
  */
 const HANDOFF_COMMAND = "/handoff";
 
+/**
+ * OMP's own words when it declines a handoff. These are *observed* output, not
+ * an inference about the editor: `capture-pane -p` reads what the process itself
+ * printed, which is why retiring a marker on one of these is evidence rather
+ * than a guess.
+ *
+ *  - "Nothing to hand off" — the builtin ran and refused (no messages yet).
+ *  - "No model selected" — the paste was submitted as a draft instead of
+ *    dispatching the builtin, so no handoff ever began.
+ */
+const HANDOFF_REFUSAL_PATTERNS = [/nothing to hand off/i, /no model selected/i];
+/** How much recent pane output the probe reads. One bounded read, never a poll. */
+const HANDOFF_PROBE_LINES = 40;
+
 /** Tmux diagnostics for an absent server or unreachable socket; permission failures stay errors. */
 const NO_SERVER_PATTERNS = [/no server running/i, /error connecting to .*?(?:no such file or directory|enoent)/i];
 const MISSING_SESSION_PATTERNS = [/can't find session/i, /no such session/i];
@@ -440,6 +454,24 @@ export class DefaultTmuxService implements TmuxService {
     } catch (err) {
       throw new AdapterError("internal", `Could not stage the handoff command: ${execErrorText(err)}`, { sessionId });
     }
+    // The attach check above is several syscalls old by now (the /proc reads and
+    // the buffer write), and a terminal can attach in that window. There is no
+    // atomic "paste only if nobody is attached" in tmux, so the window is
+    // narrowed to the single call before the paste: anything slower than one
+    // round trip cannot attach between this check and the paste.
+    try {
+      const { stdout: attachedNow } = await this.#execTmux(["display-message", "-p", "-t", paneId, "#{session_attached}"]);
+      if (attachedNow.trim() !== "0") {
+        return refuse("terminal_attached", "A terminal attached to this session while the handoff was being prepared; run /handoff there instead.");
+      }
+    } catch (err) {
+      const text = execErrorText(err);
+      if (MISSING_SESSION_PATTERNS.some((pattern) => pattern.test(text)) || isNoServer(err)) {
+        return refuse("session_missing", "The recorded tmux session is no longer present.");
+      }
+      // An unreadable attach state is not evidence that nobody is attached.
+      return refuse("terminal_attached", "The pane's terminal-attached state could not be verified; refusing to paste.");
+    }
     try {
       // Bracketed paste (`-p`), then Enter as a separate key press: the TUI sees
       // a paste event followed by a submitted line, which is what triggers the
@@ -453,6 +485,41 @@ export class DefaultTmuxService implements TmuxService {
       await this.#execTmux(["delete-buffer", "-b", bufferName]).catch(() => {});
     }
     return { delivered: true, sessionId, paneId, panePid };
+  }
+
+  /**
+   * Count OMP's explicit refusals in the pane's recent output.
+   *
+   * This is a single bounded `capture-pane -p` read — no poll loop, and read-only
+   * by construction: the only tmux verb is `capture-pane`, and the pane id comes
+   * from the same verified session the paste used, so it cannot change the
+   * paste path's identity or idle guarantees.
+   *
+   * It deliberately returns a *count* rather than a verdict. A refusal line is
+   * not self-dating: the same warning can sit on screen from an earlier handoff,
+   * so a bare "is it there" answers about the pane's history. Comparing the count
+   * against a baseline captured just before the operation under judgment is what
+   * narrows that to the *interval between the two reads* — the caller owns that
+   * comparison, because only the caller knows which operation it covers.
+   *
+   * `ponytail:` the count is window-relative (`capture-pane -p -S -40`), so it
+   * reports matches *visible now*, not matches *ever*: a pane that repaints or
+   * scrolls a pre-existing refusal line from outside the window into it raises
+   * the count with no new refusal. Upgrade path: read a position-stable range (a
+   * monotonic `#{history_size}` plus scroll position, or the whole history)
+   * instead of a fixed 40-line tail. The patterns are also bare substrings, so a
+   * line quoting the refusal text counts; harmless alone, since only a rise acts.
+   *
+   * Throws (never returns 0) when the pane cannot be read, so "I could not look"
+   * cannot be mistaken for "nothing was refused".
+   */
+  async countHandoffRefusals(sessionId: string): Promise<number> {
+    // `capture-pane -p` prints the pane's text without `-e`, so there are no
+    // escape sequences to strip before matching.
+    const output = await this.capture(sessionId, HANDOFF_PROBE_LINES);
+    let count = 0;
+    for (const pattern of HANDOFF_REFUSAL_PATTERNS) count += output.match(new RegExp(pattern.source, "gi"))?.length ?? 0;
+    return count;
   }
 
   async sendKeys(sessionId: string, keys: string): Promise<void> {

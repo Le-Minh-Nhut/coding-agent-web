@@ -325,6 +325,9 @@ textarea::placeholder {
 
 /* Conversation Screen */
 .conversation-screen {
+  /* Anchors the floating `Latest` control; the screen is already the viewport
+     box, so no scroll container is introduced by this. */
+  position: relative;
   display: flex;
   flex-direction: column;
   flex: 0 0 100vh;
@@ -555,26 +558,33 @@ textarea::placeholder {
   margin: 6px 0 0;
 }
 
+/* Floating "jump to newest": only while scrolled away from the bottom, and
+   positioned so it can never cover the composer (which is the next sibling and
+   owns the bottom of the screen) or an approval card (which lives in the
+   transcript and scrolls under it). It is a plain button, so an approval rendered
+   at the tail stays reachable by scrolling; this never scrolls for the user. */
  .latest-row {
-  flex: none;
-  min-height: 52px;
+  position: absolute;
+  right: calc(var(--safe-right) + 12px);
+  /* Measured, not guessed: 76px left a 7px gap above the composer's border, below
+     the 8px clearance the layout requires, so this sits one step further up on the
+     4/8/12/16/24 scale. Raise it if the composer's padding grows. */
+  bottom: calc(var(--safe-bottom) + 84px);
+  z-index: 15;
   display: flex;
-  justify-content: flex-end;
-  align-items: center;
-  padding: 0 calc(var(--safe-right) + 16px) 0 calc(var(--safe-left) + 16px);
-  margin-bottom: 8px;
-  background: var(--surface);
-  border-top: 1px solid var(--border);
+  pointer-events: none;
 }
 
  .latest-button {
+  pointer-events: auto;
   min-height: 44px;
   min-width: 64px;
-  padding: 4px 12px;
+  padding: 6px 14px;
   border-radius: 999px;
-  color: var(--text-muted);
-  background: transparent;
-  border-color: var(--border);
+  color: var(--text);
+  background: var(--surface-alt);
+  border: 1px solid var(--border);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
   font-size: 0.85rem;
 }
 
@@ -769,3 +779,314 @@ details[open] summary {
 .tool-output-preview { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 7rem; overflow: hidden; color: var(--text-muted); }
 .message-card pre { max-width: 100%; overflow-x: auto; white-space: pre; }
 .message-card summary, .message-card button { min-height: var(--touch-min); }
+
+/* ── Tool activity (round 50) ────────────────────────────────────────────────
+   Grouped, collapsed-by-default tool activity. Sizing follows the 4/8/12/16/24
+   scale; the `tv-` classes inside the expanded body come from the vendored guest
+   renderer (`packages/guest/src/tool-render/tool-render.css`), which bridges its
+   tokens to the `--tv-*` fallbacks defined below so it themes with this app. */
+
+.activity-group,
+.tool-row {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  min-width: 0;
+}
+
+.activity-group-head,
+.tool-row-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: var(--touch-min);
+  padding: 8px 12px;
+  background: none;
+  border: 0;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.activity-group-head:hover,
+.tool-row-head:hover {
+  background: var(--surface-hover);
+}
+
+.activity-group-state,
+.tool-row-state {
+  flex: none;
+  width: 16px;
+  text-align: center;
+  font-size: 0.85rem;
+}
+
+.activity-group--completed .activity-group-state,
+.tool-row:not(.tool-row--error) .tool-row-state { color: #3fb950; }
+.activity-group--running .activity-group-state { color: var(--primary); }
+.activity-group--failed .activity-group-state,
+.tool-row--error .tool-row-state { color: var(--danger-text); }
+
+.activity-group-label {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.9rem;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Verified-diff counts on a collapsed group head. Kept on one line with the
+   label so the summary still reads as a single row. */
+.activity-group-counts {
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  white-space: nowrap;
+}
+
+.tool-row-name {
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+
+.tool-row-sum {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.82rem;
+  color: var(--text-muted);
+}
+
+.tool-row-status {
+  flex: none;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.activity-group-chevron,
+.tool-row-chevron {
+  flex: none;
+  color: var(--text-muted);
+}
+
+.activity-group-body,
+.tool-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 0 12px 12px;
+  min-width: 0;
+}
+
+.tool-body-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.tool-body-heading {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.tool-body-note {
+  margin: 0;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+/* Per-file rows are plain list lines, not nested bordered cards. */
+.tv-file-changes {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+}
+
+.tv-file-change {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.tv-file-status {
+  flex: none;
+  width: 2ch;
+  font-weight: 600;
+}
+.tv-file-status--added { color: #3fb950; }
+.tv-file-status--deleted { color: var(--danger-text); }
+.tv-file-status--renamed,
+.tv-file-status--modified { color: var(--warning); }
+.tv-file-status--binary,
+.tv-file-status--unknown { color: var(--text-muted); }
+
+.tv-file-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.tv-file-from,
+.tv-file-counts {
+  flex: none;
+  color: var(--text-muted);
+}
+
+.tv-count-add { color: #3fb950; font-variant-numeric: tabular-nums; }
+.tv-count-del { color: var(--danger-text); font-variant-numeric: tabular-nums; }
+
+.tool-diff-block {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.tool-diff-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+  font-size: 0.8rem;
+}
+
+/* The guest design system's host-token bridge: without these it falls back to its
+   own oklch palette, which happens to be dark-on-dark against this theme. */
+.tv-card {
+  --tv-fg: var(--text);
+  --tv-muted: var(--text-muted);
+  --tv-faint: var(--text-muted);
+  --tv-accent: var(--primary);
+  --tv-ok: #3fb950;
+  --tv-err: var(--danger-text);
+  --tv-warn: var(--warning);
+  --tv-border: var(--border);
+  --tv-inset: #0b0d11;
+  --tv-raised: var(--surface-alt);
+  --tv-ring: var(--primary);
+  --tv-mono: var(--font-mono);
+}
+
+.tool-body .tv-head { min-height: var(--touch-min); }
+.tool-body .tv-expand { min-height: var(--touch-min); }
+
+@media (prefers-reduced-motion: reduce) {
+  .tv-spin { animation: none; }
+}
+
+/* ── Compact header + overflow menu (round 50) ────────────────────────────────
+   One line of status, one Stop, one menu. The actions that used to crowd this
+   row are secondary: reachable in one tap, but not competing with the two things
+   a phone user needs immediately (Stop, and knowing whether the link is up). */
+
+.header-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.header-status-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.header-status--idle,
+.header-status--running { color: #3fb950; }
+.header-status--connecting,
+.header-status--reconnecting { color: var(--warning); }
+.header-status--disconnected,
+.header-status--unknown { color: var(--danger-text); }
+
+.header-stop {
+  min-height: 44px;
+  min-width: 44px;
+  padding: 4px 10px;
+  font-size: 0.85rem;
+  white-space: nowrap;
+}
+
+.header-menu-button {
+  min-height: 44px;
+  min-width: 44px;
+  font-size: 1.15rem;
+  line-height: 1;
+}
+
+.header-menu {
+  position: absolute;
+  top: calc(var(--safe-top) + 52px);
+  right: calc(var(--safe-right) + 8px);
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  min-width: 200px;
+  padding: 4px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  overscroll-behavior: contain;
+}
+
+.header-menu button {
+  min-height: var(--touch-min);
+  padding: 8px 12px;
+  background: none;
+  border: 0;
+  border-radius: 6px;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.header-menu button:hover:not(:disabled) { background: var(--surface-hover); }
+.header-menu button:disabled { opacity: 0.5; cursor: not-allowed; }
+.header-menu-item--danger:not(:disabled) { color: var(--danger-text); }
+
+.conversation-header-actions { position: relative; }
+
+/* The tool body's raw-output block reuses the app's `pre` styling; the only
+   overrides here are the scroll bound and the inherited size. */
+.tool-raw-output {
+  max-height: 24rem;
+  overflow: auto;
+  margin: 0;
+  font-size: 0.8rem;
+  overscroll-behavior: contain;
+}
+
+.tool-body .tool-output-preview,
+.activity-group > .tool-output-preview {
+  margin: 0 12px 12px;
+  font-size: 0.8rem;
+}

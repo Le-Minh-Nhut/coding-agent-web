@@ -51,6 +51,11 @@ const welcome = (isStreaming = false, readOnly = false): HostFrame => ({
   ...(readOnly ? { readOnly: true } : {}),
 });
 
+/** Open the header's overflow disclosure: Agents now lives one tap deeper. */
+function openHeaderMenu(getByRole: (role: "button", options: { name: string }) => HTMLElement): void {
+  fireEvent.click(getByRole("button", { name: "More actions" }));
+}
+
 async function mountConversation(initiallyRunning = false, onDraftChange?: (draft: string) => void) {
   sent = [];
   socket = null;
@@ -349,10 +354,15 @@ describe("mobile reading behavior", () => {
     });
     expect(container.querySelector(".message-card.user")?.textContent).toContain("Read this");
     expect(container.querySelector(".message-card.assistant")?.textContent).toContain("Answer");
-    const tool = container.querySelector(".message-card.tool");
-    expect(tool?.querySelector("details")?.hasAttribute("open")).toBe(false);
-    expect(tool?.querySelector("summary")?.textContent).toContain("Error");
-    expect(tool?.textContent).toContain("command failed");
+    // Tool results now collapse into a per-category activity group; the row's
+    // state, tool name, and preview all remain legible without expanding — the
+    // same claim the single-card `details`/`summary` pair made.
+    const group = container.querySelector(".activity-group");
+    expect(group).not.toBeNull();
+    expect(group?.querySelector(".activity-group-head")?.getAttribute("aria-expanded")).toBe("false");
+    expect(group?.querySelector(".activity-group-state")?.textContent).toBe("✕");
+    expect(container.textContent).toContain("Run 1 command");
+    expect(container.querySelector(".tool-output-preview")?.textContent).toContain("command failed");
   });
 
 
@@ -407,6 +417,7 @@ describe("mobile reading behavior", () => {
     const { container, getByRole, queryByText } = await mountConversation();
     const agent = { id: "a", displayName: "Agent A", kind: "sub" as const, status: "running" as const, hasSessionFile: true, createdAt: 0, lastActivity: 0 };
     await act(async () => { socket?.onFrame?.({ t: "agents", agents: [agent] }); });
+    openHeaderMenu(getByRole);
     fireEvent.click(getByRole("button", { name: "Agents (1)" }));
     fireEvent.click(getByRole("button", { name: /Agent A/ }));
     const request = sent.find((frame) => frame.t === "fetch-transcript");
@@ -414,6 +425,8 @@ describe("mobile reading behavior", () => {
     const reqId = request?.t === "fetch-transcript" ? request.reqId : -1;
     fireEvent.click(getByRole("button", { name: "Close subagents" }));
     await act(async () => { socket?.onFrame?.({ t: "agents", agents: [agent] }); });
+    // Reopen the panel from the menu, then prove the old request stays dropped.
+    openHeaderMenu(getByRole);
     fireEvent.click(getByRole("button", { name: "Agents (1)" }));
     await act(async () => { socket?.onFrame?.({ t: "transcript", reqId, text: "late\n", newSize: 5 }); });
     expect(queryByText("late")).toBeNull();
@@ -432,6 +445,7 @@ describe("mobile reading behavior", () => {
     const { container, getByRole } = await mountConversation();
     const agent = { id: "a", displayName: "Agent A", kind: "sub" as const, status: "running" as const, hasSessionFile: true, createdAt: 0, lastActivity: 0 };
     await act(async () => { socket?.onFrame?.({ t: "agents", agents: [agent] }); });
+    openHeaderMenu(getByRole);
     fireEvent.click(getByRole("button", { name: "Agents (1)" }));
     fireEvent.click(getByRole("button", { name: /Agent A/ }));
     expect(sent.filter((frame) => frame.t === "fetch-transcript").map((frame) => frame.t === "fetch-transcript" ? frame.fromByte : -1)).toEqual([0]);

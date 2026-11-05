@@ -2,10 +2,11 @@ import type { Server as HttpServer } from "node:http";
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest, type RouteGenericInterface } from "fastify";
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { stat } from "node:fs/promises";
+import { setTimeout } from "node:timers/promises";
 import { browseQuerySchema, conversationActionSchema, conversationModelSchema, createConversationSchema, createDirectorySchema, createProjectSchema, epochOf, ERROR_CODES, fail, globalSessionsQuerySchema, listEventsQuerySchema, loginSchema, observationSeqOf, ok, updateProjectSchema } from "@caw/contracts";
 import { z } from "zod";
 import type { Capabilities, CollabLinkResponse, Conversation, ErrorCode, GlobalSessionPage, GlobalSessionSummary, HandoffResponse, NativeSessionSummary, ProjectWithStats } from "@caw/contracts";
-import type { CapabilityService, CollabHost, HandoffResult, ModelCatalogService, NativeSessionHistory } from "@caw/omp-adapter";
+import type { CapabilityService, CollabHost, HandoffResult, ModelCatalogService, NativeHandoffCompaction, NativeSessionHistory } from "@caw/omp-adapter";
 import type { Supervisor, RuntimeLaunchSpec } from "@caw/runtime";
 import { evaluateState } from "@caw/runtime";
 import type { AuthenticationService } from "./auth.js";
@@ -55,10 +56,75 @@ export interface AppDependencies {
    * preconditions (ownership, identity, idleness) and passes them down.
    */
   sendHandoff?: (input: { sessionId: string; expectedIdentity: string; expectedPanePid: number; assertIdle: () => Promise<boolean> }) => Promise<HandoffResult>;
+  /**
+   * Native proof reader for handoff: the newest `compaction` entry with
+   * `method: "handoff"` newer than the given epoch ms, or null. The route uses
+   * it both to decide whether a previous handoff is still generating and to
+   * earn the right to say "committed".
+   */
+  readHandoffCompaction?: (sessionId: string, sinceMs: number) => Promise<NativeHandoffCompaction | null>;
+  /** Bounded wait for that evidence before reporting `delivered`; 0 disables the wait. */
+  handoffEvidenceBudgetMs?: number;
+  /**
+   * One bounded, read-only count of OMP's *explicit* refusal lines in the pane's
+   * recent output. A count, not a verdict, because the same warning can sit on
+   * screen from an earlier handoff: only a *rise* relative to a baseline taken
+   * just before the paste is evidence, and the route owns that comparison. The
+   * rise spans the reads, not the paste: it rules out a line left behind by an
+   * earlier operation, and cannot tell a new refusal from an old one re-entering
+   * the window. Throws (never resolves) when the pane cannot be read, so
+   * "I could not look" can never be mistaken for "nothing was refused".
+   */
+  countHandoffRefusals?: (sessionId: string) => Promise<number>;
 }
 
 const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 const BODY_LIMIT = 64 * 1024;
+/**
+ * How long a request will watch the journal for native handoff evidence before
+ * reporting `delivered`. A real handoff generation was observed taking minutes
+ * (owner journals: 197s–7216s between the last prompt and the compaction entry),
+ * so this budget is deliberately far below that: it catches a handoff that
+ * committed at once and otherwise returns immediately (`ponytail: 0 by default,
+ * raise only if a fast-commit case is ever observed being missed`).
+ */
+const HANDOFF_EVIDENCE_POLL_MS = 250;
+/**
+ * Hard age backstop for a standing handoff marker.
+ *
+ * This is the *last* resort, for the one case with no positive evidence either
+ * way: a paste landed, the journal shows no compaction entry, and the pane says
+ * nothing decidable. Any observed outcome retires the marker long before this
+ * (a compacted entry, or OMP's own refusal in the pane), so the common case —
+ * including an empty session answering "Nothing to hand off" — resolves in one
+ * round trip.
+ *
+ * The number is deliberately above the longest generation ever observed from
+ * this machine's own journals (197 s – 7216 s, i.e. ~120 min), because expiring
+ * *while* a handoff is still generating is the unsafe direction: it would admit
+ * a second paste into a live compaction. A 2.5-hour wait is the wrong answer
+ * only if it is reached, which now requires no evidence at all.
+ */
+const HANDOFF_MARKER_TTL_MS = 150 * 60_000;
+
+/**
+ * Take one bounded, read-only count of the pane's refusal lines, or `null` when
+ * the pane cannot be read.
+ *
+ * The count alone means nothing — the same "Nothing to hand off" can sit on
+ * screen from an earlier attempt. It is meaningful only against a baseline taken
+ * immediately before the paste being judged, so a bare `count > 0` is never
+ * treated as evidence here. `null` (unreadable, or no reader configured) must
+ * fail closed: "I could not look" is not "nothing was refused".
+ */
+async function countRefusals(deps: AppDependencies, sessionId: string): Promise<number | null> {
+  if (!deps.countHandoffRefusals) return null;
+  try {
+    return await deps.countHandoffRefusals(sessionId);
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Read a `code` off an unknown error without asserting a shape onto it.
@@ -407,9 +473,34 @@ export function buildApp(deps: AppDependencies): FastifyInstance<HttpServer> {
     if (!deps.listCollabHosts) return reply.code(501).send(fail("capability_missing", "Collab registry is not configured."));
     try {
       const [scan, hosts, projects, conversations] = await Promise.all([deps.listGlobalSessions(), deps.listCollabHosts(), deps.store.listProjects(), deps.store.listAllConversations()]);
-      const allowed = scan.sessions.filter((session) => paths.isInsideConfiguredRoots(session.cwd));
+      // The listing must apply the SAME containment rule the reader applies. A
+      // lexical check alone accepts a journal whose header `cwd` is a symlink
+      // that *looks* inside a root but resolves outside it: the row would be
+      // listed and then refused on read, which is a scope leak and a broken
+      // affordance. `isInsideConfiguredRootsForRead` canonicalizes and keeps the
+      // one supported exception — an ENOENT cwd (a working directory that has
+      // since been deleted) stays readable as history-only.
+      //
+      // Degrade per row, never per request: a single cwd the filesystem refuses
+      // to canonicalize (a symlink loop, a non-directory component) must hide its
+      // own row and leave every other row — and the page cursor — intact.
+      const contained: Array<{ include: boolean; unreadableCwd?: boolean }> = await Promise.all(scan.sessions.map(async (session) => {
+        try {
+          return { include: await paths.isInsideConfiguredRootsForRead(session.cwd) };
+        } catch (error) {
+          app.log.warn({ sessionId: session.sessionId, errno: (error as NodeJS.ErrnoException).code }, "excluding session whose cwd could not be canonicalized");
+          // A row dropped here is *not* one that is merely outside the
+          // workspace: its own cwd could not be examined at all. Folding it into
+          // `excludedOutsideRoots` would make an unreadable working directory
+          // indistinguishable from a legitimate out-of-scope one, so it is
+          // counted separately and surfaced, the same way a dropped root is.
+          return { include: false, unreadableCwd: true };
+        }
+      }));
+      const allowed = scan.sessions.filter((_session, index) => contained[index]!.include);
       const hostMap = new Map(hosts.map((host) => [host.sessionId, host]));
-      const excludedOutsideRoots = scan.sessions.length - allowed.length;
+      const unreadableCwds = contained.filter((verdict) => verdict.unreadableCwd).length;
+      const excludedOutsideRoots = scan.sessions.length - allowed.length - unreadableCwds;
       const projectIds = new Set(projects.map((project) => project.id));
       const tracked = new Set(conversations.filter((conversation) => projectIds.has(conversation.projectId)).map((conversation) => conversation.nativeSessionId).filter((id): id is string => Boolean(id)));
       // Canonical project paths are computed once per request, not once per session.
@@ -440,7 +531,16 @@ export function buildApp(deps: AppDependencies): FastifyInstance<HttpServer> {
       const page = filtered.slice(cursor ? start : 0, (cursor ? start : 0) + query.data.limit);
       const last = page.at(-1);
       const nextCursor = last && filtered.some((session) => order(session, last) > 0) ? encodeGlobalCursor({ version: 1, query: q, updatedAt: last.updatedAt, sessionId: last.sessionId }) : null;
-      const result: GlobalSessionPage = { sessions: page, nextCursor, filesScanned: scan.filesScanned, truncated: scan.truncated, excludedOutsideRoots, skippedNonJournal: scan.filesSkippedNonJournal, unreadableJournals: scan.filesUnreadable };
+      const result: GlobalSessionPage = { sessions: page, nextCursor, filesScanned: scan.filesScanned, truncated: scan.truncated, excludedOutsideRoots, unreadableCwds, skippedNonJournal: scan.filesSkippedNonJournal, unreadableJournals: scan.filesUnreadable };
+      // A dropped root makes legitimate sessions vanish from the page. Counted
+      // rows alone would read as "these are all your sessions", so the roots are
+      // named in the response and logged — an unreadable mount must not present
+      // as an empty history.
+      const { dropped } = await paths.verifiedRoots();
+      if (dropped.length > 0) {
+        for (const root of dropped) app.log.warn({ root }, "allowed root unavailable; sessions under it are missing from this listing");
+        result.droppedRoots = dropped;
+      }
       return ok(result);
     } catch (error) {
       if (errorCode(error) === "path_forbidden") return reply.code(403).send(fail("path_forbidden", "Invalid global session cursor or scope."));
@@ -659,6 +759,12 @@ export function buildApp(deps: AppDependencies): FastifyInstance<HttpServer> {
    * Absence of evidence is a refusal, never a pass: `null`/`unknown` for
    * `busy`/`inputRequired` refuses, because a paste into a session mid-turn is a
    * second writer by keystroke instead of by lease.
+   *
+   * The response is a *state*, not a success flag. Delivery is a paste landing
+   * in a pane; recognition, generation, and the compaction append are three
+   * further things OMP does afterwards, and only the journal can prove the last
+   * one. So `delivered` never says "committed", and `committed` is returned only
+   * with the native entry id that proves it (see `HandoffState`).
    */
   const handoffInFlight = new Set<string>();
   app.post("/api/conversations/:id/handoff", { preHandler: protectedHook }, async (request, reply) => {
@@ -667,7 +773,7 @@ export function buildApp(deps: AppDependencies): FastifyInstance<HttpServer> {
     // `/handoff` takes no operand. A caller asking to focus something is asking
     // for keystrokes we deliberately cannot send, so it is refused by name rather
     // than silently dropped.
-    const body = (request.body ?? {}) as { focus?: unknown };
+    const body = (request.body ?? {}) as { focus?: unknown; confirmDraftRisk?: unknown };
     if (body.focus !== undefined && body.focus !== null && body.focus !== "") {
       return reply.code(409).send(fail("capability_missing", "Only the bare /handoff command is supported; focus instructions are not."));
     }
@@ -683,16 +789,19 @@ export function buildApp(deps: AppDependencies): FastifyInstance<HttpServer> {
     if (!conversation.nativeSessionId) {
       return reply.code(409).send(fail("conflict_owner", "This conversation has no native session to hand off."));
     }
-    if (handoffInFlight.has(conversation.id)) {
-      return reply.code(409).send(fail("handoff_in_flight", "A handoff is already in progress for this conversation."));
-    }
 
     const recordedIdentity = conversation.tmuxServerIdentity;
     const sessionId = conversation.tmuxSessionId;
     const panePid = conversation.tmuxPanePid;
     const nativeSessionId = conversation.nativeSessionId;
-    handoffInFlight.add(conversation.id);
-    try {
+    const startedAt = Date.now();
+    // Every cheap refusal returns *before* the durable marker is taken, so a
+    // refusal can never create one: the client's designed draft flow answers
+    // `draft_unconfirmed` and immediately re-asks with the acknowledgement, and a
+    // marker taken on the first attempt would deny that retry for its whole
+    // lifetime. Refusals must also not touch shared state, because clearing
+    // another request's in-memory claim would admit a third paste.
+    {
       if (!deps.tmuxServerIdentity) return reply.code(501).send(fail("capability_missing", "Handoff is not configured on this server."));
       let liveIdentity: string | null;
       try {
@@ -703,43 +812,269 @@ export function buildApp(deps: AppDependencies): FastifyInstance<HttpServer> {
       if (liveIdentity !== recordedIdentity) {
         return reply.code(409).send(fail("conflict_owner", "The recorded tmux server identity is not the live one."));
       }
-      const result = await deps.sendHandoff({
-        sessionId,
-        expectedIdentity: recordedIdentity,
-        expectedPanePid: panePid,
-        assertIdle: async () => {
-          if (!deps.findLiveHost) return false;
-          let host: CollabHost | null;
-          try {
-            host = await deps.findLiveHost(nativeSessionId);
-          } catch {
-            return false;
+      // `session_attached === "0"` proves no terminal is attached *now*. It does
+      // not prove the TUI's editor is empty: a human can attach, type an unsent
+      // prompt and detach, and the draft stays in the pane. The paste splices at
+      // the cursor, so without an explicit acknowledgement this is refused — the
+      // operation must never silently overwrite a user's unsent words.
+      //
+      // OMP persists the editor's draft only on teardown (`saveDraft` is called
+      // from `session-teardown.ts`), so there is no live on-disk draft to inspect
+      // and no authoritative emptiness signal exists. Reading the rendered
+      // composer would be exactly the guess AGENTS.md rule 6 forbids, so the
+      // decision belongs to the user, taken with the risk stated. The check sits
+      // here, after every precondition that can refuse on its own terms, so a
+      // missing session or a foreign tmux server still answers `conflict_owner`.
+      if (body.confirmDraftRisk !== true) {
+        return reply.code(409).send(fail(
+          "draft_unconfirmed",
+          "Cannot verify the terminal editor is empty; a detached session may still hold an unsent draft. Re-send with confirmDraftRisk: true to paste anyway.",
+        ));
+      }
+      // ── the operation window: from here on the marker is held ──────────────
+      if (handoffInFlight.has(conversation.id)) {
+        return reply.code(409).send(fail("handoff_in_flight", "A handoff is already in progress for this conversation."));
+      }
+      handoffInFlight.add(conversation.id);
+      try {
+        // A native handoff runs to completion inside OMP: the paste returns as
+        // soon as the keystroke lands, but generation and the compaction append
+        // happen after. The marker must outlive this request, so it is made
+        // durable — an in-memory set would let a restart mid-handoff admit a
+        // second paste onto a session OMP is still working in.
+        //
+        // Taking the marker can itself fail: the evidence read behind it touches
+        // the sessions root, and a permission blip or transient I/O there is not
+        // evidence that no handoff is generating. `recordHandoffStarted` reports
+        // that as a refusal instead of throwing, so no exit from this route can
+        // be ambiguous about whether the marker is held. Clearing on such a
+        // failure would admit a second paste onto a session OMP may still be
+        // compacting — the exact inversion this marker exists to prevent, and
+        // strictly worse than having no marker at all.
+        // ── the anchoring baseline ─────────────────────────────────────────
+        // A refusal line is not self-dating: "Nothing to hand off" from an
+        // earlier attempt can still be on screen, and reading it as *this*
+        // paste's outcome would retire a marker on an operation that is still
+        // generating — the exact inversion the marker exists to prevent. So one
+        // read-only count is taken here, immediately before the paste, and only
+        // a *rise* against it can ever mean `refused`. `null` (no reader, or an
+        // unreadable pane) means no verdict may be drawn, ever.
+        const baselineRefusals = await countRefusals(deps, sessionId);
+        const marker = await recordHandoffStarted(conversation.id, nativeSessionId, sessionId, startedAt, baselineRefusals);
+        if (marker !== "started") {
+          app.log.warn({ conversationId: conversation.id, marker }, "handoff refused: the previous operation's marker is still standing");
+          return reply.code(409).send(fail("handoff_in_flight", "A handoff is already generating for this conversation."));
+        }
+        // Past this point the marker is held and every exit either retires it
+        // with evidence or leaves it standing for the next request to resolve.
+        // Nothing in the failure paths clears it: the operation may already be
+        // generating in the pane.
+        const result = await deps.sendHandoff({
+          sessionId,
+          expectedIdentity: recordedIdentity,
+          expectedPanePid: panePid,
+          assertIdle: async () => {
+            if (!deps.findLiveHost) return false;
+            let host: CollabHost | null;
+            try {
+              host = await deps.findLiveHost(nativeSessionId);
+            } catch {
+              return false;
+            }
+            // Read-only rooms and unreported flags are not idle evidence.
+            return host !== null && host.sessionId === nativeSessionId && host.access === "control" &&
+              host.relayConnected === true && host.busy === false && host.inputRequired === false;
+          },
+        });
+        if (result.delivered) {
+          app.log.info({ conversationId: conversation.id }, "handoff delivered");
+          // One bounded look for the native entry, so a handoff that really did
+          // commit inside the budget is reported as committed — with its entry id
+          // as the evidence. No compaction entry means `delivered`, never a
+          // fabricated success, and never a re-typed paste.
+          const evidence = await deps.readHandoffCompaction
+            ? await awaitHandoffEvidence(nativeSessionId, startedAt, deps.handoffEvidenceBudgetMs ?? 0)
+            : null;
+          if (evidence) {
+            // The operation is finished: retire the marker rather than leaving
+            // the next reader to infer its end from the compaction it just saw.
+            await clearHandoffMarker(conversation.id);
+            app.log.info({ conversationId: conversation.id, entryId: evidence.entryId }, "handoff compaction observed");
+            return ok({ state: "committed", paneId: result.paneId, compactionEntryId: evidence.entryId } satisfies HandoffResponse);
           }
-          // Read-only rooms and unreported flags are not idle evidence.
-          return host !== null && host.sessionId === nativeSessionId && host.access === "control" &&
-            host.relayConnected === true && host.busy === false && host.inputRequired === false;
-        },
-      });
-      if (result.delivered) {
-        app.log.info({ conversationId: conversation.id }, "handoff delivered");
-        const delivered: HandoffResponse = { delivered: true, paneId: result.paneId };
-        return ok(delivered);
+          // No entry yet. That answer is the same whether OMP is still
+          // generating or silently declined, so the pane's own refusal lines are
+          // counted once more: strictly more than the baseline taken just before
+          // *this* paste is evidence it never started, and retiring on it turns
+          // "wait out the backstop for a retry" into "retry now". A stale warning
+          // from an earlier attempt leaves the count unchanged, so it can never
+          // earn the `refused` label; an unreadable pane or an absent baseline
+          // leaves the marker, because neither is evidence of a refusal.
+          if (await previousHandoffRefused({ refusalBaseline: baselineRefusals }, sessionId)) {
+            await clearHandoffMarker(conversation.id);
+            app.log.info({ conversationId: conversation.id }, "handoff refused by the agent; marker retired");
+            return ok({ state: "delivered", paneId: result.paneId, refused: true } satisfies HandoffResponse);
+          }
+          return ok({ state: "delivered", paneId: result.paneId } satisfies HandoffResponse);
+        }
+        // The paste never landed, so nothing is generating and the marker goes.
+        await clearHandoffMarker(conversation.id);
+        if (result.refusal === "terminal_attached") {
+          return reply.code(409).send(fail("terminal_attached", result.reason));
+        }
+        // Every other refusal says the recorded process is not the one we could
+        // safely type into, so the client's move is to refresh, not to retry.
+        return reply.code(409).send(fail("conflict_owner", result.reason));
+      } catch (error) {
+        // Deliberately no `clearHandoffMarker` here: a throw after the marker was
+        // taken may mean the paste already reached a pane OMP is compacting now.
+        // The marker stays; only evidence or the age backstop may retire it.
+        const code = errorCode(error);
+        if (code === "bad_request") return reply.code(400).send(fail("bad_request", String(redactLogValue(error instanceof Error ? error.message : "Invalid handoff request"))));
+        app.log.error({ conversationId: conversation.id }, "handoff failed");
+        return reply.code(500).send(fail("internal", "Could not deliver the handoff."));
+      } finally {
+        handoffInFlight.delete(conversation.id);
       }
-      if (result.refusal === "terminal_attached") {
-        return reply.code(409).send(fail("terminal_attached", result.reason));
-      }
-      // Every other refusal says the recorded process is not the one we could
-      // safely type into, so the client's move is to refresh, not to retry.
-      return reply.code(409).send(fail("conflict_owner", result.reason));
-    } catch (error) {
-      const code = errorCode(error);
-      if (code === "bad_request") return reply.code(400).send(fail("bad_request", String(redactLogValue(error instanceof Error ? error.message : "Invalid handoff request"))));
-      app.log.error({ conversationId: conversation.id }, "handoff failed");
-      return reply.code(500).send(fail("internal", "Could not deliver the handoff."));
-    } finally {
-      handoffInFlight.delete(conversation.id);
     }
   });
+
+  /**
+   * The newest marker event for this conversation: the handoff operation is
+   * "in progress" while the newest of `handoff-start` / `handoff-cancelled` is a
+   * start, and "retired" when it is a cancellation. Scanning only for starts
+   * would make `clearHandoffMarker` write-only dead code — the marker it retires
+   * would still be found next time.
+   *
+   * The refusal baseline travels with the marker: it is the pane's refusal-line
+   * count observed immediately before that operation's paste, and it is the only
+   * thing that makes a later refusal line attributable to *that* paste. A marker
+   * without one (written before this rule, or when the pane could not be read)
+   * yields `null`, which callers must treat as "no verdict" rather than "zero".
+   */
+  async function latestHandoffMarker(conversationId: string): Promise<{ startedAt: number; refusalBaseline: number | null } | null> {
+    let events;
+    try {
+      events = await deps.store.listEventsTail<{ sessionId?: unknown; startedAt?: unknown; refusalBaseline?: unknown }>(conversationId, Number.POSITIVE_INFINITY, 50);
+    } catch {
+      return null;
+    }
+    for (let index = events.length - 1; index >= 0; index -= 1) {
+      const event = events[index]!;
+      if (event.type === "handoff-cancelled") return null;
+      if (event.type !== "handoff-start") continue;
+      const startedAt = event.payload?.startedAt;
+      if (typeof startedAt !== "number" || !Number.isFinite(startedAt)) return null;
+      const baseline = event.payload?.refusalBaseline;
+      return { startedAt, refusalBaseline: typeof baseline === "number" && Number.isFinite(baseline) ? baseline : null };
+    }
+    return null;
+  }
+
+  /**
+   * Whether a fresh refusal count is evidence that the operation described by
+   * `previous` refused.
+   *
+   * Fail-closed by construction: without the operation's own baseline, or without
+   * a readable count now, nothing may be concluded — an absent baseline is never
+   * read as "there were none before". Only a strict rise counts, so a refusal
+   * line left on screen by an *earlier* handoff cannot retire this marker on its
+   * own: the rise has to happen between the two reads. It cannot distinguish a
+   * genuinely new refusal from a pre-existing line that scrolled into the
+   * 40-line window in between, which is the documented ceiling on the counter
+   * itself rather than a property of this comparison.
+   */
+  async function previousHandoffRefused(previous: { refusalBaseline: number | null }, sessionId: string): Promise<boolean> {
+    if (previous.refusalBaseline === null) return false;
+    const now = await countRefusals(deps, sessionId);
+    return now !== null && now > previous.refusalBaseline;
+  }
+
+  /**
+   * Take the durable, session-scoped handoff marker.
+   *
+   * Returns a three-way outcome rather than a boolean, because the route must
+   * never confuse "a previous operation is still standing" with "I could not
+   * find out". Both refuse; neither retires anything.
+   *
+   *  - `started` — no live marker was standing; a fresh one is recorded.
+   *  - `in_flight` — a marker stands and its handoff has produced no matching
+   *    native entry, so it may still be generating.
+   *  - `unreadable` — the evidence read or the store write failed. Absence of
+   *    evidence must never convert into permission to paste again, so this
+   *    refuses too, and in particular never writes a `handoff-start` (which
+   *    would replace the very marker we failed to evaluate).
+   *
+   * Three deliberate ceilings, each spelled out rather than hidden:
+   *  - only *this* call takes a marker, and the route reaches it only after
+   *    every cheap refusal returned, so a refusal can never create one.
+   *  - it is only consulted when we can read native evidence. Without that
+   *    reader a durable marker could never be cleared, so a restart would brick
+   *    handoff forever; refusing on an unverifiable marker is worse than the
+   *    concurrency it prevents, and the in-memory set still covers this process.
+   *  - a marker older than `HANDOFF_MARKER_TTL_MS` is abandoned. It is the last
+   *    resort for one genuinely ambiguous case — `delivered` with no compaction
+   *    entry and no observable refusal in the pane — and it is a ceiling on a
+   *    *guess*, so it is set above every observed generation, not below it. The
+   *    common case does not wait it out: an explicit refusal retires the marker
+   *    in one round trip.
+   */
+  async function recordHandoffStarted(conversationId: string, nativeSessionId: string, sessionId: string, startedAt: number, refusalBaseline: number | null): Promise<"started" | "in_flight" | "unreadable"> {
+    if (!deps.readHandoffCompaction) return "started";
+    let previous: { startedAt: number; refusalBaseline: number | null } | null;
+    try {
+      previous = await latestHandoffMarker(conversationId);
+      if (previous !== null && startedAt - previous.startedAt < HANDOFF_MARKER_TTL_MS) {
+        const evidence = await deps.readHandoffCompaction(nativeSessionId, previous.startedAt);
+        if (evidence) {
+          // The previous operation is provably over; its marker is retired
+          // before the new one is taken.
+          await clearHandoffMarker(conversationId);
+        } else {
+          // No entry yet, but the pane may state a refusal that is attributable
+          // to *that* operation — strictly more refusal lines than its own
+          // baseline recorded, measured now. A refusal also ends it; anything
+          // else (a stale line, an absent baseline, or an unreadable pane) keeps
+          // refusing, because none of those is evidence that it is over.
+          if (!(await previousHandoffRefused(previous, sessionId))) return "in_flight";
+          await clearHandoffMarker(conversationId);
+        }
+      }
+      await deps.store.recordEvent(conversationId, "handoff-start", { sessionId: nativeSessionId, startedAt, refusalBaseline }, new Date(startedAt).toISOString());
+      return "started";
+    } catch {
+      return "unreadable";
+    }
+  }
+
+  /**
+   * Retire the marker for a handoff that never reached the pane, or whose
+   * operation finished. Written as its own event rather than a delete because the
+   * store's journal is append-only.
+   */
+  async function clearHandoffMarker(conversationId: string): Promise<void> {
+    if (!deps.readHandoffCompaction) return;
+    await deps.store.recordEvent(conversationId, "handoff-cancelled", {}, new Date().toISOString());
+  }
+
+  /**
+   * Look for the native compaction entry for at most `budgetMs`, then give up.
+   *
+   * Cancellable and bounded by construction, and it never *asserts* completion:
+   * running out of budget is `delivered`. A real handoff generation was observed
+   * taking minutes in the owner's journals, so the default budget is small on
+   * purpose — it exists to catch a handoff that committed immediately, not to
+   * hold the request open until one finishes.
+   */
+  async function awaitHandoffEvidence(sessionId: string, sinceMs: number, budgetMs: number): Promise<NativeHandoffCompaction | null> {
+    const deadline = Date.now() + Math.max(0, budgetMs);
+    for (;;) {
+      const evidence = await deps.readHandoffCompaction!(sessionId, sinceMs);
+      if (evidence) return evidence;
+      if (Date.now() >= deadline) return null;
+      await setTimeout(HANDOFF_EVIDENCE_POLL_MS);
+    }
+  }
   async function attachInstructions(conversation: Conversation) {
     const base = { conversationId: conversation.id, tmuxSessionName: conversation.tmuxSessionName };
     if (conversation.ownership !== "managed" || !conversation.tmuxSessionId) {

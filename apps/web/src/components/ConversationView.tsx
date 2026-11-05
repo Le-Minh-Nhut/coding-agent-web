@@ -12,8 +12,10 @@ import {
   type HostFrame,
   type SessionEntry,
 } from "@caw/collab-protocol";
-import { clearTranscriptRequests, createTranscriptState, forgetTranscriptRequest, reduceHostFrame, setConnectionStatus, textFromContent, trackTranscriptRequest, transcriptMessagesFromEntries, type TranscriptBlock, type TranscriptMessage, type TranscriptReply, type TranscriptState } from "../transcript.js";
+import { clearTranscriptRequests, createTranscriptState, forgetTranscriptRequest, reduceHostFrame, setConnectionStatus, textFromContent, trackTranscriptRequest, transcriptMessagesFromEntries, type TranscriptBlock, type TranscriptMessage, type TranscriptReply, type TranscriptState, type ToolResultLike } from "../transcript.js";
 import { findSlashCommand, slashCommands, type SlashCommand } from "../commands.js";
+import { ActivityGroupRow } from "./ToolActivity.js";
+import { groupActivity, pairToolArguments } from "../tool-activity.js";
 import type { AttachInstructions, Conversation } from "@caw/contracts";
 /** A settled prompt record kept until explicit dismissal. */
 export interface RefusedRecovery {
@@ -39,6 +41,11 @@ interface DisplayMessage {
   text: string;
   blocks?: TranscriptBlock[];
   toolName?: string;
+  toolCallId?: string;
+  toolResult?: ToolResultLike;
+  /** Wire arguments captured from the live start event; the guest body renders
+      these directly, so dropping them here silently empties every live tool row. */
+  toolArgs?: Record<string, unknown>;
   isError?: boolean;
   isRunning?: boolean;
   awaitingHost?: boolean;
@@ -144,6 +151,27 @@ export const MessageRow = memo(function MessageRow({ message }: { message: Displ
   );
 });
 
+/**
+ * The transcript list: tool results collapse into per-category activity groups,
+ * every other row keeps its own card.
+ *
+ * Grouping is presentation only — the rows handed to a group are the same
+ * objects the ungrouped list would render, and each group's card expands to
+ * those rows unchanged. That is why a reconnect or replay cannot duplicate rows:
+ * the group derives from `messages`, which the reducer already de-duplicates.
+ */
+export const TranscriptList = memo(function TranscriptList({ rows }: { rows: DisplayMessage[] }) {
+  const entries = useMemo(() => groupActivity(rows), [rows]);
+  const pairedArgs = useMemo(() => pairToolArguments(rows), [rows]);
+  return (
+    <>
+      {entries.map((entry) => entry.kind === "row"
+        ? <MessageRow key={entry.row.id} message={entry.row} />
+        : <ActivityGroupRow key={`group:${entry.group.rows[0]?.id ?? ""}`} group={entry.group} pairedArgs={pairedArgs} />)}
+    </>
+  );
+});
+
 function renderTranscriptBlock(block: TranscriptBlock, index: number): React.ReactNode {
   if (block.type === "toolCall") return <details key={index}><summary>{`[Tool call: ${block.name}${block.intent ? ` — ${block.intent}` : ""}]`}</summary><pre style={{ overflowX: "auto" }}><code>{JSON.stringify(block.arguments, null, 2)}</code></pre></details>;
   if (block.type === "image") return block.dataUrl ? <img key={index} src={block.dataUrl} alt="Attachment" style={{ maxWidth: "100%" }} /> : <p key={index}>{block.label}</p>;
@@ -165,6 +193,9 @@ export type ConnectionStatus = "connecting" | "idle" | "running" | "reconnecting
 export function handoffRefusalText(code: string, message: string): string {
   if (code === "terminal_attached") return "A terminal is attached to this session. Run /handoff there instead.";
   if (code === "handoff_in_flight") return message || "A handoff is already in progress for this conversation.";
+  if (code === "draft_unconfirmed") {
+    return message || "The terminal may still hold an unsent draft. Confirm the editor is empty before sending /handoff.";
+  }
   return message;
 }
 
@@ -185,7 +216,14 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
   const [interceptedCommand, setInterceptedCommand] = useState<SlashCommand | null>(null);
   const [handoffBusy, setHandoffBusy] = useState(false);
   const [handoffNotice, setHandoffNotice] = useState<string | null>(null);
+  // A refusal is positive evidence the agent declined, so it must not be painted
+  // with the green "running" tone that means "we delivered it".
+  const [handoffNoticeTone, setHandoffNoticeTone] = useState<"running" | "warning">("running");
   const [handoffRefusal, setHandoffRefusal] = useState<string | null>(null);
+  // The code decides whether the refusal is confirmable (`draft_unconfirmed`, an
+  // unprovable risk the user can accept) or hard (`terminal_attached`, where the
+  // command must run in that terminal at all).
+  const [handoffRefusalCode, setHandoffRefusalCode] = useState<string | null>(null);
   const [handoffConfirming, setHandoffConfirming] = useState(false);
   const [stopSessionConfirming, setStopSessionConfirming] = useState(false);
   const [stopSessionBusy, setStopSessionBusy] = useState(false);
@@ -203,6 +241,7 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
   const [modelBusy, setModelBusy] = useState(false);
   const [showSubagents, setShowSubagents] = useState(false);
   const [showActivity, setShowActivity] = useState(false);
+  const [showMenu, setShowMenu] = useState(false);
   const [transcriptErrors, setTranscriptErrors] = useState<Record<string, string>>({});
   const [savedHistory, setSavedHistory] = useState<(SavedConversationHistory & { messages: TranscriptMessage[] }) | null>(null);
   /**
@@ -428,13 +467,28 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     restartInFlightRef.current = false;
     setHandoffBusy(false);
     setHandoffNotice(null);
+    setHandoffNoticeTone("running");
     setHandoffRefusal(null);
+    // Without this the `draft_unconfirmed` override card outlives its
+    // conversation: it renders on the code alone, and React reuses this instance
+    // across a switch, so accepting A's risk would send `confirmDraftRisk: true`
+    // to B.
+    setHandoffRefusalCode(null);
     setHandoffConfirming(false);
     setStopSessionBusy(false);
     setStopSessionNotice(null);
     setStopSessionRefusal(null);
     setStopSessionConfirming(false);
     setRestartBusy(false);
+    // Same class of leak: every other atom that is scoped to one conversation and
+    // renders without a guard of its own.
+    setInterceptedCommand(null);
+    setIsDetached(false);
+    setOptimisticMessages([]);
+    setTranscriptErrors({});
+    // The terminal pane being watched belongs to the conversation that requested
+    // it; a late frame for the old agent must not be accepted for the new one.
+    watchedTranscriptAgentRef.current = null;
     return () => {
       viewActiveRef.current = false;
       operationGenerationRef.current++;
@@ -452,7 +506,18 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
       if (message.role === "user") hostCounts.set(message.text, (hostCounts.get(message.text) ?? 0) + 1);
     }
     return [
-      ...transcript.messages,
+      ...transcript.messages.map((message) => ({
+        id: message.id,
+        role: message.role,
+        text: message.text,
+        ...(message.blocks ? { blocks: message.blocks } : {}),
+        ...(message.toolName ? { toolName: message.toolName } : {}),
+        ...(message.toolCallId ? { toolCallId: message.toolCallId } : {}),
+        ...(message.toolResult ? { toolResult: message.toolResult } : {}),
+        ...(message.toolArgs ? { toolArgs: message.toolArgs } : {}),
+        ...(message.isError ? { isError: true } : {}),
+        ...(message.isRunning ? { isRunning: true } : {}),
+      })),
       ...optimisticMessages.filter((pending) => (hostCounts.get(pending.text) ?? 0) <= (pending.hostEchoCount ?? 0)),
     ];
   }, [transcript.messages, optimisticMessages]);
@@ -483,6 +548,9 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     text: message.text,
     ...(message.blocks ? { blocks: message.blocks } : {}),
     ...(message.toolName ? { toolName: message.toolName } : {}),
+    ...(message.toolCallId ? { toolCallId: message.toolCallId } : {}),
+    ...(message.toolResult ? { toolResult: message.toolResult } : {}),
+    ...(message.toolArgs ? { toolArgs: message.toolArgs } : {}),
     ...(message.isError ? { isError: true } : {}),
   })) ?? [], [savedHistory]);
 
@@ -1278,7 +1346,7 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
       : result.error.message);
   };
 
-  const runHandoff = async (): Promise<void> => {
+  const runHandoff = async (confirmDraftRisk = false): Promise<void> => {
     // One request at a time, and never from a state the server would refuse. The
     // ref is the real guard: two clicks in the same tick both see `handoffBusy`
     // false, because the state update has not been committed yet.
@@ -1289,15 +1357,26 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     setHandoffBusy(true);
     setHandoffNotice(null);
     setHandoffRefusal(null);
+    setHandoffRefusalCode(null);
     // The unsent draft is deliberately untouched by this action: it is not a send.
-    const result = await api.requestHandoff(conversationAtHandoff).finally(() => { handoffInFlightRef.current = false; });
+    const result = await api.requestHandoff(conversationAtHandoff, confirmDraftRisk).finally(() => { handoffInFlightRef.current = false; });
     if (!viewActiveRef.current || operationGenerationRef.current !== operationGeneration || conversationIdRef.current !== conversationAtHandoff) return;
     setHandoffBusy(false);
     if (result.ok) {
       setInterceptedCommand(null);
-      setHandoffNotice("Handoff committed — context compacted in place; session unchanged.");
+      // Three outcomes, never collapsed into one. `delivered` only proves the
+      // keystrokes reached the pane. `refused` is positive evidence the agent
+      // itself declined, so a retry is meaningful immediately. `committed` is the
+      // journal proof. Never claim a compaction the journal has not recorded.
+      setHandoffNoticeTone(result.data.state === "delivered" && result.data.refused === true ? "warning" : "running");
+      setHandoffNotice(result.data.state === "committed"
+        ? `Handoff committed — the journal records the compaction${result.data.compactionEntryId ? ` (${result.data.compactionEntryId})` : ""}.`
+        : result.data.refused === true
+          ? "Handoff refused — the agent declined it (nothing to hand off). Nothing was compacted; you can run it again once there is context to compact."
+          : "Handoff delivered — OMP may still be generating; the transcript will show the compression when it commits.");
       return;
     }
+    setHandoffRefusalCode(result.error.code);
     setHandoffRefusal(handoffRefusalText(result.error.code, result.error.message));
   };
 
@@ -1514,83 +1593,98 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
           </button>
           <div className="conversation-header-copy">
             <h3 style={{ fontSize: "1rem" }}>{conversation?.title ?? "Conversation"}</h3>
-            <span style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>{conversation?.state ?? "status unknown"}</span>
+            {/* One compact status line: the record's state plus the live link's,
+                since either can be the stale one. A disconnected link is called
+                out in colour here as well as in the banner, because the compact
+                header is the only chrome visible while the transcript scrolls. */}
+            <span className={`header-status header-status--${status}`} title="Conversation state">
+              <span className="header-status-dot" aria-hidden="true" />
+              {conversation?.state ?? "status unknown"} · {status}
+            </span>
           </div>
         </div>
 
         <div className="conversation-header-actions">
-          <button
-            type="button"
-            className="ghost"
-            style={{ fontSize: "0.85rem" }}
-            onClick={() => setShowActivity(true)}
-            aria-label="Activity"
-            title="Activity"
-          >
-            <span className="header-action-icon" aria-hidden="true">◷</span>
-            <span className="header-action-label">Activity</span>
-          </button>
-          {agents.length > 0 && (
-            <button
-              type="button"
-              className="ghost"
-              style={{ fontSize: "0.85rem" }}
-              aria-label={`Agents (${agents.length})`}
-              title={`Agents (${agents.length})`}
-              onClick={() => setShowSubagents(true)}
-            >
-              <span className="header-action-icon" aria-hidden="true">◉</span>
-              <span className="header-action-label">Agents ({agents.length})</span>
-            </button>
-          )}
+          {/* Stop generating stays OUT of the menu and stays one tap while
+              generating: it is the control a user reaches for when a turn is
+              going wrong, and a menu between them and it is a real cost. The
+              same reasoning keeps an approval out of any menu (it renders in
+              the transcript, never here). */}
           {status === "running" && canManageConversation && canWriteToHost && !transcript.readOnly && (
             <button
               type="button"
-              className="danger"
+              className="danger header-stop"
               aria-label="Stop generating"
               title="Stop generating — ends the current turn; the OMP process stays alive"
               onClick={handleStop}
-              style={{ padding: "4px 10px", fontSize: "0.85rem" }}
             >
               <span className="header-action-icon" aria-hidden="true">■</span>
               <span className="header-action-label">Stop generating</span>
             </button>
           )}
-          {/* Handoff is offered only where it can actually run. A conversation this
-              app does not own gets the control disabled with the reason printed
-              below, never an enabled action that fails. */}
-          {handoffOffered && (
-            <button
-              type="button"
-              className="ghost"
-              style={{ fontSize: "0.85rem" }}
-              aria-label="Handoff context"
-              title={handoffReason ?? "Compact this session's context in place"}
-              disabled={handoffBusy || handoffReason !== null}
-              onClick={() => setHandoffConfirming((value) => !value)}
-            >
-              <span className="header-action-icon" aria-hidden="true">⇄</span>
-              <span className="header-action-label">{handoffBusy ? "Generating handoff…" : "Handoff context"}</span>
-            </button>
-          )}
-          {/* Two different things, deliberately distinguishable. `Stop generating`
-              aborts the current turn and leaves the process alive; this one ends
-              the app-managed OMP process and releases its agent slot. Neither
-              touches the native journal, and neither is offered where it cannot
-              work. */}
-          {stopSessionOffered && (
-            <button
-              type="button"
-              className="ghost"
-              style={{ fontSize: "0.85rem" }}
-              aria-label="Stop OMP session"
-              title={stopSessionReason ?? "Terminate the app-managed OMP process; history and the native session are preserved"}
-              disabled={stopSessionBusy || stopSessionReason !== null}
-              onClick={() => setStopSessionConfirming((value) => !value)}
-            >
-              <span className="header-action-icon" aria-hidden="true">⏹</span>
-              <span className="header-action-label">{stopSessionBusy ? "Stopping session…" : "Stop OMP session"}</span>
-            </button>
+          <button
+            type="button"
+            className="ghost header-menu-button"
+            aria-label="More actions"
+            aria-expanded={showMenu}
+            aria-controls="conversation-actions-menu"
+            title="More actions"
+            onClick={() => setShowMenu((value) => !value)}
+          >
+            <span aria-hidden="true">⋯</span>
+          </button>
+          {showMenu && (
+            // A disclosure of plain buttons, deliberately not `role="menu"`:
+            // menu semantics promise roving tabindex and arrow-key navigation,
+            // which this does not implement (Tab is the only way through, as in
+            // any disclosure). Claiming the role would be an accessibility lie.
+            <div className="header-menu" id="conversation-actions-menu" aria-label="Conversation actions">
+              <button type="button" onClick={() => { setShowMenu(false); setShowActivity(true); }}>
+                Activity
+              </button>
+              {agents.length > 0 && (
+                <button type="button" aria-label={`Agents (${agents.length})`} onClick={() => { setShowMenu(false); setShowSubagents(true); }}>
+                  Agents ({agents.length})
+                </button>
+              )}
+              {/* Handoff is offered only where it can actually run. A conversation
+                  this app does not own gets the control disabled with the reason
+                  printed below, never an enabled action that fails. */}
+              {handoffOffered && (
+                <button
+                  type="button"
+                  className="header-menu-item"
+                  disabled={handoffBusy || handoffReason !== null}
+                  title={handoffReason ?? "Compact this session's context in place"}
+                  onClick={() => { setShowMenu(false); setHandoffConfirming((value) => !value); }}
+                >
+                  {handoffBusy ? "Generating handoff…" : "Handoff context"}
+                </button>
+              )}
+              {/* Two different things, deliberately distinguishable. `Stop generating`
+                  aborts the current turn and leaves the process alive; this one ends
+                  the app-managed OMP process and releases its agent slot. Neither
+                  touches the native journal, and neither is offered where it cannot
+                  work. */}
+              {stopSessionOffered && (
+                <button
+                  type="button"
+                  className="header-menu-item header-menu-item--danger"
+                  disabled={stopSessionBusy || stopSessionReason !== null}
+                  title={stopSessionReason ?? "Terminate the app-managed OMP process; history and the native session are preserved"}
+                  onClick={() => { setShowMenu(false); setStopSessionConfirming((value) => !value); }}
+                >
+                  {stopSessionBusy ? "Stopping session…" : "Stop OMP session"}
+                </button>
+              )}
+              <button
+                type="button"
+                className="header-menu-item"
+                onClick={() => { setShowMenu(false); if (modelControlsRef.current) modelControlsRef.current.open = true; }}
+              >
+                Model &amp; session info
+              </button>
+            </div>
           )}
         </div>
       </div>
@@ -1654,6 +1748,11 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
             Runs OMP's native <code>/handoff</code> on this session. It compacts the context in
             place, keeps the same session id, does not start a new agent, and keeps the history.
           </p>
+          <p>
+            The command is pasted into the live terminal pane. If that terminal still holds an
+            unsent draft, the paste consumes it — and can submit it to the model. Clear the pane
+            before continuing.
+          </p>
           {handoffReason && <p>{handoffReason}</p>}
           <div className="history-actions">
             <button type="button" className="primary" disabled={handoffBusy || handoffReason !== null} onClick={() => void runHandoff()}>
@@ -1665,8 +1764,31 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
           {handoffRefusal && <p className="handoff-refusal" role="alert">{handoffRefusal}</p>}
         </div>
       )}
-      {!handoffConfirming && handoffNotice && <div className="banner running" role="status">{handoffNotice}</div>}
+      {!handoffConfirming && handoffNotice && <div className={`banner ${handoffNoticeTone}`} role="status">{handoffNotice}</div>}
       {!handoffConfirming && handoffRefusal && <div className="banner error" role="alert">{handoffRefusal}</div>}
+      {/* `draft_unconfirmed` is the one refusal the user can accept: the editor's
+          emptiness is unprovable, so the risk is stated in full and re-sending
+          with the flag is a separate, explicit tap. Keyed off the refusal code
+          rather than the panel, because `/handoff` can also be run straight from
+          the slash-command intercept, where no confirmation card is open.
+          `terminal_attached` and the rest are hard: message only, no override. */}
+      {handoffRefusalCode === "draft_unconfirmed" && (
+        <div className="card handoff-draft-risk" role="group" aria-label="Confirm empty editor">
+          <p>
+            The terminal may still hold an unsent draft. If it does, this paste destroys that
+            draft and can submit it to the model as a prompt together with <code>/handoff</code>.
+          </p>
+          <button
+            type="button"
+            className="primary"
+            style={{ minHeight: "44px" }}
+            disabled={handoffBusy}
+            onClick={() => void runHandoff(true)}
+          >
+            I checked — the editor is empty
+          </button>
+        </div>
+      )}
       <details className="model-controls-disclosure" ref={modelControlsRef}>
         <summary>Conversation model settings</summary>
         <section className="model-controls" aria-label="Conversation model">
@@ -1786,7 +1908,7 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
             {olderHistoryLoading && <p role="status">Loading older history…</p>}
             {olderHistoryError && <p role="alert">{olderHistoryError}</p>}
             {!savedHistory.hasOlder && !savedHistory.skippedOversized && <p role="status">Beginning of history.</p>}
-            {savedRows.map((message) => <MessageRow key={message.id} message={message} />)}
+            <TranscriptList rows={savedRows} />
             {savedModeOptimistic.map((message) => <MessageRow key={message.id} message={message} />)}
           </>
         ) : linkUnavailable ? (
@@ -1837,7 +1959,7 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
           </div>
         )}
 
-        {!isShowingSavedHistory && messages.map((message) => <MessageRow key={message.id} message={message} />)}
+        {!isShowingSavedHistory && <TranscriptList rows={messages} />}
 
         {/* Streaming assistant message. Never in saved mode: the saved transcript is
             the single source of truth there, and a live stream is not its content. */}

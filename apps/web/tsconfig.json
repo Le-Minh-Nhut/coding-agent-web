@@ -5,5 +5,12 @@
     "jsx": "react-jsx",
     "lib": ["ES2023", "DOM", "DOM.Iterable"]
   },
-  "include": ["src/**/*", "vite.config.ts"]
+  "include": ["src/**/*", "vite.config.ts"],
+  // `src/guest-tools.ts` imports the vendored guest renderer by relative path.
+  // Those sources are typechecked by their own package (`pnpm --filter @caw/guest
+  // typecheck`), under upstream's `noUncheckedIndexedAccess: false`; applying this
+  // package's stricter flags to them would surface errors in code this package
+  // does not own. `src/guest-tool-render.d.ts` declares that boundary instead, so
+  // the guest's own gate stays authoritative and `apps/web` stays strict.
+  "exclude": ["node_modules", "**/dist/**", "../../packages/guest/src/tool-render/**"]
 }

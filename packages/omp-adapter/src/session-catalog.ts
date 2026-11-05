@@ -6,11 +6,25 @@ import path from "node:path";
 import { resolveOmpDirs } from "./omp-dirs.js";
 import type { NativeSessionSummary } from "@caw/contracts";
 import { DefaultSessionLeaseProbe } from "./session-lease.js";
-import type { NativeSessionCatalog, NativeSessionHeader, NativeSessionHistory, SessionLeaseProbe } from "./types.js";
+import type { NativeSessionCatalog, NativeHandoffCompaction, NativeSessionHeader, NativeSessionHistory, SessionLeaseProbe } from "./types.js";
 
 export const SESSION_HEADER_PREFIX_BYTES = 64 * 1024;
 export const SESSION_HISTORY_MAX_BYTES = 2 * 1024 * 1024;
 export const SESSION_HISTORY_MAX_ENTRIES = 500;
+/**
+ * How far back from the tip one handoff-evidence read looks.
+ *
+ * A handoff compaction is appended at the journal tip, so this window normally
+ * contains it, and it is deliberately small because the check runs against a
+ * *live* session. The known ceiling, stated rather than hidden: if more than
+ * this is appended after the compaction before we look, `delivered` is reported
+ * for a handoff that did commit. Reaching it needs a positive evidence budget
+ * plus a lot of output inside it — the default budget is one immediate read, and
+ * the largest handoff entry observed in the owner's journals is ~75 KB.
+ * ponytail: upgrade path is a second bounded read over the same window from the
+ * head, if a miss is ever observed on a journal larger than this.
+ */
+export const HANDOFF_EVIDENCE_MAX_BYTES = 1024 * 1024;
 
 export interface SessionCatalogOptions {
   sessionsRoot?: string;
@@ -406,6 +420,75 @@ export class DefaultNativeSessionCatalog implements NativeSessionCatalog {
     }
     return null;
   }
+  /**
+   * Find the newest native handoff compaction newer than `sinceMs`.
+   *
+   * Deliberately a *tail* scan with no lease probe: the question "did the
+   * handoff commit" is asked while the session is live, which is exactly when
+   * `readHistory`'s liveness gate would refuse. The answer is bounded and
+   * cancellable by the caller (a single read, no polling loop here), and a
+   * missing/unreadable journal is `null` — no evidence — never a failure the
+   * route would have to turn into a claim.
+   */
+  async readHandoffCompaction(sessionId: string, sinceMs: number): Promise<NativeHandoffCompaction | null> {
+    if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u.test(sessionId)) return null;
+    const candidate = await this.findBySessionId(sessionId);
+    if (!candidate) return null;
+    // `findBySessionId` matches on the *file name*, which is not identity: two
+    // roots can hold journals with the same stem, and a journal can be copied
+    // under another session's name. The header `id` is the authority, and the
+    // same corroboration `readGlobalHistory` performs (server.ts) is required
+    // here — otherwise a foreign journal's compaction would be reported as this
+    // session's commit, which is exactly the claim the state machine must not
+    // make without evidence.
+    let header: NativeSessionHeader | null;
+    try {
+      header = await this.readHeader(candidate);
+    } catch {
+      return null;
+    }
+    if (!header || header.sessionId !== sessionId) return null;
+    let handle;
+    try {
+      handle = await open(candidate, constants.O_RDONLY | constants.O_NOFOLLOW);
+    } catch {
+      return null;
+    }
+    try {
+      const metadata = await handle.stat();
+      if (!metadata.isFile()) return null;
+      const start = Math.max(0, metadata.size - HANDOFF_EVIDENCE_MAX_BYTES);
+      const window = Buffer.alloc(metadata.size - start);
+      const read = await handle.read(window, 0, window.length, start);
+      const text = window.toString("utf8", 0, read.bytesRead);
+      // When the window does not start at the file head, its first line may be a
+      // torn suffix of a record; dropping it is what keeps a partial JSON line
+      // from reading as evidence.
+      const lines = text.split("\n");
+      if (start > 0) lines.shift();
+      let latest: NativeHandoffCompaction | null = null;
+      for (const line of lines) {
+        if (!line.includes('"compaction"') || !line.includes('"handoff"')) continue;
+        let entry: Record<string, unknown>;
+        try {
+          const parsed: unknown = JSON.parse(line);
+          if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) continue;
+          entry = parsed as Record<string, unknown>;
+        } catch { continue; }
+        if (entry.type !== "compaction" || entry.method !== "handoff") continue;
+        if (typeof entry.id !== "string" || typeof entry.timestamp !== "string") continue;
+        const at = Date.parse(entry.timestamp);
+        if (!Number.isFinite(at) || at < sinceMs) continue;
+        if (!latest || at >= Date.parse(latest.timestamp)) latest = { entryId: entry.id, timestamp: entry.timestamp };
+      }
+      return latest;
+    } catch {
+      return null;
+    } finally {
+      await handle.close().catch(() => {});
+    }
+  }
+
   async readHistory(sessionId: string, expectedCwd: string, options: number | { before?: string } = {}): Promise<NativeSessionHistory> {
     const limit = typeof options === "number" ? options : SESSION_HISTORY_MAX_ENTRIES;
     const entryLimit = Number.isFinite(limit) ? Math.min(Math.max(Math.trunc(limit), 1), SESSION_HISTORY_MAX_ENTRIES) : SESSION_HISTORY_MAX_ENTRIES;

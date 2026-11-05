@@ -52,32 +52,56 @@ export class WorkspacePathPolicy {
   isInsideConfiguredRoots(path: string): boolean {
     return !path.includes("\0") && isAbsolute(path) && this.inside(path, this.configuredRoots);
   }
+  /**
+   * Read-grade containment for a *listing*: canonicalize the path and check the
+   * real roots. Unreadable roots are dropped rather than failing the batch, and
+   * the caller decides what to do about a path it cannot canonicalize (a cwd in
+   * a symlink loop is not evidence that the rest of the page is bad).
+   */
   async isInsideConfiguredRootsForRead(path: string): Promise<boolean> {
     if (!this.isInsideConfiguredRoots(path)) return false;
+    let canonicalPath: string;
     try {
-      const [canonicalPath, roots] = await Promise.all([realpath(path), this.roots()]);
-      return this.inside(canonicalPath, roots);
+      canonicalPath = await realpath(path);
     } catch (error) {
+      // A session whose cwd no longer exists is a supported history-only row.
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return true;
       throw error;
     }
+    return this.inside(canonicalPath, (await this.verifiedRoots()).roots);
   }
 
-  private async roots(): Promise<string[]> {
-    return Promise.all(this.configuredRoots.map(async (root) => {
-      if (root.includes("\0")) throw new PathPolicyError("path_forbidden", "Workspace root contains NUL");
+  /**
+   * Canonical, verified roots, plus the configured entries that could not be
+   * verified.
+   *
+   * A configured root that cannot be canonicalized or is not a directory is
+   * dropped instead of rejecting the whole batch. Failing closed here would make
+   * one stale entry in `CAW_ALLOWED_ROOTS` deny every path AND — because callers
+   * like the global listing ask once per session — turn a single bad entry into a
+   * blanket 403/500 for unrelated rows. Dropping it keeps the deny direction
+   * (`inside()` can never match a root that is not in this list), so the worst
+   * case of a broken root is a smaller allowlist, never a larger one.
+   *
+   * Dropping is **reported**, never silent: a root that is momentarily
+   * unreadable (a network mount, a permission blip) otherwise makes legitimate
+   * history vanish from the listing with no explanation, so callers relay
+   * `dropped` to the client as a warning.
+   */
+  async verifiedRoots(): Promise<{ roots: string[]; dropped: string[] }> {
+    const checked = await Promise.all(this.configuredRoots.map(async (root) => {
+      if (root.includes("\0")) return { root, canonical: null };
       try {
         const canonical = await realpath(root);
-        if (!(await lstat(canonical)).isDirectory()) throw new PathPolicyError("not_a_directory", `Workspace root is not a directory: ${root}`);
-        return canonical;
-      } catch (error) {
-        if (error instanceof PathPolicyError) throw error;
-        const code = (error as NodeJS.ErrnoException).code;
-        if (code === "ELOOP") throw new PathPolicyError("path_forbidden", "Workspace root contains a symlink loop");
-        if (code === "ENOENT") throw new PathPolicyError("path_not_found", `Workspace root does not exist: ${root}`);
-        throw error;
+        return { root, canonical: (await lstat(canonical)).isDirectory() ? canonical : null };
+      } catch {
+        return { root, canonical: null };
       }
     }));
+    return {
+      roots: checked.flatMap((entry) => (entry.canonical === null ? [] : [entry.canonical])),
+      dropped: checked.flatMap((entry) => (entry.canonical === null ? [entry.root] : [])),
+    };
   }
 
   private inside(path: string, roots: readonly string[]): boolean {
@@ -111,9 +135,15 @@ export class WorkspacePathPolicy {
       let names: string[];
       try { names = await readdir(current); }
       catch (error) {
-        if ((error as NodeJS.ErrnoException).code === "ENOENT") throw new PathPolicyError("path_not_found", "Path does not exist");
-        if ((error as NodeJS.ErrnoException).code === "ENOTDIR") throw new PathPolicyError("not_a_directory", "Path component is not a directory");
-        if ((error as NodeJS.ErrnoException).code === "ELOOP") throw new PathPolicyError("path_forbidden", "Path contains a symlink loop");
+        const errno = (error as NodeJS.ErrnoException).code;
+        if (errno === "ENOENT") throw new PathPolicyError("path_not_found", "Path does not exist");
+        if (errno === "ENOTDIR") throw new PathPolicyError("not_a_directory", "Path component is not a directory");
+        if (errno === "ELOOP") throw new PathPolicyError("path_forbidden", "Path contains a symlink loop");
+        // A directory the process cannot read is a *configuration* problem (a
+        // root that was dropped because its mount went away or its mode changed),
+        // not an internal fault: reporting it as 500 makes a broken
+        // `CAW_ALLOWED_ROOTS` entry look like a bug in this server.
+        if (errno === "EACCES" || errno === "EPERM") throw new PathPolicyError("path_forbidden", "Path is not readable with the current permissions");
         throw error;
       }
       const matches = names.filter((name) => name.normalize("NFC") === segment);
@@ -122,8 +152,10 @@ export class WorkspacePathPolicy {
       current = join(current, matches[0]!);
       try { current = await realpath(current); }
       catch (error) {
-        if ((error as NodeJS.ErrnoException).code === "ENOENT") throw new PathPolicyError("path_not_found", "Path does not exist");
-        if ((error as NodeJS.ErrnoException).code === "ELOOP") throw new PathPolicyError("path_forbidden", "Path contains a symlink loop");
+        const errno = (error as NodeJS.ErrnoException).code;
+        if (errno === "ENOENT") throw new PathPolicyError("path_not_found", "Path does not exist");
+        if (errno === "ELOOP") throw new PathPolicyError("path_forbidden", "Path contains a symlink loop");
+        if (errno === "EACCES" || errno === "EPERM") throw new PathPolicyError("path_forbidden", "Path is not readable with the current permissions");
         throw error;
       }
       if (!this.inside(current, roots) && !this.rootAncestor(current, roots)) throw new PathPolicyError("path_forbidden", "Path is outside configured workspace roots");
@@ -132,7 +164,7 @@ export class WorkspacePathPolicy {
   }
 
   async assertInsideRoots(path: string, requireDirectory = false): Promise<string> {
-    const roots = await this.roots();
+    const roots = (await this.verifiedRoots()).roots;
     const canonical = await this.canonicalize(path, roots);
     if (!this.inside(canonical, roots)) throw new PathPolicyError("path_forbidden", "Path is outside configured workspace roots");
     if (requireDirectory) {
@@ -155,7 +187,7 @@ export class WorkspacePathPolicy {
     const candidate = resolve(parent, name);
     try {
       const canonical = await realpath(candidate);
-      const roots = await this.roots();
+      const roots = (await this.verifiedRoots()).roots;
       const allowed = this.inside(canonical, roots);
       return { name: displayName, path: allowed ? canonical : candidate, isDirectory: allowed && (await lstat(canonical)).isDirectory(), allowed, hasProject: allowed && await this.hasProject(canonical) };
     } catch (error) {
@@ -222,7 +254,7 @@ export class WorkspacePathPolicy {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") throw new PathPolicyError("path_not_found", "Path does not exist");
       throw error;
     }
-    const roots = await this.roots();
+    const roots = (await this.verifiedRoots()).roots;
     if (!this.inside(canonicalTarget, roots)) {
       throw new PathPolicyError("path_forbidden", "Created directory is outside configured workspace roots");
     }
@@ -231,7 +263,7 @@ export class WorkspacePathPolicy {
   }
 
   async listDirectory(path?: string, page?: { limit?: number; cursor?: string }): Promise<DirectoryListing> {
-    const roots = await this.roots();
+    const roots = (await this.verifiedRoots()).roots;
     if (roots.length === 0) throw new PathPolicyError("path_forbidden", "No workspace roots configured; set CAW_ALLOWED_ROOTS before browsing");
     const canonical = await this.assertInsideRoots(path ?? roots[0]!, true);
     const cursor = page?.cursor ? decodeDirectoryCursor(page.cursor) : undefined;
@@ -239,7 +271,19 @@ export class WorkspacePathPolicy {
     if (cursor && cursor.pathHash !== pathHash) throw new PathPolicyError("path_forbidden", "Directory cursor does not belong to this path");
     const paged = page?.limit !== undefined || cursor !== undefined;
     const limit = paged ? Math.min(Math.max(page?.limit ?? DEFAULT_DIRECTORY_PAGE_SIZE, 1), MAX_DIRECTORY_PAGE_SIZE) : Number.POSITIVE_INFINITY;
-    const rawNames = await readdir(canonical);
+    let rawNames: string[];
+    try {
+      rawNames = await readdir(canonical);
+    } catch (error) {
+      // An unreadable directory is a configuration/permission fact about the
+      // workspace, not an internal fault: reporting it as 500 makes a broken
+      // root or mode look like a server bug.
+      const errno = (error as NodeJS.ErrnoException).code;
+      if (errno === "EACCES" || errno === "EPERM") throw new PathPolicyError("path_forbidden", "Directory is not readable with the current permissions");
+      if (errno === "ENOENT") throw new PathPolicyError("path_not_found", "Path does not exist");
+      if (errno === "ENOTDIR") throw new PathPolicyError("not_a_directory", "Path is not a directory");
+      throw error;
+    }
     const compareNames = (left: string, right: string) =>
       left.normalize("NFC").localeCompare(right.normalize("NFC")) || (left < right ? -1 : left > right ? 1 : 0);
     rawNames.sort(compareNames);

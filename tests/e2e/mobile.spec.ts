@@ -240,19 +240,28 @@ test("long conversation scrolls internally and detached reading stays put", asyn
       },
     },
   });
-  const toolDetails = page.locator("details").filter({ hasText: "Large output" });
-  await expect(toolDetails).toBeVisible();
+  // Tool results now live in a per-category activity group; the row itself is the
+  // disclosure. The claim under test is unchanged: expanding output while the
+  // reader is detached must not move them.
+  const group = page.locator(".activity-group").filter({ hasText: "Run 1 tool" });
+  await expect(group).toBeVisible();
   const beforeExpand = await scroller.evaluate((element: HTMLElement) => ({
     scrollTop: element.scrollTop,
     scrollHeight: element.scrollHeight,
   }));
-  // The real user interaction, not a property poke: clicking the summary runs
-  // <summary>'s activation behaviour (React's onToggle fires), which is the only
-  // path that mounts the body. Dispatched rather than clicked because Playwright
-  // scrolls an element into view before a real click, which would itself move the
-  // reader we are asserting stays put.
-  await toolDetails.locator("summary").dispatchEvent("click");
-  await expect(toolDetails.locator("pre")).toBeVisible();
+  // The real user interaction, not a property poke. The group head is dispatched
+  // rather than clicked because Playwright scrolls an element into view before a
+  // real click, which would itself move the reader we are asserting stays put.
+  await group.locator(".activity-group-head").dispatchEvent("click");
+  const toolRow = group.locator(".tool-row");
+  await expect(toolRow).toBeVisible();
+  await toolRow.locator(".tool-row-head").dispatchEvent("click");
+  // Expanded body: this row carries a structured result, so the transport text
+  // sits one tap further behind "View tool details" — the claim here is only that
+  // expanding mounts content without moving the detached reader.
+  await expect(toolRow.locator(".tool-body")).toBeVisible();
+  await toolRow.getByRole("button", { name: /View tool details/ }).dispatchEvent("click");
+  await expect(toolRow.locator(".tool-raw-output")).toBeVisible();
   await page.waitForTimeout(100);
   const afterExpandGeometry = await scroller.evaluate((element: HTMLElement) => ({
     scrollTop: element.scrollTop,

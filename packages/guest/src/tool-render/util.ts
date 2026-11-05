@@ -231,6 +231,27 @@ export function argsDigest(args: unknown, maxLen = 96): string {
   return truncate(normalizeWs(display(args)), maxLen);
 }
 
+/**
+ * `+`/`-` counts from a real unified diff. Never estimated.
+ *
+ * The `+++`/`---` file headers are part of the diff's framing, not its content,
+ * so they must not be counted; the count then comes from the line prefixes
+ * alone. OMP's own payloads prefix every line with a `NN|` gutter (e.g. `+12|`,
+ * `-7|`), so nothing in them ever starts with `+++`/`---` and the skip is inert
+ * for those — this is the one implementation both the guest renderer and the web
+ * app must use, so their numbers can never disagree on a conventional diff.
+ */
+export function diffStats(diff: string): { additions: number; deletions: number } {
+  let additions = 0;
+  let deletions = 0;
+  for (const line of diff.split("\n")) {
+    if (line.startsWith("+++") || line.startsWith("---")) continue;
+    if (line.startsWith("+")) additions++;
+    else if (line.startsWith("-")) deletions++;
+  }
+  return { additions, deletions };
+}
+
 interface HljsLike {
   getLanguage(name: string): unknown;
   highlight(

@@ -10,7 +10,7 @@ import type {
 
 export type TranscriptBlock =
   | { type: "text"; text: string }
-  | { type: "toolCall"; name: string; arguments: unknown; intent?: string }
+  | { type: "toolCall"; name: string; arguments: unknown; intent?: string; id?: string }
   | { type: "image"; label: string; dataUrl?: string }
   | { type: "notice"; text: string };
 
@@ -28,6 +28,24 @@ export interface TranscriptMessage {
   isError?: boolean;
   isRunning?: boolean;
   source: "entry" | "event";
+  /** Wire tool-call id: pairs a tool result row with the call that produced it. */
+  toolCallId?: string;
+  /** Wire arguments for a live tool row, when the event carried them. */
+  toolArgs?: Record<string, unknown>;
+  /**
+   * Structured tool result, kept alongside the flattened `text` so the tool
+   * renderers can read `details` (diffs, per-file results) instead of parsing
+   * prose. `undefined` means the transport carried no structured result — the
+   * renderer must then say so rather than inventing an outcome.
+   */
+  toolResult?: ToolResultLike;
+}
+
+/** Structural mirror of the guest renderer's `ToolResultLike` (no host import). */
+export interface ToolResultLike {
+  content: readonly { type: string; text?: string; mimeType?: string; data?: string }[];
+  details?: unknown;
+  isError?: boolean;
 }
 
 export interface TranscriptReply {
@@ -116,11 +134,42 @@ export function setConnectionStatus(state: TranscriptState, connectionStatus: Co
   return { ...state, connectionStatus };
 }
 
+/**
+ * Structured tool result from untrusted wire JSON.
+ *
+ * Returns `undefined` — never a synthesized empty result — when the payload is
+ * not a `{content: [...]}` record, because "the transport carried no structured
+ * result" and "the tool returned nothing" must render differently: only the
+ * first is allowed to say "View tool details".
+ */
+export function toToolResult(value: unknown): ToolResultLike | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  const record = value as { content?: unknown; details?: unknown; isError?: unknown };
+  if (!Array.isArray(record.content)) return undefined;
+  const content: { type: string; text?: string; mimeType?: string; data?: string }[] = [];
+  for (const block of record.content) {
+    if (typeof block !== "object" || block === null) continue;
+    const part = block as { type?: unknown; text?: unknown; mimeType?: unknown; data?: unknown };
+    if (typeof part.type !== "string") continue;
+    content.push({
+      type: part.type,
+      ...(typeof part.text === "string" ? { text: part.text } : {}),
+      ...(typeof part.mimeType === "string" ? { mimeType: part.mimeType } : {}),
+      ...(typeof part.data === "string" ? { data: part.data } : {}),
+    });
+  }
+  return {
+    content,
+    ...(record.details === undefined ? {} : { details: record.details }),
+    ...(record.isError === true ? { isError: true } : {}),
+  };
+}
+
 function messageCorrelation(message: WireMessage): string {
   if (message.role === "toolResult") return `tool:${message.toolCallId}`;
   return `message:${message.role}:${message.timestamp}:${JSON.stringify(message.content)}`;
 }
-export function textFromContent(content: string | readonly { type: string; text?: string; mimeType?: string; data?: string; thinking?: string; name?: string; arguments?: unknown; intent?: string }[]): string {
+export function textFromContent(content: string | readonly { type: string; text?: string; mimeType?: string; data?: string; thinking?: string; name?: string; arguments?: unknown; intent?: string; id?: string }[]): string {
   if (typeof content === "string") return content;
   let text = "";
   let afterBlock = false;
@@ -141,11 +190,11 @@ export function textFromContent(content: string | readonly { type: string; text?
   return text;
 }
 
-export function transcriptBlocksFromContent(content: string | readonly { type: string; text?: string; mimeType?: string; data?: string; thinking?: string; name?: string; arguments?: unknown; intent?: string }[]): TranscriptBlock[] {
+export function transcriptBlocksFromContent(content: string | readonly { type: string; text?: string; mimeType?: string; data?: string; thinking?: string; name?: string; arguments?: unknown; intent?: string; id?: string }[]): TranscriptBlock[] {
   if (typeof content === "string") return [{ type: "text", text: content }];
   return content.map((part): TranscriptBlock => {
     if (part.type === "text") return { type: "text", text: part.text ?? "" };
-    if (part.type === "toolCall") return { type: "toolCall", name: part.name ?? "unknown", arguments: part.arguments ?? {}, ...(part.intent ? { intent: part.intent } : {}) };
+    if (part.type === "toolCall") return { type: "toolCall", name: part.name ?? "unknown", arguments: part.arguments ?? {}, ...(part.id === undefined ? {} : { id: part.id }), ...(part.intent ? { intent: part.intent } : {}) };
     if (part.type === "image" && /^(?:image\/(?:png|jpeg|gif|webp|avif))$/.test(part.mimeType ?? "") && part.data) return { type: "image", label: "Image attachment", dataUrl: `data:${part.mimeType};base64,${part.data}` };
     if (part.type === "image") return { type: "image", label: `[Image attachment not displayed${part.mimeType ? ` (${part.mimeType})` : ""}]` };
     if (part.type === "thinking") return { type: "notice", text: `[Reasoning]\n${part.thinking ?? ""}` };
@@ -233,6 +282,8 @@ function displayMessage(entry: SessionEntry): TranscriptMessage | null {
         text: `${textFromContent(message.content)}${details}`,
         blocks: transcriptBlocksFromContent(message.content),
         toolName: message.toolName,
+        toolCallId: message.toolCallId,
+        toolResult: toToolResult(message),
         isError: message.isError,
         source: "entry",
       };
@@ -358,6 +409,8 @@ function liveMessage(message: WireMessage, sequence: number): TranscriptMessage 
         role: "tool",
         text: textFromContent(message.content),
         toolName: message.toolName,
+        toolCallId: message.toolCallId,
+        toolResult: toToolResult(message),
         isError: message.isError,
         source: "event",
       };
@@ -370,7 +423,7 @@ function stringify(value: unknown): string {
   return JSON.stringify(value, null, 2) ?? String(value);
 }
 
-function toolRow(toolCallId: string, toolName: string, text: string, isRunning: boolean, isError?: boolean): TranscriptMessage {
+function toolRow(toolCallId: string, toolName: string, text: string, isRunning: boolean, isError?: boolean, toolResult?: ToolResultLike, toolArgs?: Record<string, unknown>): TranscriptMessage {
   return {
     id: `live:tool:${toolCallId}`,
     identity: `tool:${toolCallId}`,
@@ -378,8 +431,15 @@ function toolRow(toolCallId: string, toolName: string, text: string, isRunning: 
     role: "tool",
     text,
     toolName,
+    toolCallId,
+    // Kept structured so a renderer reads the argument it was given instead of
+    // re-parsing the JSON string in `text`.
+    ...(toolArgs === undefined ? {} : { toolArgs }),
     isRunning,
     isError,
+    // A running row carries the streamed partial as `text` but must not claim a
+    // completed result; only `tool_execution_end` passes `toolResult`.
+    ...(toolResult === undefined ? {} : { toolResult }),
     source: "event",
   };
 }
@@ -400,14 +460,23 @@ function applyEvent(state: TranscriptState, event: Extract<HostFrame, { t: "even
     };
   }
   if (event.type === "tool_execution_start") {
-    return { ...state, messages: upsertMessage(state.messages, toolRow(event.toolCallId, event.toolName, stringify(event.args), true)) };
+    return { ...state, messages: upsertMessage(state.messages, toolRow(event.toolCallId, event.toolName, stringify(event.args), true, undefined, undefined, typeof event.args === "object" && event.args !== null && !Array.isArray(event.args) ? (event.args as Record<string, unknown>) : undefined)) };
   }
   if (event.type === "tool_execution_update") {
     return { ...state, messages: upsertMessage(state.messages, toolRow(event.toolCallId, event.toolName, stringify(event.partialResult), true)) };
   }
   if (event.type === "tool_execution_end") {
     const result = typeof event.result === "string" ? event.result : stringify(event.result);
-    return { ...state, messages: upsertMessage(state.messages, toolRow(event.toolCallId, event.toolName, result, false, event.isError)) };
+    // The result already IS the structured payload when the host sends JSON;
+    // `toToolResult` returns undefined for anything else so the renderer can say
+    // "diff unavailable" rather than parroting a truncated string as success.
+    //
+    // The end event carries no `args`, and the identity match below replaces the
+    // row wholesale, so the arguments captured by `tool_execution_start` would be
+    // lost the moment the call finishes — which is exactly when the user opens the
+    // row. Carry them forward from the row being replaced.
+    const started = state.messages.find((message) => message.identity === `tool:${event.toolCallId}`);
+    return { ...state, messages: upsertMessage(state.messages, toolRow(event.toolCallId, event.toolName, result, false, event.isError, toToolResult(event.result), started?.toolArgs)) };
   }
   if (event.type === "notice") return { ...state, notice: { level: event.level, message: event.message } };
   if (event.type === "auto_compaction_start") {

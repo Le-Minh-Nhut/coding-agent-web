@@ -112,13 +112,21 @@ describe("stop generating vs stop OMP session", () => {
     socket = null;
   });
 
+  /** The header's overflow menu: secondary actions are one tap away, not absent. */
+  function openMenu(view: { getByRole: (r: "button", o: { name: string }) => HTMLElement }): void {
+    fireEvent.click(view.getByRole("button", { name: "More actions" }));
+  }
+
   it("offers both actions with distinct labels while a turn is generating", async () => {
     const view = await mountConversation();
     await act(async () => { socket?.onFrame?.(welcome(true)); });
 
+    // Stop generating stays OUT of the menu and directly tappable: it is the
+    // control a user reaches for mid-turn, so one tap is the requirement.
     expect(view.getByRole("button", { name: "Stop generating" })).toBeTruthy();
-    expect(view.getByRole("button", { name: "Stop OMP session" })).toBeTruthy();
     expect(view.getByRole("button", { name: "Stop generating" }).getAttribute("title")).toMatch(/process stays alive/i);
+    openMenu(view);
+    expect(view.getByRole("button", { name: "Stop OMP session" })).toBeTruthy();
   });
 
   it("stop generating sends an abort frame and never the stop-session action", async () => {
@@ -134,6 +142,7 @@ describe("stop generating vs stop OMP session", () => {
   it("stop OMP session calls the stop action and never sends an abort frame", async () => {
     const view = await mountConversation();
     await act(async () => { socket?.onFrame?.(welcome(true)); });
+    openMenu(view);
     await act(async () => { fireEvent.click(view.getByRole("button", { name: "Stop OMP session" })); });
     await act(async () => { fireEvent.click(view.getByRole("button", { name: "Stop session anyway" })); });
 
@@ -145,6 +154,7 @@ describe("stop generating vs stop OMP session", () => {
   it("names what will be interrupted when a turn is generating", async () => {
     const view = await mountConversation();
     await act(async () => { socket?.onFrame?.(welcome(true)); });
+    openMenu(view);
     await act(async () => { fireEvent.click(view.getByRole("button", { name: "Stop OMP session" })); });
 
     expect(view.getByText(/This will interrupt the turn that is generating now/)).toBeTruthy();
@@ -162,6 +172,7 @@ describe("stop generating vs stop OMP session", () => {
     await act(async () => {
       socket?.onFrame?.({ t: "ui-request", request: { reqId: 91, kind: "select", title: "Approve action?", options: ["Approve"] } });
     });
+    openMenu(view);
     await act(async () => { fireEvent.click(view.getByRole("button", { name: "Stop OMP session" })); });
 
     const notice = view.getByText(/This will interrupt/).textContent ?? "";
@@ -172,6 +183,7 @@ describe("stop generating vs stop OMP session", () => {
   it("uses a plain confirmation when nothing is in flight", async () => {
     const view = await mountConversation();
     await act(async () => { socket?.onFrame?.(welcome(false)); });
+    openMenu(view);
     await act(async () => { fireEvent.click(view.getByRole("button", { name: "Stop OMP session" })); });
 
     expect(view.getByText("No turn is in flight, so nothing is being interrupted.")).toBeTruthy();
@@ -183,6 +195,7 @@ describe("stop generating vs stop OMP session", () => {
     vi.mocked(api.getConversation).mockResolvedValue({ ok: true, data: conversationRecord({ ownership: "external" }) as never });
     const view = await mountConversation();
 
+    openMenu(view);
     expect(view.queryByRole("button", { name: "Stop OMP session" })).toBeNull();
     expect(view.getByText(/Stop session unavailable: This session is externally managed/)).toBeTruthy();
     expect(vi.mocked(api.stopConversation)).not.toHaveBeenCalled();
@@ -192,6 +205,7 @@ describe("stop generating vs stop OMP session", () => {
     vi.mocked(api.getConversation).mockResolvedValue({ ok: true, data: conversationRecord({ tmuxSessionId: null, tmuxServerIdentity: null }) as never });
     const view = await mountConversation();
 
+    openMenu(view);
     const button = view.getByRole("button", { name: "Stop OMP session" }) as HTMLButtonElement;
     expect(button.disabled).toBe(true);
     expect(view.getByText(/Stop session unavailable: No verified managed tmux session is recorded/)).toBeTruthy();
@@ -204,6 +218,7 @@ describe("stop generating vs stop OMP session", () => {
     await act(async () => {
       socket?.onFrame?.({ t: "entry", entry: { type: "message", id: "m-1", parentId: null, timestamp: new Date().toISOString(), message: { role: "user", content: "keep me visible", timestamp: 1 } } });
     });
+    openMenu(view);
     await act(async () => { fireEvent.click(view.getByRole("button", { name: "Stop OMP session" })); });
     await act(async () => { fireEvent.click(view.getByRole("button", { name: "Confirm stop session" })); });
 
@@ -216,6 +231,7 @@ describe("stop generating vs stop OMP session", () => {
     vi.mocked(api.stopConversation).mockResolvedValue({ ok: true, data: conversationRecord({ state: "stopping" }) as never });
     const view = await mountConversation();
     await act(async () => { socket?.onFrame?.(welcome(false)); });
+    openMenu(view);
     await act(async () => { fireEvent.click(view.getByRole("button", { name: "Stop OMP session" })); });
     await act(async () => { fireEvent.click(view.getByRole("button", { name: "Confirm stop session" })); });
 
@@ -225,6 +241,7 @@ describe("stop generating vs stop OMP session", () => {
   it("offers Restart beside a stopped session and calls the restart action", async () => {
     const view = await mountConversation();
     await act(async () => { socket?.onFrame?.(welcome(false)); });
+    openMenu(view);
     await act(async () => { fireEvent.click(view.getByRole("button", { name: "Stop OMP session" })); });
     await act(async () => { fireEvent.click(view.getByRole("button", { name: "Confirm stop session" })); });
 

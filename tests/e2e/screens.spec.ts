@@ -249,6 +249,25 @@ async function measureDOM(page: Page, viewport: string, screen: string): Promise
   );
 }
 
+/**
+ * The two things the floating `Latest` control must never cover: the composer
+ * (the only way to send a prompt) and an approval card (the only way to unblock
+ * the agent). Measured against their live boxes rather than an approximation.
+ */
+async function latestClearance(page: Page): Promise<{ overlapsComposer: boolean; overlapsApproval: boolean }> {
+  return page.evaluate(() => {
+    const button = document.querySelector(".latest-button")?.getBoundingClientRect();
+    const overlaps = (a: DOMRect | undefined, b: DOMRect | null): boolean =>
+      a !== undefined && b !== null && a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
+    const composer = document.querySelector(".composer-container")?.getBoundingClientRect() ?? null;
+    const approval = document.querySelector('[aria-label="Approval Requested"], .card [role="group"]')?.getBoundingClientRect() ?? null;
+    return {
+      overlapsComposer: overlaps(button, composer),
+      overlapsApproval: overlaps(button, approval),
+    };
+  });
+}
+
 async function captureScreen(page: Page, viewport: string, screen: string): Promise<GeometryRecord> {
   await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
   const geo = await measureDOM(page, viewport, screen);
@@ -256,8 +275,14 @@ async function captureScreen(page: Page, viewport: string, screen: string): Prom
   if (geo.latestButtonVisible) {
     expect(geo.latestButtonBox!.width, `Latest button width at ${viewport}/${screen}`).toBeGreaterThanOrEqual(44);
     expect(geo.latestButtonBox!.height, `Latest button height at ${viewport}/${screen}`).toBeGreaterThanOrEqual(44);
-    expect(geo.latestIntersectsTranscript, `Latest must not cover visible transcript at ${viewport}/${screen}`).toBe(false);
+    // Round 50: `Latest` is a floating control, so overlapping the transcript is
+    // by design — what it must never do is cover the composer (the only way to
+    // send) or an approval card. Both are asserted directly instead of via the
+    // weaker "no overlap with the region" proxy a dock row satisfied.
     expect(geo.latestComposerGap, `Latest button must leave 8px before composer at ${viewport}/${screen}`).toBeGreaterThanOrEqual(8);
+    const clearance = await latestClearance(page);
+    expect(clearance.overlapsComposer, `Latest must not cover the composer at ${viewport}/${screen}`).toBe(false);
+    expect(clearance.overlapsApproval, `Latest must not cover an approval card at ${viewport}/${screen}`).toBe(false);
   }
   const filePath = join(SCREENS_DIR, `${viewport}-${screen}.png`);
   await page.screenshot({ path: filePath });
@@ -443,12 +468,14 @@ test.describe("Screenshot inventory & geometry verification", () => {
         await page.waitForTimeout(200);
         await captureScreen(page, vp.name, "large-code-block");
 
-        // (h) expanded tool details
-        const summary = page.locator(".message-card.tool summary");
-        await summary.click();
+        // (h) expanded tool details. Tool results now collapse into an activity
+        // group; opening it exposes the row, and opening the row exposes the body.
+        const summary = page.locator(".tool-row-head");
+        await page.locator(".activity-group-head").first().click();
+        await summary.first().click();
         await page.evaluate(() => {
-          const card = document.querySelector(".message-card.tool");
-          if (card) card.scrollIntoView({ block: "start" });
+          const row = document.querySelector(".tool-row");
+          if (row) row.scrollIntoView({ block: "start" });
         });
         await page.waitForTimeout(200);
         await captureScreen(page, vp.name, "expanded-tool-details");
@@ -456,9 +483,13 @@ test.describe("Screenshot inventory & geometry verification", () => {
         // (i) the subagent panel
         await host.send({ t: "agents", agents: MOCK_SUBAGENTS });
         const agentsBtn = page.getByRole("button", { name: "Agents (2)" });
+        // Secondary actions live in the header disclosure now: open it first.
+        const moreActions = page.getByRole("button", { name: "More actions" });
         const header = page.locator(".app-header");
         await expect.poll(() => header.locator(".conversation-header-title").evaluate((element) => element.getBoundingClientRect().height)).toBeLessThan(60);
         await expect.poll(() => header.locator(".conversation-header-actions").evaluate((element) => element.getBoundingClientRect().height)).toBeLessThan(50);
+        await expect(moreActions).toBeVisible();
+        await moreActions.click();
         await expect(agentsBtn).toBeVisible();
         await agentsBtn.click();
         await expect(page.locator(".modal-overlay")).toBeVisible();
@@ -522,8 +553,9 @@ test.describe("Screenshot inventory & geometry verification", () => {
             t: "entry",
             entry: createToolResultEntry("scroll-tool", "scroll-tool-call", "bash", REALISTIC_TOOL_OUTPUT, false, Date.now() + 100),
           });
-          await expect(page.locator(".message-card.tool summary")).toBeVisible();
+          await expect(page.locator(".activity-group").first()).toBeVisible();
           await host.send({ t: "agents", agents: MOCK_SUBAGENTS });
+          await moreActions.click();
           await expect(agentsBtn).toBeVisible();
           // The read-only welcome replaces transcript history; restore enough content for scroll tests.
           for (let index = 0; index < 24; index++) {
@@ -560,12 +592,18 @@ test.describe("Screenshot inventory & geometry verification", () => {
           await expect(latestBtn).toBeVisible({ timeout: 5000 });
           const latestGeometry = await latestBtn.evaluate((button) => {
             const b = button.getBoundingClientRect();
-            const t = document.querySelector(".messages-scroll")!.getBoundingClientRect();
-            return { box: { x: Math.round(b.x), y: Math.round(b.y), width: Math.round(b.width), height: Math.round(b.height) }, intersects: b.left < t.right && b.right > t.left && b.top < t.bottom && b.bottom > t.top };
+            const composer = document.querySelector(".composer-container")?.getBoundingClientRect();
+            return {
+              box: { x: Math.round(b.x), y: Math.round(b.y), width: Math.round(b.width), height: Math.round(b.height) },
+              // Round 50: `Latest` floats, so it may sit over the transcript (that
+              // is what floating means). It must clear the composer, which is the
+              // control it would otherwise make unusable.
+              overlapsComposer: composer !== undefined && b.left < composer.right && b.right > composer.left && b.top < composer.bottom && b.bottom > composer.top,
+            };
           });
           expect(latestGeometry.box.height).toBeGreaterThanOrEqual(44);
           expect(latestGeometry.box.width).toBeGreaterThanOrEqual(44);
-          expect(latestGeometry.intersects).toBe(false);
+          expect(latestGeometry.overlapsComposer, "Latest must float clear of the composer").toBe(false);
           await latestBtn.click();
           await page.waitForTimeout(200);
           const distToTail = await ms.evaluate((el) => el.scrollHeight - el.clientHeight - el.scrollTop);
@@ -574,14 +612,23 @@ test.describe("Screenshot inventory & geometry verification", () => {
           await expect(latestBtn).toBeHidden();
           const latestNote = "Tapped '↓ Latest' button; scroll returned to tail.";
 
-          // (iii) expand tool details and assert reader scroll position is preserved
+          // (iii) expand tool details and assert reader scroll position is preserved.
+          // The read-only welcome above replaced the transcript, so this scroll
+          // fixture's tool row is behind a fresh activity group: open it first.
+          const groupHead = page.locator(".activity-group-head").first();
+          await groupHead.scrollIntoViewIfNeeded();
+          // Dispatched, not clicked: Playwright scrolls before a real click, which
+          // is itself a scroll the assertion below would misread as the expansion
+          // moving the reader. Same technique as the mobile scroll spec.
+          await groupHead.dispatchEvent("click");
           await summary.scrollIntoViewIfNeeded();
           await page.waitForTimeout(100);
           const toolScrollBefore = await page.evaluate(
             () => window.scrollY || document.documentElement.scrollTop || (document.querySelector(".messages-scroll") as HTMLElement).scrollTop
           );
-          // Click summary while already in view to toggle details
-          await summary.click();
+          // Toggle while already in view: the claim is that expanding content does
+          // not move the reader, so the toggle must not be a scroll itself.
+          await summary.dispatchEvent("click");
           await page.waitForTimeout(150);
           const toolScrollAfter = await page.evaluate(
             () => window.scrollY || document.documentElement.scrollTop || (document.querySelector(".messages-scroll") as HTMLElement).scrollTop

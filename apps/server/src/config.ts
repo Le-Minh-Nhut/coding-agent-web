@@ -36,6 +36,13 @@ const schema = z.object({
    * spawns the stub, not a paid agent belonging to whoever owns the machine.
    */
   ompBinaryPath: z.string().min(1).optional(),
+  /**
+   * How long a handoff request watches the session journal for native proof
+   * that the compaction committed, before answering `delivered`. Default 0: the
+   * request answers as soon as the paste lands, and only a handoff that was
+   * *already* committed is reported as `committed`.
+   */
+  handoffEvidenceBudgetMs: z.coerce.number().int().min(0).max(60_000).default(0),
 });
 
 export type ServerConfig = z.infer<typeof schema> & { webDistDir?: string; guestDistDir?: string; configFile?: string };
@@ -78,7 +85,7 @@ function envConfig(env: NodeJS.ProcessEnv): RawConfig {
     const value = env[`CAW_${key.replace(/[A-Z]/g, (m) => `_${m}`).toUpperCase()}`];
     if (value !== undefined) result[key] = value;
   }
-  for (const key of ["port", "relayPort", "maxActiveAgents", "authTokenTtlHours"] as const) {
+  for (const key of ["port", "relayPort", "maxActiveAgents", "authTokenTtlHours", "handoffEvidenceBudgetMs"] as const) {
     const value = env[`CAW_${key.replace(/[A-Z]/g, (m) => `_${m}`).toUpperCase()}`];
     if (value !== undefined) result[key] = value;
   }

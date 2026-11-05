@@ -249,13 +249,18 @@ export const api = {
 
   /**
    * Ask the server to deliver OMP's native `/handoff` builtin into this
-   * conversation's managed pane. The body is empty on purpose: the command
-   * takes no operand, and a focus argument is refused server-side.
+   * conversation's managed pane. The command takes no operand.
+   *
+   * `confirmDraftRisk` is deliberately opt-in. The command is pasted into the
+   * live pane, so an unsent draft in the terminal's editor is spliced onto the
+   * same line and submitted together with `/handoff` — the editor's emptiness is
+   * unprovable from here, so the first attempt omits the flag and lets the
+   * server answer `draft_unconfirmed`.
    */
-  async requestHandoff(id: string): Promise<ApiResult<HandoffResponse>> {
+  async requestHandoff(id: string, confirmDraftRisk = false): Promise<ApiResult<HandoffResponse>> {
     return request<HandoffResponse>(`/api/conversations/${encodeURIComponent(id)}/handoff`, {
       method: "POST",
-      body: JSON.stringify({}),
+      body: JSON.stringify(confirmDraftRisk ? { confirmDraftRisk: true } : {}),
     });
   },
 

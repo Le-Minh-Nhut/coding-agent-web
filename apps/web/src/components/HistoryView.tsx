@@ -24,7 +24,7 @@ export function HistoryView({ onBack, onSelectConversation }: Props) {
   const [debounced, setDebounced] = useState("");
   const [sessions, setSessions] = useState<GlobalSessionSummary[]>([]);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
-  const [page, setPage] = useState<{ filesScanned: number; truncated: boolean; excludedOutsideRoots: number; skippedNonJournal: number; unreadableJournals: number } | null>(null);
+  const [page, setPage] = useState<{ filesScanned: number; truncated: boolean; excludedOutsideRoots: number; skippedNonJournal: number; unreadableJournals: number; unreadableCwds: number; droppedRoots: string[] } | null>(null);
   const [loading, setLoading] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -65,7 +65,7 @@ export function HistoryView({ onBack, onSelectConversation }: Props) {
       if (!result.ok) { setError(result.error.message || "Could not load sessions."); return; }
       setSessions(result.data.sessions);
       setNextCursor(result.data.nextCursor);
-      setPage(result.data);
+      setPage({ ...result.data, unreadableCwds: result.data.unreadableCwds ?? 0, droppedRoots: result.data.droppedRoots ?? [] });
     }).catch((reason: unknown) => {
       if (generation.current === id) setError(reason instanceof Error ? reason.message : "Could not load sessions.");
     }).finally(() => { if (generation.current === id) setLoading(false); });
@@ -93,7 +93,20 @@ export function HistoryView({ onBack, onSelectConversation }: Props) {
         return [...current, ...result.data.sessions.filter((session) => !seen.has(session.sessionId))];
       });
       setNextCursor(result.data.nextCursor);
-      setPage((previous) => previous ? { ...result.data, filesScanned: previous.filesScanned + result.data.filesScanned, truncated: previous.truncated || result.data.truncated, excludedOutsideRoots: Math.max(previous.excludedOutsideRoots, result.data.excludedOutsideRoots), skippedNonJournal: Math.max(previous.skippedNonJournal, result.data.skippedNonJournal), unreadableJournals: Math.max(previous.unreadableJournals, result.data.unreadableJournals) } : result.data);
+      setPage((previous) => previous ? {
+        ...result.data,
+        filesScanned: previous.filesScanned + result.data.filesScanned,
+        truncated: previous.truncated || result.data.truncated,
+        excludedOutsideRoots: Math.max(previous.excludedOutsideRoots, result.data.excludedOutsideRoots),
+        skippedNonJournal: Math.max(previous.skippedNonJournal, result.data.skippedNonJournal),
+        unreadableJournals: Math.max(previous.unreadableJournals, result.data.unreadableJournals),
+        // A whole-store count, like `unreadableJournals`: the largest page wins.
+        unreadableCwds: Math.max(previous.unreadableCwds, result.data.unreadableCwds ?? 0),
+        // A page that dropped root X and a page that dropped root Y both matter:
+        // the union names every affected root once, so "Load more" adds detail
+        // instead of replacing the roots the reader was already told about.
+        droppedRoots: [...new Set([...previous.droppedRoots, ...(result.data.droppedRoots ?? [])])],
+      } : { ...result.data, unreadableCwds: result.data.unreadableCwds ?? 0, droppedRoots: result.data.droppedRoots ?? [] });
     } catch (reason) { if (generation.current === id && pageRequest.current === request) setError(reason instanceof Error ? reason.message : "Could not load more sessions."); }
     finally { if (pageRequest.current === request) setLoadingMore(false); }
   };
@@ -159,7 +172,25 @@ export function HistoryView({ onBack, onSelectConversation }: Props) {
         journals and could not read them (permission/I-O), so the page is missing
         sessions it should have listed even though `truncated` is false. */}
     {page !== null && page.unreadableJournals > 0 && <div className="banner warning history-unreadable" role="alert"><strong>Some journals could not be read.</strong> {page.unreadableJournals} {page.unreadableJournals === 1 ? "journal was" : "journals were"} skipped after a read error, so this list may be incomplete.</div>}
-    {!loading && !error && sessions.length === 0 && <p role="status">No sessions match.</p>}
+    {/* A third, different fact: a whole configured root could not be verified, so
+        every session under it is missing from this page *because the root was
+        unavailable* — not because it is outside the workspace, and not because
+        the store is empty. Unlike the truncation banner this is never gated on
+        `truncated`: an unreadable mount produces no cap at all. */}
+    {page !== null && page.droppedRoots.length > 0 && <div className="banner warning history-dropped-roots" role="alert"><strong>A configured root could not be read.</strong> {page.droppedRoots.length === 1 ? "Sessions under this root are missing from this list:" : "Sessions under these roots are missing from this list:"} {page.droppedRoots.join(", ")}. The projects themselves may still be present.</div>}
+    {/* A fourth fact, and the one the user cannot infer from the rows: the journal
+        was readable but its own header `cwd` was not, so the row was dropped for a
+        reason invisible from the session list. Distinct from
+        `excludedOutsideRoots`, which is a legitimate scope decision and must never
+        be shown as an error. Never gated on `truncated`. */}
+    {page !== null && page.unreadableCwds > 0 && <div className="banner warning history-unreadable-cwds" role="alert"><strong>Some sessions are missing.</strong> {page.unreadableCwds} {page.unreadableCwds === 1 ? "session was" : "sessions were"} skipped because the working directory in {page.unreadableCwds === 1 ? "its" : "their"} journal could not be read, so {page.unreadableCwds === 1 ? "it is" : "they are"} not listed here.</div>}
+    {/* "No sessions match." is a claim about the whole store. With a dropped root
+        or an unreadable cwd the page cannot make it: the sessions it is missing
+        were excluded for a reason it cannot show, so an empty list here would
+        read as "nothing exists". */}
+    {!loading && !error && sessions.length === 0 && (page === null || (page.droppedRoots.length === 0 && page.unreadableCwds === 0)) && <p role="status">No sessions match.</p>}
+    {!loading && !error && sessions.length === 0 && page !== null && page.droppedRoots.length > 0 && <p role="status">No sessions can be listed right now because {page.droppedRoots.length === 1 ? "a configured root" : "configured roots"} could not be read. Fix or restore {page.droppedRoots.join(", ")} and retry.</p>}
+    {!loading && !error && sessions.length === 0 && page !== null && page.droppedRoots.length === 0 && page.unreadableCwds > 0 && <p role="status">No sessions can be listed right now: {page.unreadableCwds} {page.unreadableCwds === 1 ? "journal's working directory" : "journals' working directories"} could not be read, so {page.unreadableCwds === 1 ? "it was" : "they were"} skipped. Fix the affected path and retry.</p>}
     {groups.map(([group, rows]) => <section className="history-group" key={group}><h3>{group}</h3>{rows.map((session) => <article className="card history-row" key={session.sessionId}>
       <h4>{session.title || session.sessionId.slice(0, 8)}</h4><p className="history-path" title={session.cwd}>{session.cwd}</p><p className="history-activity">{activity(session.updatedAt)}</p>
       <div className="history-badges">{session.live === true && <span className="badge">live</span>}{session.live === "unknown" && <span className="badge">unknown</span>}{session.tracked && <span className="badge">tracked</span>}{!session.cwdAvailable && <span className="badge">history only</span>}</div>

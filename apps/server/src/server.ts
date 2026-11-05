@@ -580,6 +580,14 @@ const app = buildApp({
   }),
   tmuxSocketPath: privateTmuxSocketPath(config),
   tmuxServerIdentity: () => tmux.serverIdentity(),
+  // The journal is the only authority that a handoff compaction committed;
+  // the route polls this instead of asserting success from a successful paste.
+  readHandoffCompaction: (sessionId, sinceMs) => catalog.readHandoffCompaction(sessionId, sinceMs),
+  handoffEvidenceBudgetMs: config.handoffEvidenceBudgetMs,
+  // One bounded read of the pane's own output, so an explicit OMP refusal ends
+  // the marker's ambiguity instead of waiting out the age backstop. A count, not
+  // a verdict: the route compares it against the baseline taken before the paste.
+  countHandoffRefusals: (sessionId) => tmux.countHandoffRefusals(sessionId),
 });
 await app.ready();
 app.log.info({ configFile: config.configFile ?? "built-in defaults", allowedRoots: config.allowedRoots, publicOrigin: config.publicOrigin, host: config.host, port: config.port, relayPort: config.relayPort }, "configuration loaded");

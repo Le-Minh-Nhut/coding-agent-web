@@ -158,8 +158,167 @@ Two inferences are forbidden:
   PID from the enumerated session only after that session has been qualified by
   both its id and its server lifetime.
 
-## Project deletion
+## Native handoff: delivery is not commitment
 
+`POST /api/conversations/:id/handoff` types OMP's builtin `/handoff` into a live
+pane. A handoff passes through six distinct facts, and they are **not**
+interchangeable:
+
+| Fact | Who proves it | Our evidence |
+| --- | --- | --- |
+| delivered | tmux accepted the paste | `TmuxService.sendHandoff` returned after `paste-buffer` + `send-keys Enter` |
+| recognized | OMP's editor dispatched the builtin | none — the pane is not parsed |
+| generation started | the model began summarizing | none |
+| generation completed | a summary exists | none |
+| compaction committed | a `compaction` entry with `method:"handoff"` is appended to the journal | `catalog.readHandoffCompaction()` |
+| session reconciled | registry/host state settles | the ordinary refresh path |
+
+Only the journal step is observable, so the route answers with a **state**, never
+a success flag (`HandoffState` in `@caw/contracts`):
+
+- `committed` — a `compaction`/`method:"handoff"` entry newer than the paste was
+  observed; the response carries `compactionEntryId` as its evidence.
+- `delivered` — the paste landed and no such entry was found. This covers
+  "still generating", "OMP silently refused", and "the builtin does not exist in
+  this build" alike, because the server cannot tell them apart. It is never
+  rendered as success.
+
+The observation is a bounded, cancellable tail scan of the session journal
+(`HANDOFF_EVIDENCE_MAX_BYTES`, 1 MiB), polled only for
+`config.handoffEvidenceBudgetMs` (default 0). A real generation was observed
+taking minutes (owner journals: 197 s – 7216 s between the last prompt and the
+compaction entry), so holding the request open is not an option; the budget
+exists only to catch an immediate commit. **No `sleep` is ever treated as proof
+of completion.**
+
+### Concurrency across a restart
+
+The operation is serialized per conversation by a **durable** marker, not an
+in-memory set: the marker is a pair of metadata-store events, and the operation
+is "in progress" while the newest of `handoff-start` / `handoff-cancelled` is a
+start. A restart therefore still refuses a second handoff onto a session OMP may
+be writing, because the refusal is re-derived from the journal rather than from
+process memory.
+
+The marker is taken **only after every cheap refusal has returned** — owner,
+identity, and `draft_unconfirmed` all answer before it. A refusal must never be
+able to create a marker: the client's designed flow answers `draft_unconfirmed`
+and immediately re-asks with `confirmDraftRisk`, and the second tap would be
+denied as `handoff_in_flight` for the marker's whole lifetime. Equally, no
+refusal before the operation window touches the in-memory mark, since clearing
+another request's claim would admit a third paste.
+
+Taking the marker can itself fail: the evidence read behind it touches the
+sessions root, and a permission blip or transient I/O there is **not** evidence
+that no handoff is generating. That failure is a refusal, and it **never** retires
+the marker — clearing on it would admit a second paste onto a session OMP may
+still be compacting, which is the exact inversion the marker exists to prevent.
+Equally, a throw *after* the paste must not clear the marker: the keystroke may
+already have landed.
+
+Retirement is by evidence, in four cases:
+
+| Exit | Marker | Why |
+| --- | --- | --- |
+| `committed` (native entry observed) | retired | the operation is provably finished |
+| paste never landed (`delivered:false`) | retired | nothing is generating |
+| a **new** refusal line attributable to this paste | retired | it stated it did not start this handoff |
+| precondition refusal, or a failure while taking the marker | never created / kept | nothing was typed, or we could not look |
+
+The refusal signal is `countHandoffRefusals`: a single bounded `capture-pane -p`
+read of the same pane (40 lines, read-only, no poll loop), counting how many times
+OMP's own words — "Nothing to hand off", "No model selected" — appear. Those are
+*observed output*, not an inference about the editor.
+
+A count alone says nothing about a paste, because a warning from an earlier attempt
+can still be on screen. So the count is **anchored**: the route takes one count
+immediately before the paste, records it in the `handoff-start` payload as
+`refusalBaseline`, and a verdict of `refused` requires the count to have
+**strictly risen** between that baseline and the post-paste read. An unchanged or
+lower count is `unknown`. A marker with no baseline — written before this rule, or
+whose baseline read failed — is also `unknown`, never "there were none before". The
+same anchored test guards the `refused: true` label on the `delivered` path, so a
+stale line cannot earn it either. Anything unreadable, and any absent baseline,
+counts as "still possibly generating" and keeps the marker.
+
+What the rise is about is the *interval between the two reads*, not the paste
+itself: it excludes a refusal left on screen by an earlier operation, but it
+cannot say whether a refusal that appeared in that interval came from this paste
+or from anything else the pane did meanwhile.
+
+`ponytail:` the count is **window-relative** — `capture-pane -p -S -40` reports
+the last 40 lines, so the metric is "matches visible now", not "matches ever". If
+the pane repaints or scrolls enough that a refusal line sitting *outside* the
+window moves *into* it between the baseline and the probe, the count rises with no
+new refusal and the marker is retired on a false `refused`. Upgrade path: anchor on
+a position-stable reading — a monotonic pane counter (`#{history_size}` together
+with the scroll position) so the two reads cover the same bytes, or compare the
+whole history rather than a 40-line tail. The secondary amplifier: the patterns are
+bare substrings, so a line merely *quoting* the refusal text (an `rg` result
+containing "nothing to hand off") also counts; harmless on its own, because only a
+rise ever acts.
+
+The remaining case — `delivered`, no compaction entry, no refusal that rose — is
+genuinely ambiguous, and it keeps the marker, bounded by
+`HANDOFF_MARKER_TTL_MS` (150 min). That ceiling deliberately **exceeds** the
+longest generation ever observed in this machine's journals (197 s – 7216 s,
+~120 min): expiring *while* a handoff is generating is the unsafe direction, so
+the backstop is set above reality rather than below it. It is a ceiling on a
+guess, not a completion proof, and the common case (an empty session answering
+"Nothing to hand off") no longer waits it out at all — it resolves in one round
+trip via the anchored refusal count.
+
+### The editor draft is not verifiable
+
+`session_attached === "0"` proves no terminal is attached *now*. It does **not**
+prove OMP's editor is empty: a human can attach, type an unsent prompt, and
+detach, and the draft stays in the TUI. Empirically (scratch tmux + scratch OMP,
+`~/.cache/r50-audit/p1-02-evidence.txt`) a bracketed paste of `/handoff` **splices
+at the cursor** into that draft, and the following Enter submits draft+command as
+one line — destroying the draft and failing to dispatch the builtin. OMP persists
+the draft only on teardown (`saveDraft` runs from `session-teardown.ts`), so
+there is no live on-disk draft to inspect, and the rendered composer is not an
+authoritative emptiness signal.
+
+The operation therefore **refuses** (`draft_unconfirmed`) unless the caller sends
+`confirmDraftRisk: true`. Never clear, overwrite or reinterpret a user's unsent
+draft, and never infer emptiness from the pane's rendering. The adapter additionally
+re-checks `#{session_attached}` in the single call before the paste, narrowing the
+attach TOCTOU window from several syscalls to one.
+
+The one place the pane's *content* is read is `countHandoffRefusals`, and it is
+deliberately narrow: it runs only **after** a paste, counts OMP's own refusal
+lines, and is used solely to decide whether a marker may be retired. It is not an
+editor-emptiness test and must never become one — a composer's rendering still
+cannot tell a draft from a prompt.
+
+## Global session listing is scoped like the reader
+
+`GET /api/sessions` applies the same containment rule as
+`GET /api/sessions/:id/history` (`isInsideConfiguredRootsForRead`), so a journal
+whose header `cwd` is a symlink that *looks* inside an allowed root but resolves
+outside it is neither listed nor readable. Two deliberate exceptions:
+
+- A deleted working directory (`ENOENT`) is a supported history-only row, not an
+  error; it keeps `cwdAvailable: false`.
+- A configured root that cannot be verified is **dropped, not fatal** — one stale
+  `CAW_ALLOWED_ROOTS` entry must not deny every unrelated row. Dropping can only
+  shrink the allowlist, never widen it. Because a dropped root makes legitimate
+  sessions vanish, it is reported rather than hidden: one `app.log.warn` per root
+  and a `droppedRoots` array on the page (absent when empty). A client must
+  present a non-empty `droppedRoots` as "some history could not be read", not as
+  an empty store.
+
+Per-row failures degrade per row: a `cwd` the filesystem refuses to canonicalize
+(a symlink loop, a permission change) hides its own row and leaves the rest of the
+page — and the cursor's ordering — intact. Such a row is **not** an out-of-scope
+one, so it is counted apart from `excludedOutsideRoots` as `unreadableCwds` (one
+`app.log.warn` per row, with the session id and errno). Without that split, an
+unreadable working directory would be laundered into the legitimate
+outside-the-workspace count and an empty page would carry no reason at all — the
+same failure mode `droppedRoots` exists to prevent, one level down.
+
+## Project deletion
 `DELETE /api/projects/:id` observes each conversation's runtime (not its stored
 state) and refuses with `conflict_owner` while any of them is running, in
 progress, or cannot be verified as stopped; a launch that is still in flight

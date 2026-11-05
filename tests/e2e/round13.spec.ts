@@ -95,6 +95,8 @@ test("V13-07 conversation and activity failures render errors, not empty states"
   declareInjectedFault(page, { urlPattern: /\/api\/conversations\/[^/]+\/history/, status: 404 });
   declareInjectedFault(page, { urlPattern: /\/api\/conversations\/[^/]+\/link/, status: 409 });
   await page.getByRole("heading", { name: "Seeded conversation", exact: true }).click();
+  // Activity is a secondary action: it lives in the header's overflow disclosure.
+  await page.getByRole("button", { name: "More actions" }).click();
   await page.getByRole("button", { name: "Activity" }).click();
   await expect(page.getByRole("alert")).toBeVisible();
   await expect(page.getByText("No activity recorded for this conversation yet.")).toHaveCount(0);

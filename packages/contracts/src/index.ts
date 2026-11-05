@@ -25,6 +25,7 @@ export const ERROR_CODES = [
   "stale_generation",
   "already_exists",
   "terminal_attached",
+  "draft_unconfirmed",
   "handoff_in_flight",
   "internal",
 ] as const;
@@ -298,6 +299,16 @@ export interface GlobalSessionPage {
   truncated: boolean;
   /** Journals in the store whose cwd is outside every configured allowed root. Never listed, always counted. */
   excludedOutsideRoots: number;
+  /**
+   * Journals excluded because their own header `cwd` could not be examined at
+   * all — a symlink loop, an unreadable parent — as opposed to merely resolving
+   * outside the workspace. Counted apart from `excludedOutsideRoots` so a
+   * working directory the filesystem refuses to describe is not laundered into
+   * a legitimate out-of-scope row. Anything above zero means rows are missing
+   * for a reason the user cannot see from the sessions themselves, so a client
+   * must surface it rather than presenting the page as complete.
+   */
+  unreadableCwds: number;
   /** Journals skipped because the bytes are present but are not an OMP session journal. */
   skippedNonJournal: number;
   /**
@@ -306,6 +317,15 @@ export interface GlobalSessionPage {
    * not present it as the complete store.
    */
   unreadableJournals: number;
+  /**
+   * Configured allowed roots that could not be verified for this request and
+   * were therefore dropped from containment (a stale `CAW_ALLOWED_ROOTS` entry,
+   * an unreadable mount). Optional so older clients ignore it. Non-empty means
+   * sessions under those roots are missing from this page *because the root
+   * itself was unavailable*, not because they are outside the workspace — a
+   * client must say so rather than showing an empty list as complete.
+   */
+  droppedRoots?: string[];
 }
 
 
@@ -381,10 +401,37 @@ export interface CollabLinkResponse {
  * (`terminal_attached`, `handoff_in_flight`, `capability_missing`,
  * `conflict_owner`).
  */
+export type HandoffState =
+  /**
+   * The bracketed paste and its Enter reached the pane and no handoff
+   * compaction was observed in the journal. This is the *only* thing a
+   * successful keystroke write proves: delivery — OMP may still be generating,
+   * may have silently refused ("Nothing to hand off"), or may not recognize the
+   * command at all. It is deliberately not called "pending" (that would claim
+   * an operation we never started) and not called "committed".
+   */
+  | "delivered"
+  /**
+   * The session's own journal was observed to contain a `compaction` entry
+   * carrying `method: "handoff"` stamped at or after the paste. That is the
+   * authoritative native evidence, and the only thing that may be reported as
+   * committed.
+   */
+  | "committed";
+
 export interface HandoffResponse {
-  delivered: true;
+  state: HandoffState;
   /** OMP pane id the keystrokes were sent to. */
   paneId: string;
+  /** Native journal evidence for `state: "committed"`; absent otherwise. */
+  compactionEntryId?: string;
+  /**
+   * True only when the agent itself stated it declined the handoff (its own
+   * refusal text was observed in the pane). Optional so older clients ignore it.
+   * It is the one case where a `delivered` result is *known* not to be
+   * generating, so the client may offer an immediate retry.
+   */
+  refused?: boolean;
 }
 
 export interface ConversationEvent<T = unknown> {

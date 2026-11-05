@@ -14,6 +14,7 @@ import {
 import type { ToolRenderer, ToolRenderProps } from "../types";
 import {
   detailsRecord,
+  diffStats,
   isRecord,
   normalizeWs,
   num,
@@ -61,16 +62,6 @@ function countOps(input: string): number {
   let count = 0;
   for (const line of input.split("\n")) if (OP_HEADER_RE.test(line)) count++;
   return count;
-}
-
-function diffStats(diff: string): { added: number; removed: number } {
-  let added = 0;
-  let removed = 0;
-  for (const line of diff.split("\n")) {
-    if (line.startsWith("+")) added++;
-    else if (line.startsWith("-")) removed++;
-  }
-  return { added, removed };
 }
 
 interface DiagnosticsEntry {
@@ -150,16 +141,16 @@ function Summary({ args, result }: ToolRenderProps): ReactNode {
           </Badge>
         </>
       )}
-      {stats !== null && stats.added > 0 && (
+      {stats !== null && stats.additions > 0 && (
         <>
           {" "}
-          <Badge tone="ok">+{stats.added}</Badge>
+          <Badge tone="ok">+{stats.additions}</Badge>
         </>
       )}
-      {stats !== null && stats.removed > 0 && (
+      {stats !== null && stats.deletions > 0 && (
         <>
           {" "}
-          <Badge tone="err">−{stats.removed}</Badge>
+          <Badge tone="err">−{stats.deletions}</Badge>
         </>
       )}
       {result?.isError === true && (
