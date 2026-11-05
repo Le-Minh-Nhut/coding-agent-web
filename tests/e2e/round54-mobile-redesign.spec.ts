@@ -288,12 +288,14 @@ test("the recovery summary is one bounded row and the transcript stays usable wi
   // Two more records: the row stays the same bounded height (counts change only).
   await seedRefusedPrompt(page, host, `${LONG_PROMPT} B`);
   await seedRefusedPrompt(page, host, `${LONG_PROMPT} C`);
+  // A one-shot read of the row's text raced the host frame's commit (it still said
+  // "2 prompts need review"); retry until the third record has been rendered.
+  await expect(summary).toContainText("3 prompts need review", { timeout: 15_000 });
   const three = await page.evaluate(() => {
     const row = document.querySelector(".recovery-summary") as HTMLElement;
     const scroll = document.querySelector(".messages-scroll") as HTMLElement;
     return {
       summaryHeight: Math.round(row.getBoundingClientRect().height),
-      summaryText: row.textContent,
       transcriptHeight: Math.round(scroll.getBoundingClientRect().height),
       recordsTextInColumn: (document.querySelector(".conversation-column") as HTMLElement).textContent!.includes("ROUND54_LONG"),
     };
@@ -301,7 +303,6 @@ test("the recovery summary is one bounded row and the transcript stays usable wi
   console.log("[round54 recovery summary x3]", JSON.stringify(three));
   await page.screenshot({ path: join(SCREENS_DIR, "round54-recovery-summary-3.png") });
   expect(three.summaryHeight, "still bounded with 3 long records").toBeLessThanOrEqual(64);
-  expect(three.summaryText).toContain("3 prompts need review");
   expect(three.transcriptHeight).toBeGreaterThan(150);
   expect(three.recordsTextInColumn).toBe(false);
 
@@ -500,6 +501,11 @@ test("the header has no horizontal overflow at 320px and the dashboard row is bo
   await openSeededConversation(page);
   await host.send({ ...welcomeFrame(false), state: { ...welcomeFrame(false).state, model: { id: "vendor/a-very-long-model-identifier", name: "Long", provider: "p", contextWindow: 1 } } });
 
+  // The model is reported authoritatively by the welcome frame, so it is shown.
+  // The read raced the host frame's commit (it once saw "connecting"); retry until
+  // the welcome frame's status has been rendered, before measuring geometry.
+  await expect(page.locator(".header-status")).toContainText("vendor/a-very-long-model-identifier", { timeout: 15_000 });
+
   const measured = await page.evaluate(() => {
     const header = document.querySelector(".app-header") as HTMLElement;
     const dashboard = document.querySelector(".dashboard-row") as HTMLElement;
@@ -515,7 +521,6 @@ test("the header has no horizontal overflow at 320px and the dashboard row is bo
       cardWidths: cards.map((card) => Math.round(card.getBoundingClientRect().width)),
       // The columns the row actually laid out (3 when it fits, 2 when it does not).
       columns: getComputedStyle(dashboard).gridTemplateColumns.split(" ").length,
-      headerStatusText: (document.querySelector(".header-status") as HTMLElement).textContent,
     };
   });
   console.log("[round54 narrow header]", JSON.stringify(measured));
@@ -527,8 +532,6 @@ test("the header has no horizontal overflow at 320px and the dashboard row is bo
   for (const height of measured.cardHeights) expect(height).toBeLessThanOrEqual(64);
   expect(measured.dashboardHeight, "dashboard row bounded").toBeLessThanOrEqual(72);
   expect(measured.columns, "three bounded columns at every width").toBe(3);
-  // The model is reported authoritatively by the welcome frame, so it is shown.
-  expect(measured.headerStatusText).toContain("vendor/a-very-long-model-identifier");
 });
 
 test("no model name is printed when the host reported none", async ({ page }) => {
@@ -537,7 +540,15 @@ test("no model name is printed when the host reported none", async ({ page }) =>
   await page.setViewportSize(MOBILE);
   await openSeededConversation(page);
   await host.send(welcomeFrame(false));
-  const status = await page.locator(".header-status").textContent();
+  // The one-shot read raced the host frame's commit (it once saw "connecting"):
+  // poll until the welcome frame's status has been rendered, then assert on it.
+  let status = "";
+  await expect
+    .poll(async () => {
+      status = (await page.locator(".header-status").textContent()) ?? "";
+      return status;
+    }, { timeout: 15_000 })
+    .toContain("idle");
   console.log("[round54 header status without model]", JSON.stringify({ status }));
   expect(status).toContain("idle");
   expect(status).not.toContain("·");
