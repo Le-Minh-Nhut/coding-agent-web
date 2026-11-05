@@ -51,7 +51,7 @@ function RawRecord({ row, pairedArgs }: { row: ToolActivityRow; pairedArgs: Map<
   return (
     <>
       {hasArgs && (
-        <pre className="tool-raw-output tool-args-json"><code>{JSON.stringify(args, null, 2)}</code></pre>
+        <pre className="tool-args-json"><code>{JSON.stringify(args, null, 2)}</code></pre>
       )}
       <pre className="tool-raw-output"><code>{row.text}</code></pre>
       <button type="button" className="ghost" onClick={() => copyText(row.text)}>Copy output</button>

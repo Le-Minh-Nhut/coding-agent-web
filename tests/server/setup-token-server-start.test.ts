@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, expect, it } from "vitest";
+import { hermeticEnv } from "../test-env.js";
 
 const repoRoot = fileURLToPath(new URL("../..", import.meta.url));
 const children: ChildProcess[] = [];
@@ -35,9 +36,22 @@ async function portReachable(port: number): Promise<boolean> {
 }
 
 async function startServer(dir: string, port: number, relayPort: number) {
+  // The child resolves `stateDir` from its config UNLESS a `CAW_STATE_DIR` is in
+  // the environment, and that variable outranks the config file. This suite runs
+  // in a real shell, so an exported `CAW_STATE_DIR` (the deployed state directory)
+  // would send the first-run token to the owner's real state dir instead of
+  // `<dir>/state` — the token file then does not exist where the test looks, and
+  // the case fails for a reason unrelated to the code under test. Ambient product
+  // variables are therefore dropped; this harness states its own environment.
   const child = spawn(process.execPath, ["--import", "tsx", join(repoRoot, "apps/server/src/server.ts")], {
     cwd: repoRoot,
-    env: { ...process.env, HOME: dir, CAW_CONFIG: join(dir, "config.json"), CAW_OMP_BINARY_PATH: join(dir, "omp-stub.mjs"), XDG_STATE_HOME: join(dir, "xdg"), TMPDIR: process.env.HOME ? join(process.env.HOME, ".cache") : tmpdir() },
+    env: hermeticEnv({
+      HOME: dir,
+      CAW_CONFIG: join(dir, "config.json"),
+      CAW_OMP_BINARY_PATH: join(dir, "omp-stub.mjs"),
+      XDG_STATE_HOME: join(dir, "xdg"),
+      TMPDIR: process.env.HOME ? join(process.env.HOME, ".cache") : tmpdir(),
+    }),
     stdio: ["ignore", "pipe", "pipe"],
     shell: false,
   });

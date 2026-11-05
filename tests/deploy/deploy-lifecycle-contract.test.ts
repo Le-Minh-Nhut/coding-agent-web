@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, describe, expect, it } from "vitest";
+import { hermeticEnv } from "../test-env.js";
 
 /**
  * The deploy artifacts' lifecycle contract.
@@ -194,13 +195,12 @@ exit 0
       const result = execFileSync("bash", [uninstallPath, ...args], {
         cwd: harnessState.dir,
         encoding: "utf8",
-        env: {
-          ...process.env,
+        env: hermeticEnv({
           HOME: harnessState.dir,
           ...(harnessState.stateOverride ? { CAW_STATE_DIR: harnessState.stateOverride } : {}),
           CAW_CONFIG: join(harnessState.dir, "caw.config.json"),
           PATH: harnessState.nodeMissing ? `${join(harnessState.dir, "bin")}:${join(harnessState.dir, "utils")}` : `${join(harnessState.dir, "bin")}:${nodeBin}:/usr/bin:/bin`,
-        },
+        }),
       });
       return { status: 0, stdout: result, stderr: "" };
     } catch (error) {
@@ -301,7 +301,7 @@ exit 0
     const result = execFileSync("bash", [script], {
       cwd: dir,
       encoding: "utf8",
-      env: { ...process.env, PATH: `${bin}:${dirname(process.execPath)}:/usr/bin:/bin`, CAW_CONFIG: join(dir, "missing-config") },
+      env: hermeticEnv({ PATH: `${bin}:${dirname(process.execPath)}:/usr/bin:/bin`, CAW_CONFIG: join(dir, "missing-config") }),
     });
     expect(result).toContain(expectedEnabled);
     expect(result).toContain(expectedRunning);
