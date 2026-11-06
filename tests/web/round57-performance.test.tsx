@@ -93,7 +93,7 @@ describe("TranscriptList keeps every row in the document", () => {
 describe("routine notices retire themselves, actionable ones do not", () => {
   it("removes a routine info notice after its linger window", () => {
     vi.useFakeTimers();
-    render(<NoticeRow notice={{ level: "info", message: "Mobile Web Controller joined the collab session" }} />);
+    render(<NoticeRow notice={{ level: "info", message: "Mobile Web Controller joined the collab session", kind: "event", seq: 1 }} />);
     expect(screen.getByText(/joined the collab session/)).toBeTruthy();
     act(() => { vi.advanceTimersByTime(7_000); });
     expect(screen.queryByText(/joined the collab session/)).toBeNull();
@@ -101,14 +101,14 @@ describe("routine notices retire themselves, actionable ones do not", () => {
 
   it("keeps a warning on screen indefinitely", () => {
     vi.useFakeTimers();
-    render(<NoticeRow notice={{ level: "warning", message: "Host is starting up" }} />);
+    render(<NoticeRow notice={{ level: "warning", message: "Host is starting up", kind: "event", seq: 1 }} />);
     act(() => { vi.advanceTimersByTime(600_000); });
     expect(screen.getByText(/Host is starting up/)).toBeTruthy();
   });
 
   it("keeps an error on screen indefinitely, as an alert", () => {
     vi.useFakeTimers();
-    render(<NoticeRow notice={{ level: "error", message: "Connection lost" }} />);
+    render(<NoticeRow notice={{ level: "error", message: "Connection lost", kind: "event", seq: 1 }} />);
     act(() => { vi.advanceTimersByTime(600_000); });
     expect(screen.getByRole("alert").textContent).toContain("Connection lost");
   });
@@ -119,7 +119,7 @@ describe("routine notices retire themselves, actionable ones do not", () => {
     // the control that would cancel the timer does not exist there. That case is
     // covered in `tests/e2e/` where a real layout decides it.
     vi.useFakeTimers();
-    render(<NoticeRow notice={{ level: "info", message: "Routine chatter" }} />);
+    render(<NoticeRow notice={{ level: "info", message: "Routine chatter", kind: "event", seq: 1 }} />);
     act(() => { vi.advanceTimersByTime(5_000); });
     expect(screen.getByText(/Routine chatter/)).toBeTruthy();
   });

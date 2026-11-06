@@ -37,7 +37,7 @@ import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 const INFO_NOTICE_LINGER_MS = 6_000;
 
 export interface NoticeRowProps {
-  notice: { level: "info" | "warning" | "error"; message: string };
+  notice: { level: "info" | "warning" | "error"; message: string; kind: "event" | "status"; seq: number };
 }
 
 export function NoticeRow({ notice }: NoticeRowProps) {
@@ -49,19 +49,31 @@ export function NoticeRow({ notice }: NoticeRowProps) {
   const { level, message } = notice;
 
   /**
-   * Retire a routine notice after it has been read.
+   * Retire a notice that has been read, if it is safe to retire.
    *
-   * The row is removed from the DOM, not just hidden, so the transcript regains the
-   * space. Nothing is deleted from the authoritative record: a notice is transient
-   * transport state (`transcript.ts:610`) and the host's own journal is untouched,
-   * so this only shortens how long the app keeps announcing it. An expansion by the
-   * reader cancels the timer — the user is deliberately looking at it.
+   * Three conditions, and each one closes a way this could hide something:
+   *
+   *  - **only an `info` `event`**. `info` is not a synonym for "transient": a retry
+   *    waiting on a provider or a compaction in progress is `status` and is the only
+   *    place that state is reported, so those never expire. A `warning` or `error`
+   *    may still need action, so the reader decides when it goes.
+   *  - **only while collapsed**. An expansion is the reader deliberately looking at
+   *    it; the timer must not take it away mid-read.
+   *  - **and it re-arms on identity**. `seq` changes for every new notice, so a
+   *    later notice — even one with identical text, even at a higher level — starts
+   *    unexpired. Without this the row would be permanently blank after its first
+   *    retirement, which is the whole class of bug this component must not have.
+   *
+   * Removing the row is not deleting evidence: a notice is transport state
+   * (`transcript.ts`), the host's journal is untouched, and the full text stays
+   * reachable by expanding before it retires.
    */
   useEffect(() => {
-    if (level !== "info" || expanded) return;
+    setExpired(false);
+    if (level !== "info" || notice.kind !== "event" || expanded) return;
     const timer = setTimeout(() => setExpired(true), INFO_NOTICE_LINGER_MS);
     return () => clearTimeout(timer);
-  }, [level, message, expanded]);
+  }, [notice.seq, notice.kind, level, message, expanded]);
 
   useLayoutEffect(() => {
     const element = textRef.current;

@@ -31,15 +31,22 @@ Impact, measured at 4x CPU throttle with 4075 entries in the document: **7.68 ms
 script per appended row**, and a burst of 60 appends produced **461 ms of script and a
 327 ms frozen main-thread task**.
 
-### A2. `FileDiffView` capped hunks, not lines (confirmed)
+### A2. `FileDiffView` capped hunks, not lines (confirmed; one claim retracted)
 
 The line cap was checked *after* a hunk was pushed, so a patch arriving as a single
 hunk mounted every line. OMP's gutter diffs routinely do exactly that (a rewrite
-emits no `…` separator). Worse, because nothing was actually cut, no "show all"
-control rendered either — the guard and its escape hatch failed together.
+emits no `…` separator). Measured on a one-hunk 2.15 MB / 60,000-line patch:
+**5618 ms to mount**, 1695 ms to re-render.
 
-Measured on a one-hunk 2.15 MB / 60,000-line patch: **5618 ms to mount**, and
-`showAll button: 0`.
+**Retraction.** This section originally claimed the missing cap was *also* data loss,
+because no "Show all" control appeared. An independent audit replayed the parent
+algorithm and found the parent's gate was `hiddenHunks > 0`, which is exactly the
+condition under which content is hidden — so every patch that hid anything did show
+the control, and a single 60k-line hunk hid zero lines and had nothing to restore.
+The uncapped mount was a real performance defect; it was **not** a reachability
+defect. The claim is withdrawn. The committed change is still worth having: the bound
+is now in the unit the user perceives (lines), and hiding is counted in lines, but no
+reader ever lost access because of the old code.
 
 ### A3. Two panel scans were quadratic in practice (confirmed)
 
@@ -182,8 +189,11 @@ Both were removed rather than kept, and neither is in the commit:
 ### C4. FileDiffView: cap by lines, keep every line reachable
 
 The cap is now per rendered line, and "Show all — N more lines hidden" restores every
-row including previously cut tail text. Verified: a 60,000-line patch mounts ≤401
-rows, and the control is present exactly when content was withheld.
+row including previously cut tail text. Verified independently by the audit on
+0-line, single-hunk-crossing-budget, and 60×20-hunk patches: hidden counts exact to
+the line (promised 502, hidden 502), restoration complete and unreordered, no row
+rendered for a zero-line diff, and the control a real focusable `<button>`. See §A2
+for the retracted claim.
 
 ### C5. Indexed and amortised panel lookups
 
@@ -304,6 +314,42 @@ per-image findings are recorded in §E2 after capture.
 <!-- E2: filled from the subagent's reading of the running-state screenshots. -->
 
 ---
+
+### C8. What an independent audit found, and what it cost
+
+An adversarial review of the round's own commit (`6c33db1`) was commissioned, ran for
+78 minutes with 26 scratch suites and 724 throwaway tests, and its verdict was
+**mixed, not clean**. It confirmed five of the six changes correct — the `MessageRow`
+comparator (539 matrix cases plus 720 fuzz cases), the `WeakMap` row cache (200-step
+differential equality against a rebuild), the diff cap, the advisor index/amortisation
+(300+ pairs diffed against the old implementation), and incremental agent decode
+(25 seeds × 60 random frames equal to a cold parse).
+
+It found three **real defects in the notice change**, all now fixed:
+
+1. **P1, data loss.** The call site keyed the notice on its *message text*. A notice
+   repeating a text used earlier in the session therefore reused the retired element
+   and rendered **nothing** — including an `error` re-emitted with the same words. The
+   audit's reproduction: the second Stop produced an empty transcript row and `0`
+   alert elements. Now keyed on a monotonic identity (`transcript.ts`, `setNotice`),
+   and the expiry flag resets on every new notice.
+2. **P2, hidden state.** `info` was treated as a synonym for "transient", so a retry
+   waiting on a provider (up to minutes) and a running compaction expired after 6 s
+   and took the only report of that state with them. Notices now carry a `kind`
+   derived from the *event* that produced them: only `event` notices may expire;
+   `status` notices never do.
+3. The expiry flag had no reset path, which is what made (1) permanent.
+
+Two more audit findings were accuracy corrections rather than defects, and both are
+applied: the FileDiffView "data loss" claim is retracted (§A2), and the claim that the
+comparator fixed *all* re-rendering is narrowed — tool rows never reach `MessageRow`,
+so `groupActivity`/`pairToolArguments` still rebuild per frame and about 3,056 of
+4,075 rows are covered by the comparator. The other 1,019 are activity groups. That
+is an accuracy point, not a latency one: measured in jsdom, the per-append cost of
+those rebuilds is 0.17 ms.
+
+New regression tests, `tests/web/round57-notice-identity.test.tsx` (8). **Fail-before
+is proven**: reverting the two fixes fails 4 of the 8, and restoring them passes all 8.
 
 ## F — Regression tests
 
@@ -442,6 +488,23 @@ Ranked by how much they matter.
 7. **The advisor `Adv ⚠ 58` in the screenshot could not be reproduced from the
    running build**, because the chip is gated on a recorded *blocker* and the fixture
    has none. The gate is verified by unit test, not by a screenshot.
+
+8. **About 3,056 of 4,075 rows are covered by the memo comparator; the other 1,019
+   are activity groups, which still rebuild per frame.** `groupActivity` creates new
+   group objects on every call and `pairToolArguments` a new map, so
+   `ActivityGroupRow`'s shallow compare misses. Measured cost of that rebuild:
+   0.17 ms of a re-render at 4075 rows (jsdom), so it is not a latency problem at
+   this size — but a transcript that is *mostly* tool traffic would scale worse than
+   the numbers here suggest, and that is the case to profile next. Fixing it means
+   memoising the grouping by row identity, which changes grouping semantics and was
+   not attempted at the end of this round.
+
+9. **The round's own commit needed an audit to be safe.** Five of six changes were
+   clean, but the sixth — notice retirement — shipped a data-loss regression that no
+   test in the commit caught, and it was found only by an adversarial review that
+   replayed the parent algorithm. The lesson is recorded rather than the number:
+   a change that *removes* something from the screen needs a test that proves the
+   thing can come back.
 
 8. **`git` and `systemctl` output contain unrelated `FAIL:` lines** from a test that
    shells out to a guard script; they are pre-existing test-fixture noise, not

@@ -2922,10 +2922,11 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
           a routine `info` join is a quiet muted line, `warning` keeps its row, and
           `error` keeps `role="alert"`. Each clamps to one/two rendered lines with a
           `Show more` control, so the full host message stays reachable without a
-          5,000-character notice occupying the screen. The row is keyed by the
-          message, so a new notice starts collapsed rather than inheriting the
-          previous one's expansion. */}
-      {transcript.notice && <NoticeRow key={transcript.notice.message} notice={transcript.notice} />}
+          5,000-character notice occupying the screen. Keyed by the notice's own
+          identity, not its text: the host can emit the same words twice in a
+          session, and a text key would hand the second one the first one's
+          element — including any state it had accumulated. */}
+      {transcript.notice && <NoticeRow key={transcript.notice.seq} notice={transcript.notice} />}
       {/* While the link is live (idle/running) the host is up, so the record's
           stale `starting` must not claim prompting may be refused. Only while the
           link is down/connecting does the startup warning stay honest. */}

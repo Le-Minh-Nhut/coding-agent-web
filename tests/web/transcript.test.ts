@@ -336,7 +336,11 @@ describe("Collab transcript reducer", () => {
         expect(state.agentActivity["sub-1"]).toBeDefined();
         continue;
       }
-      expect(state.notice).toEqual({ message, level });
+      // `toMatchObject`, not `toEqual`: the notice also carries the identity and
+      // kind added in round 57 (`transcript.ts`), and pinning the full object here
+      // would make this test fail every time the model gains a field. What it is
+      // actually asserting — that the message and its level survive — is the intent.
+      expect(state.notice).toMatchObject({ message, level });
     }
 
     state = apply(state, { t: "event", event: { type: "tool_execution_start", toolCallId: "tc1", toolName: "bash", args: { cmd: "pwd" } } });

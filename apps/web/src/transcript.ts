@@ -136,7 +136,23 @@ export interface TranscriptState {
    * line, so a join can no longer occupy a bright full-width bar. The text is
    * never truncated: a long notice is clamped visually and expands on tap.
    */
-  notice: { level: "info" | "warning" | "error"; message: string } | null;
+  /**
+   * The single current protocol notice.
+   *
+   * `seq` exists because the identity of a notice is not its text: the host can
+   * emit the same words twice in a session (a second "… interrupted", a repeated
+   * agent status), and without a distinguishing value the view would reuse the
+   * previous instance — including any state it had accumulated. Consumers key on
+   * `seq`, so a new notice is a new element.
+   *
+   * `kind` is derived from the event that produced the notice, never from its
+   * text: an `event` is something that happened and has been reported, while a
+   * `status` describes work still in progress (a retry waiting on a provider, a
+   * compaction running). Only `event` notices may expire on their own.
+   */
+  notice: { level: "info" | "warning" | "error"; message: string; kind: "event" | "status"; seq: number } | null;
+  /** Monotonic identity for `notice`, so a repeated notice is a new value. */
+  nextNoticeSeq: number;
   /**
    * Live agent activity, keyed by agent id — the structured replacement for the
    * old unbounded `notice` string.
@@ -175,6 +191,17 @@ export interface AgentActivity {
   liveOnly: boolean;
   updatedAt: number;
 }
+/**
+ * Install a notice, giving it a fresh identity.
+ *
+ * Every producer goes through here so no path can forget the `seq` and hand a
+ * consumer a value it will mistake for the previous notice.
+ */
+function setNotice(state: TranscriptState, level: "info" | "warning" | "error", message: string, kind: "event" | "status"): TranscriptState {
+  const seq = (state.nextNoticeSeq ?? 0) + 1;
+  return { ...state, notice: { level, message, kind, seq }, nextNoticeSeq: seq };
+}
+
 export function createTranscriptState(): TranscriptState {
   return {
     entries: [],
@@ -191,6 +218,7 @@ export function createTranscriptState(): TranscriptState {
     readOnly: false,
     error: null,
     notice: null,
+    nextNoticeSeq: 0,
     agentActivity: {},
     uiRequests: { current: null, queue: [] },
     lastUiRequestSettlement: null,
@@ -607,30 +635,30 @@ function applyEvent(state: TranscriptState, event: Extract<HostFrame, { t: "even
     const started = state.messages.find((message) => message.identity === `tool:${event.toolCallId}`);
     return { ...state, messages: upsertMessage(state.messages, toolRow(event.toolCallId, event.toolName, result, false, event.isError, toToolResult(event.result), started?.toolArgs)) };
   }
-  if (event.type === "notice") return { ...state, notice: { level: event.level, message: event.message } };
+  if (event.type === "notice") return setNotice(state, event.level, event.message, "event");
   if (event.type === "auto_compaction_start") {
-    return { ...state, notice: { level: "info", message: `Compacting context (${event.reason})` } };
+    return setNotice(state, "info", `Compacting context (${event.reason})`, "status");
   }
   if (event.type === "auto_compaction_end") {
-    return event.skipped ? state : {
-      ...state,
-      notice: {
-        level: event.errorMessage ? "error" : "info",
-        message: event.aborted ? "Context compaction aborted" : event.errorMessage ? `Context compaction failed: ${event.errorMessage}` : "Context compacted",
-      },
-    };
+    if (event.skipped) return state;
+    return setNotice(
+      state,
+      event.errorMessage ? "error" : "info",
+      event.aborted ? "Context compaction aborted" : event.errorMessage ? `Context compaction failed: ${event.errorMessage}` : "Context compacted",
+      "event",
+    );
   }
   if (event.type === "auto_retry_start") {
-    return { ...state, notice: { level: "info", message: `Retry ${event.attempt}/${event.maxAttempts}: ${event.errorMessage}` } };
+    // A retry can wait on a provider for minutes; it is status, not an event.
+    return setNotice(state, "info", `Retry ${event.attempt}/${event.maxAttempts}: ${event.errorMessage}`, "status");
   }
   if (event.type === "auto_retry_end") {
-    return event.success ? { ...state, notice: { level: "info", message: "Retry succeeded" } } : {
-      ...state,
-      notice: { level: "error", message: event.finalError ?? "Retry failed" },
-    };
+    return event.success
+      ? setNotice(state, "info", "Retry succeeded", "event")
+      : setNotice(state, "error", event.finalError ?? "Retry failed", "event");
   }
   if (event.type === "thinking_level_changed") {
-    return { ...state, notice: { level: "info", message: `Thinking level: ${event.thinkingLevel ?? "default"}` } };
+    return setNotice(state, "info", `Thinking level: ${event.thinkingLevel ?? "default"}`, "event");
   }
   // Non-assistant message starts/updates have no stable partial-row contract; final content is handled on message_end.
   return state;
@@ -882,7 +910,7 @@ export function reduceHostFrame(
         // on the display name would merge two agents that share one. The generic
         // notice stays bounded and carries no task body, so it cannot become the
         // giant banner this branch used to produce.
-        return { ...state, notice: { level, message: `${agent} ${status ?? "updated"}` } };
+        return setNotice(state, level, `${agent} ${status ?? "updated"}`, "status");
       }
       const task = isProgress
         ? (typeof record.task === "string" ? record.task : "")
