@@ -1728,14 +1728,32 @@ details[open] summary {
  * The visible ✕ glyph is `aria-hidden` and the button carries the accessible name
  * "Stop generating", so nothing is lost to a screen reader.
  */
-@media (max-width: 420px) {
-  .header-stop {
+/* 480, not 420: an iPhone Pro Max is 430pt wide, and it is still a phone. The
+   owner's screenshot is a phone-width header, so the compact treatment must cover
+   the widest phone rather than the narrowest. */
+@media (max-width: 480px) {
+  /* `button.header-stop`, not `.header-stop`: the filled appearance comes from
+     `button.danger` (`styles.css:580`), which is element+class (0,1,1) and outranks
+     a bare class selector (0,1,0). Verified in a real browser — the class-only form
+     still computed to `rgb(220, 38, 38)`. */
+  button.header-stop {
     background-color: transparent;
     border-color: var(--danger);
     color: var(--danger-text);
     /* Square: the label is hidden at this width, so the extra horizontal padding
        would only enlarge the target past the 44px minimum for no benefit. */
     padding: 0;
+  }
+
+  /* The label belongs to the same breakpoint as the compact treatment above: it is
+     the label's width that makes the control a pill, and leaving it visible at 421px
+     and up meant the widest phone still showed the pill. */
+  .header-stop .header-action-label {
+    display: none;
+  }
+
+  .header-stop .header-action-icon {
+    display: block;
   }
 
   /* The chips are bounded so the model label keeps a readable column. A chip is a
