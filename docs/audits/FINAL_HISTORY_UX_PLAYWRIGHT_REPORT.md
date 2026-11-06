@@ -1,8 +1,8 @@
 # History recovery and mobile UX — Playwright report
 
-Round 57. Commits `54ef6e0` (the fix) and `d254ad7` (the visual-review follow-up) on
-`main`; deployed to the live service and verified against the owner's own running
-sessions.
+Round 57. Three commits on `main`: `54ef6e0` (the fix), `d254ad7` (the visual-review
+follow-up), `a2dd2e5` (the eight defects an independent audit found in `54ef6e0`).
+Deployed to the live service and verified against the owner's own running sessions.
 
 ## A — Reported symptom
 
@@ -130,12 +130,13 @@ promised count is reached.
 
 | Measurement | Value |
 | --- | --- |
-| Host-side promise (`welcome.entryCount`) | 3915 |
+| Host-side promise (`welcome.entryCount`) | 4075 (was 3915, 3238 earlier) |
 | Chunks delivered | 24 |
-| Entries delivered | 3915 / 3915 |
-| Payload | 11,922,944 bytes (~11.4 MB) |
+| Entries delivered | 4075 / 4075 |
+| Payload | 12,362,106 bytes (~12.4 MB) |
 | `final` chunk seen | yes |
-| Wall time | **187 ms** after the fix |
+| Reconnects | 0 |
+| Wall time | **203 ms** after the fix |
 
 Before the relay fix the same read could not complete at all over a real client.
 
@@ -189,6 +190,9 @@ All runs: Chromium (`channel: "chrome"`), the project's own config, real built
 assets, mock Collab host (no agent is launched, so a full run is free). Test
 timeouts are the spec's own; `HIST-03` sets 120 s because the stall window is 30 s.
 
+Full browser suite: **152 passed, 0 failed** (`npx playwright test --project=chromium`,
+~3.8 min). The rounds' own specs:
+
 ### `tests/e2e/history-loading.spec.ts` — 15/15 PASS
 
 | Test | What it proves | Duration |
@@ -209,7 +213,7 @@ timeouts are the spec's own; `HIST-03` sets 120 s because the stall window is 30
 | HIST-14 | 300-entry snapshot in 12 chunks never fails on total duration | 2.9 s |
 | HIST-15 | malformed entries do not take valid rows down | 744 ms |
 
-### `tests/e2e/handoff-completion.spec.ts` — 9/9 PASS
+### `tests/e2e/handoff-completion.spec.ts` — 10/10 PASS
 
 | Test | What it proves |
 | --- | --- |
@@ -222,6 +226,7 @@ timeouts are the spec's own; `HIST-03` sets 120 s because the stall window is 30
 | in flight | refused by name, claims nothing |
 | navigate away | the notification survives leaving the panel |
 | mobile viewport | the banner sits above the composer, transcript still scrollable |
+| buried commit | a commit under 120 later events is still found (forward cursor; fails on the old window) |
 
 ### `tests/e2e/sync-states-visual.spec.ts` — 12/12 PASS
 
@@ -292,12 +297,12 @@ Back, draft preservation, and no duplicate WebSocket connections.
 
 | Item | Value |
 | --- | --- |
-| Git SHA | `d254ad7` (`main`), working tree clean |
-| Deployed revision | `d254ad7` — the service runs `node --import tsx apps/server/src/server.ts`, so the relay fix is live after a restart |
-| Served JS | `assets/index-BCVyjs8g.js` sha256 `181dd4f28a1ec771a289ef4f96d821d7cf8ada3dbfa93fc52bcaab18d76baef9` |
-| Served CSS | `assets/index-CkGMPHlM.css` sha256 `0e7cc278e223f9ae8a3a05724d185b7f3806eeadacbf29ffcbb40aa1d20a92df` |
+| Git SHA | `a2dd2e5` (`main`), working tree clean |
+| Deployed revision | `a2dd2e5` — the service runs `node --import tsx apps/server/src/server.ts`, so the relay fix is live after a restart |
+| Served JS | `assets/index-DBdTy_gx.js` sha256 `84cec8ee92f3fea3a6554fe7186e9b4c94fccfab75338e1f1ab1b8564304040e` |
+| Served CSS | `assets/index-BvDiuVt1.css` |
 | Asset match | served `index.html` references exactly those two files; both byte-match `apps/web/dist` |
-| systemd | `coding-agent-web.service` active, MainPID `4055034` |
+| systemd | `coding-agent-web.service` active, MainPID `4089959` |
 | Reconcile | `{"adopted":3,"external":0,"stopped":2,"unknown":1,"registered":2}` |
 | HTTPS | `GET /` → 200 over the Tailscale origin; `/api/agent-limit` → 401 unauthenticated (route mounted, not authenticated) |
 | **Preserved OMP pids** | `1204278`, `2080435`, `2082046` — **all alive and unchanged** across the restart |
@@ -310,8 +315,11 @@ Back, draft preservation, and no duplicate WebSocket connections.
 1. HTTPS reachable over Tailscale — 200.
 2. Authentication gate intact — `/api/agent-limit` 401.
 3. Served JS/CSS hashes read and matched to the local build.
-4. **The real 11.4 MB snapshot delivered end to end through the deployed relay**,
-   3915/3915 entries, `final: true`, no reconnect.
+4. **The real snapshot delivered end to end through the deployed relay**:
+   **4075/4075 entries, 24 chunks, `final: true`, ~12.4 MB, 203 ms, 0 reconnects.**
+   The session grew during the round (3238 → 3915 → 4075 entries as the owner kept
+   working), and it now delivers whole every time; the pre-fix log shows every
+   guest being closed instead.
 5. All three live OMP processes and their tmux sessions intact.
 
 ### BLOCKED at production
