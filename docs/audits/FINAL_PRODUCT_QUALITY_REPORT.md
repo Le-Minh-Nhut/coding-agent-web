@@ -134,14 +134,22 @@ would have been a false rollback artifact.
 
 ## J. Blocked / unverified
 
-- **CI: passing.** Run `42162368037` on `51a9e30` completed
-  successfully (run page reports `Success`; the workflow badge for `main` reads
-  `CI - passing`). Earlier runs for `6836d7d`, `420ffce`, `29b0b73`, `3ba6273` and
-  `d00281a` were **cancelled** by the concurrency group when a later push
-  superseded them — cancellation is not a pass, and none of them is reported as
-  one. Every commit of this round is contained in `51a9e30` — the two commits after
-  it (`d00281a`, `2a07283`) are a SettingsView fix and docs, and their content is
-  covered by the local gates below rather than by a green remote run.
+- **CI: green on the last code-bearing revision.** Run 93 (`42162368037`) on
+  `51a9e30` completed **successfully**. That revision contains every app-code change
+  of this round — `6836d7d` (the feature), `29b0b73` (the arguments guard) and
+  `d00281a` (the failed-save fix) are all ancestors of it, and `git diff` confirms
+  nothing under `apps/` or `packages/` changed after it. Five earlier runs
+  (`42161036708`, `42161544991`, `42161878426`, `42161929503`, `42162331002`) were
+  **cancelled** by the workflow's concurrency group when a later push superseded
+  them; cancellation is not a pass and none of them is reported as one.
+- **The workflow badge may read `failing` at HEAD, and that is not a code failure.**
+  GitHub badges the newest run, and my last pushes were docs-only commits whose runs
+  were themselves superseded. The authoritative statement about the code is run 93
+  above; the docs-only commits after it change no executable file.
+- **`d00281a`'s own run was cancelled**, so that one commit never had a standalone
+  green run. Its content is covered by run 93, and it was verified locally (full
+  `vitest run`, `pnpm typecheck`, and the `round56-agent-limit-ui` case that found it).
+
 - **No physical iPhone test.** Keyboard behaviour, `safe-area` and iOS tab
   eviction are handled in code and exercised in Chromium at phone viewports, not
   on the device. Physical Safari is unavailable to this session.
