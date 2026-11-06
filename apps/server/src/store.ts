@@ -136,6 +136,15 @@ export interface MetadataStore {
    */
   latestEventOfTypes<T = unknown>(conversationId: string, types: readonly string[]): Promise<StoreEvent<T> | null>;
   recordCommandOnce(idempotencyKey: string, conversationId: string, kind: string, payload: Record<string, unknown>): Promise<{ first: boolean; command: StoredCommand }>;
+  /** One persisted server setting, or `undefined` when it was never written. */
+  getSetting<T = unknown>(key: string): Promise<T | undefined>;
+  /**
+   * Persist one server setting.
+   *
+   * Append-only like every other row, so a change is durable the moment it
+   * resolves and the last write wins on replay in journal order.
+   */
+  setSetting(key: string, value: unknown): Promise<void>;
 }
 
 type Row =
@@ -153,7 +162,16 @@ type Row =
   | { op: "conversation"; value: Conversation }
   | { op: "conversation-delete"; id: string }
   | { op: "event"; value: StoreEvent }
-  | { op: "command"; value: StoredCommand };
+  | { op: "command"; value: StoredCommand }
+  /**
+   * A server-level setting that outlives the process.
+   *
+   * Journaled like everything else here so it survives a backend restart, a
+   * service restart and a reboot with no second storage mechanism, and so a
+   * settings change is ordered against the writes around it. Values are plain
+   * JSON scalars; the schema validation lives at the config boundary, not here.
+   */
+  | { op: "setting"; key: string; value: unknown };
 
 export function createMetadataStore(stateDir: string, now: () => Date = () => new Date()): MetadataStore {
   const file = join(stateDir, "metadata.jsonl");
@@ -168,6 +186,8 @@ export function createMetadataStore(stateDir: string, now: () => Date = () => ne
   let conversations = new Map<string, Conversation>();
   let events = new Map<string, StoreEvent[]>();
   let commands = new Map<string, StoredCommand>();
+  /** Server-level settings, replayed from the journal on load. */
+  let settings = new Map<string, unknown>();
   let loaded: Promise<void> | undefined;
   let queue: Promise<unknown> = Promise.resolve();
   /**
@@ -278,6 +298,7 @@ export function createMetadataStore(stateDir: string, now: () => Date = () => ne
       const nextProjects = new Map<string, Project>();
       const nextConversations = new Map<string, Conversation>();
       const nextEvents = new Map<string, StoreEvent[]>();
+      const nextSettings = new Map<string, unknown>();
       const nextCommands = new Map<string, StoredCommand>();
       const dropFrom = (id: string): void => {
         nextConversations.delete(id);
@@ -301,11 +322,13 @@ export function createMetadataStore(stateDir: string, now: () => Date = () => ne
           list.push(row.value);
           nextEvents.set(row.value.conversationId, list);
         } else if (row.op === "command") nextCommands.set(row.value.idempotencyKey, row.value);
+        else if (row.op === "setting") nextSettings.set(row.key, row.value);
       }
       projects = nextProjects;
       conversations = nextConversations;
       events = nextEvents;
       commands = nextCommands;
+      settings = nextSettings;
     })().catch((error: unknown) => {
       // A rejected load is not memoized: after a human repairs the journal the next
       // call must be able to read it again. A still-broken journal fails per call.
@@ -624,6 +647,17 @@ export function createMetadataStore(stateDir: string, now: () => Date = () => ne
         if (wanted.has(event.type)) return event as StoreEvent<T>;
       }
       return null;
+    },
+    async getSetting<T = unknown>(key: string) {
+      await load();
+      return settings.get(key) as T | undefined;
+    },
+    setSetting(key, value) {
+      return serialize(async () => {
+        await load();
+        await append([{ op: "setting", key, value }]);
+        settings.set(key, value);
+      });
     },
     recordCommandOnce(idempotencyKey, conversationId, kind, payload) {
       return serialize(async () => {

@@ -12,7 +12,7 @@ import { AgentsCenter } from "./AgentsCenter.js";
 import { AgentDetail } from "./AgentDetail.js";
 import { FilesCenter } from "./FilesCenter.js";
 import { VibePanel, vibeVerdictLabel } from "./VibePanel.js";
-import { advisorNotesOf, summarizeAdvisorNotes } from "../advisor.js";
+import { advisorEvidence, advisorIssues, advisorIssueViews, advisorNotesOf, standingBlockerCount, summarizeAdvisorNotes } from "../advisor.js";
 import { agentCounts, agentViews, vibeWorkerIds } from "../agent-model.js";
 import {
   CollabSocket,
@@ -632,6 +632,23 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     () => summarizeAdvisorNotes(advisorRows.map((message) => ({ customType: message.customType, details: message.customDetails }))),
     [advisorRows],
   );
+  /**
+   * The same notes, tracked as issues. The lifecycle is derived from the rows that
+   * follow each note: a claim of a fix reaches "verifying" and stops there, a later
+   * failing run reopens it, and nothing here can manufacture a "resolved".
+   */
+  const advisorIssueView = useMemo(() => {
+    const rows = advisorRows.map((message) => ({
+      customType: message.customType,
+      details: message.customDetails,
+      role: message.role as string | undefined,
+      text: message.text,
+      isError: (message as { isError?: boolean }).isError,
+    }));
+    return advisorIssueViews(advisorIssues(rows), advisorEvidence(rows));
+  }, [advisorRows]);
+  /** Blockers still standing. A resolved or unverifiable one is not a warning. */
+  const standingBlockers = useMemo(() => standingBlockerCount(advisorIssueView), [advisorIssueView]);
 
   const messages: DisplayMessage[] = useMemo(() => {
     const hostCounts = new Map<string, number>();
@@ -2292,15 +2309,15 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
                 "the advisor is alarming right now" — a claim this data cannot
                 support. The count stays reachable in the menu's Advisor entry, so
                 no information is lost by hiding the chip. */}
-            {advisorSummary.hasBlocker && (
+            {standingBlockers > 0 && (
               <button
                 type="button"
                 className="mode-chip mode-chip--alert"
-                aria-label={`Advisor recorded a blocker among ${advisorSummary.notes.length} note${advisorSummary.notes.length === 1 ? "" : "s"}. Open the advisor panel.`}
-                title={`Recorded advisor notes: ${advisorSummary.notes.length}, including a blocker`}
+                aria-label={`${standingBlockers} advisor blocker${standingBlockers === 1 ? "" : "s"} still open among ${advisorSummary.notes.length} note${advisorSummary.notes.length === 1 ? "" : "s"}. Open the advisor panel.`}
+                title={`${standingBlockers} open advisor blocker${standingBlockers === 1 ? "" : "s"}; ${advisorSummary.notes.length} note${advisorSummary.notes.length === 1 ? "" : "s"} recorded`}
                 onClick={() => setShowAdvisor(true)}
               >
-                Adv ⚠
+                Adv ⚠{standingBlockers > 1 ? ` ${standingBlockers}` : ""}
               </button>
             )}
             {/* Rendered only when the mode is known ON. An "off" mode is not worth
@@ -3012,6 +3029,7 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
       {showAdvisor && (
         <AdvisorPanel
           summary={advisorSummary}
+          issues={advisorIssueView}
           onClose={() => setShowAdvisor(false)}
         />
       )}

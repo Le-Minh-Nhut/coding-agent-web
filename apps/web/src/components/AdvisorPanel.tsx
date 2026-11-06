@@ -25,12 +25,41 @@
  */
 import { useMemo, useState } from "react";
 import { ModalOverlay } from "./ModalOverlay.js";
-import type { AdvisorNote, AdvisorSummary } from "../advisor.js";
+import {
+  UNSUPPORTED_RECHECK_REASONS,
+  type AdvisorIssueView,
+  type AdvisorNote,
+  type AdvisorSummary,
+  type IssueState,
+} from "../advisor.js";
 
 interface AdvisorPanelProps {
   summary: AdvisorSummary;
+  /**
+   * The same notes, tracked as issues with a derived lifecycle. Optional so a
+   * caller that only has the raw summary still renders; when absent the panel
+   * shows no state rather than guessing one.
+   */
+  issues?: readonly AdvisorIssueView[];
   onClose: () => void;
 }
+
+/** Human word for a derived state. Never "active" or "enabled": those are not observable. */
+const STATE_LABEL: Record<IssueState, string> = {
+  unresolved: "Unresolved",
+  verifying: "Claimed fixed, unverified",
+  resolved: "Resolved",
+  reopened: "Reopened",
+  unknown: "Not determinable",
+};
+
+const STATE_CLASS: Record<IssueState, string> = {
+  unresolved: "error",
+  verifying: "warning",
+  resolved: "idle",
+  reopened: "error",
+  unknown: "unknown",
+};
 
 const SEVERITY_ORDER: Record<string, number> = { blocker: 0, concern: 1, nit: 2 };
 
@@ -39,7 +68,7 @@ function severityClass(severity: AdvisorNote["severity"]): string {
   return severity === "blocker" ? "error" : severity === "concern" ? "warning" : "idle";
 }
 
-export function AdvisorPanel({ summary, onClose }: AdvisorPanelProps) {
+export function AdvisorPanel({ summary, issues, onClose }: AdvisorPanelProps) {
   const [expanded, setExpanded] = useState<number | null>(null);
   const notes = useMemo(
     () => [...summary.notes].sort((a, b) => (SEVERITY_ORDER[a.severity] ?? 3) - (SEVERITY_ORDER[b.severity] ?? 3)),
@@ -87,7 +116,12 @@ export function AdvisorPanel({ summary, onClose }: AdvisorPanelProps) {
             </p>
           ) : (
             <ul className="advisor-notes">
-              {notes.map((note, index) => (
+              {notes.map((note, index) => {
+                // Match the note to its issue by text+advisor, the same identity
+                // the lifecycle uses, so the badge cannot disagree with the header.
+                const issue = issues?.find((candidate) =>
+                  candidate.advisor === note.advisor && candidate.note.trim().replace(/\s+/g, " ") === note.note.trim().replace(/\s+/g, " "));
+                return (
                 <li key={`${note.advisor ?? "advisor"}:${index}`}>
                   <button
                     type="button"
@@ -96,6 +130,7 @@ export function AdvisorPanel({ summary, onClose }: AdvisorPanelProps) {
                     onClick={() => setExpanded(expanded === index ? null : index)}
                   >
                     <span className={`badge ${severityClass(note.severity)}`}>{note.severity}</span>
+                    {issue && <span className={`badge ${STATE_CLASS[issue.state]}`}>{STATE_LABEL[issue.state]}</span>}
                     {note.advisor !== null && <span className="advisor-note-owner">{note.advisor}</span>}
                     <span className="advisor-note-text">{note.note.split("\n", 1)[0]}</span>
                     <span className="advisor-note-chevron" aria-hidden="true">{expanded === index ? "▾" : "›"}</span>
@@ -104,12 +139,43 @@ export function AdvisorPanel({ summary, onClose }: AdvisorPanelProps) {
                     <div className="advisor-note-body">
                       <p>{note.note}</p>
                       {note.turnsAgo !== null && <p className="advisor-note-meta">from {note.turnsAgo} turn{note.turnsAgo === 1 ? "" : "s"} ago</p>}
+                      {/* The evidence that produced this state, if any. Absent
+                          evidence is shown as absence, not as a clean bill. */}
+                      {issue && issue.evidence.length > 0 && (
+                        <ul className="advisor-evidence">
+                          {issue.evidence.map((item, evidenceIndex) => (
+                            <li key={evidenceIndex}>
+                              <span className={`badge ${item.kind === "verification-pass" ? "idle" : item.kind === "still-failing" ? "error" : "warning"}`}>
+                                {item.kind === "verification-pass" ? "verification" : item.kind === "still-failing" ? "still failing" : "claim"}
+                              </span>
+                              <span>{item.summary}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                      {issue && issue.state === "verifying" && (
+                        <p className="advisor-note-meta">
+                          A claim of a fix is not proof. This stays unverified until a later result naming this
+                          issue says otherwise.
+                        </p>
+                      )}
                     </div>
                   )}
                 </li>
-              ))}
+                );
+              })}
             </ul>
           )}
+        </section>
+
+        {/* What this panel cannot check. Listed rather than implied, so the
+            absence of a "recheck" button reads as a known limit of the transport
+            and not as a check that ran and passed. */}
+        <section className="advisor-section" aria-label="What cannot be verified here">
+          <h4>What this view cannot verify</h4>
+          <ul className="advisor-list advisor-limits">
+            {UNSUPPORTED_RECHECK_REASONS.map((reason) => <li key={reason}>{reason}</li>)}
+          </ul>
         </section>
 
         {/* Where the controls that are NOT reachable from here actually live. Said

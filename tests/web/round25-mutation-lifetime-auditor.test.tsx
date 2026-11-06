@@ -14,7 +14,7 @@ import {openModelSheet} from './model-sheet.js';
 import {buildApp} from '../../apps/server/src/app.js';
 import {createMetadataStore} from '../../apps/server/src/store.js';
 import {createAuthenticationService} from '../../apps/server/src/auth.js';
-vi.mock('../../apps/web/src/api.js',()=>({api:Object.fromEntries(['getMe','getCapabilities','getRuntime','listProjects','listConversations','listNativeSessions','updateProject','getConversation','getAttachInstructions','getModels','getConversationLink','setConversationModel','getConversationHistory'].map(k=>[k,vi.fn()])),setCsrfToken:vi.fn()}));
+vi.mock('../../apps/web/src/api.js',()=>({api:Object.fromEntries(['getMe','getCapabilities','getRuntime','getAgentLimit','listProjects','listConversations','listNativeSessions','updateProject','getConversation','getAttachInstructions','getModels','getConversationLink','setConversationModel','getConversationHistory'].map(k=>[k,vi.fn()])),setCsrfToken:vi.fn()}));
 vi.mock('../../apps/server/src/config.js',async original=>({...await original<any>(),findRepoRoot:()=>process.cwd()}));
 afterEach(()=>{cleanup();vi.restoreAllMocks();});
 const deferred=()=>{let resolve!:(v?:unknown)=>void;const promise=new Promise(r=>resolve=r);return {resolve,promise};};

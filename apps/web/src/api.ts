@@ -5,6 +5,7 @@
  */
 
 import type {
+  AgentLimitResponse,
   ApiResult,
   AttachInstructions,
   Capabilities,
@@ -133,6 +134,20 @@ export const api = {
   },
   async getRuntime(): Promise<ApiResult<RuntimeSnapshot>> {
     return request<RuntimeSnapshot>("/api/runtime");
+  },
+
+  /** The live concurrency limit, its bounds, and current occupancy. */
+  async getAgentLimit(): Promise<ApiResultWithStatus<AgentLimitResponse>> {
+    return request<AgentLimitResponse>("/api/agent-limit");
+  },
+
+  /**
+   * Set the concurrency limit. The server validates the value against its own
+   * bounds and is the authority on what takes effect; the response is read back
+   * from the same source the runtime enforces.
+   */
+  async setAgentLimit(limit: number): Promise<ApiResultWithStatus<AgentLimitResponse>> {
+    return request<AgentLimitResponse>("/api/agent-limit", { method: "PUT", body: JSON.stringify({ limit }) });
   },
 
   async listProjects(): Promise<ApiResult<ProjectWithStats[]>> {

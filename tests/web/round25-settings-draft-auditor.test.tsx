@@ -4,7 +4,7 @@ import {afterEach,it,expect,vi} from 'vitest';
 import {act,cleanup,fireEvent,render,screen} from '@testing-library/react';
 import {SettingsView} from '../../apps/web/src/components/SettingsView.js';
 import {api} from '../../apps/web/src/api.js';
-vi.mock('../../apps/web/src/api.js',()=>({api:{getRuntime:vi.fn(),changePassword:vi.fn()}}));
+vi.mock('../../apps/web/src/api.js',()=>({api:{getRuntime:vi.fn(),changePassword:vi.fn(),getAgentLimit:vi.fn()}}));
 afterEach(()=>{cleanup();vi.restoreAllMocks();});
 it.each([false,true])('V25 password response must not silently discard edits made while pending (edit=%s)',async edit=>{
  vi.mocked(api.getRuntime).mockResolvedValue({ok:false,error:{code:'internal',message:'No runtime fixture'}});

@@ -32,6 +32,7 @@ vi.mock("../../apps/web/src/api.js", async () => {
       getConversationLink: vi.fn(),
       getModels: vi.fn(),
       getRuntime: vi.fn(),
+      getAgentLimit: vi.fn(),
       getMe: vi.fn(),
       getCapabilities: vi.fn(),
       listProjects: vi.fn(),

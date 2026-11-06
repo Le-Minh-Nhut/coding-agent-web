@@ -467,7 +467,27 @@ function liveMessage(message: WireMessage, sequence: number): TranscriptMessage 
       const content = textFromContent(message.content);
       const isError = message.stopReason === "error" || message.stopReason === "aborted";
       const errorText = message.stopReason === "aborted" ? "Assistant response aborted" : message.errorMessage ?? "Assistant response failed";
-      return { id, identity, eventIdentity, role: "assistant", text: isError ? `${content}${content ? "\n\n" : ""}${errorText}` : content, isError, source: "event" };
+      // Carry the blocks as well as the flattened text. Rendering the text alone
+      // meant a streamed turn showed its tool call twice: once as the flattened
+      // `[Tool call: …] {json}` baked into `text` (:244), and again as the activity
+      // card built from the result row. With blocks present, MessageRow suppresses a
+      // request whose result is on screen and the duplicate is gone on the live path
+      // too — not only after the durable entry replaces this row.
+      const blocks = transcriptBlocksFromContent(message.content);
+      // The same rule as the durable entry path (:330-340): with `blocks` present
+      // the renderer shows the blocks, so the failure reason must be a block too —
+      // otherwise a live error with no content blocks renders as an empty row and
+      // the reason survives only in `text`, which is no longer what gets drawn.
+      return {
+        id,
+        identity,
+        eventIdentity,
+        role: "assistant",
+        text: isError ? `${content}${content ? "\n\n" : ""}${errorText}` : content,
+        blocks: isError ? [...blocks, { type: "notice" as const, text: errorText }] : blocks,
+        isError,
+        source: "event",
+      };
     }
     case "user":
       return { id, identity, eventIdentity, role: "user", text: textFromContent(message.content), source: "event" };

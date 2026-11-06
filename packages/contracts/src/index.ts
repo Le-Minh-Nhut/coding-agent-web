@@ -12,6 +12,8 @@ export const ERROR_CODES = [
   "unauthorized",
   "csrf",
   "bad_request",
+  /** A settings value the server refuses: out of range, or not the expected type. */
+  "invalid_setting",
   "not_found",
   "path_forbidden",
   "path_not_found",
@@ -355,9 +357,36 @@ export interface RuntimeSnapshot {
   activeCount: number | null;
   /** Why the count is unknown, in the user's words. Null when the count is known. */
   activeCountReason: string | null;
+  /** The limit in force right now. Read at each admission, not at startup. */
   maxActive: number;
   conversations: Array<Pick<Conversation, "id" | "state" | "ownership" | "updatedAt" | "statusDetail">>;
 }
+
+/** Where the effective agent limit came from. */
+export type AgentLimitSource = "setting" | "default";
+
+export interface AgentLimitResponse {
+  /** The limit in force right now. */
+  limit: number;
+  source: AgentLimitSource;
+  min: number;
+  max: number;
+  /** The startup/environment value this installation began with. */
+  fallback: number;
+  /**
+   * Managed slots currently occupied. `null` means unknown — tmux could not be
+   * enumerated — and must never be rendered as zero.
+   */
+  activeCount: number | null;
+  /** Why the count is unknown, in the user's words. Null when it is known. */
+  activeCountReason: string | null;
+  /**
+   * True when occupancy already exceeds the limit. Existing agents are preserved
+   * when the limit is lowered; this says only that no *new* agent may start.
+   */
+  overLimit: boolean;
+}
+
 
 export interface Capabilities {
   omp: { available: boolean; version: string | null; path: string | null };

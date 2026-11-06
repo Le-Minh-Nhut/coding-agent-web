@@ -5,7 +5,7 @@ import { stat } from "node:fs/promises";
 import { setTimeout } from "node:timers/promises";
 import { browseQuerySchema, conversationActionSchema, conversationModelSchema, createConversationSchema, createDirectorySchema, createProjectSchema, epochOf, ERROR_CODES, fail, globalSessionsQuerySchema, listEventsQuerySchema, loginSchema, observationSeqOf, ok, updateProjectSchema } from "@caw/contracts";
 import { z } from "zod";
-import type { Capabilities, CollabLinkResponse, Conversation, ErrorCode, GlobalSessionPage, GlobalSessionSummary, HandoffResponse, NativeSessionSummary, ProjectWithStats } from "@caw/contracts";
+import type { AgentLimitResponse, Capabilities, CollabLinkResponse, Conversation, ErrorCode, GlobalSessionPage, GlobalSessionSummary, HandoffResponse, NativeSessionSummary, ProjectWithStats } from "@caw/contracts";
 import type { CapabilityService, CollabHost, HandoffResult, ModelCatalogService, NativeHandoffCompaction, NativeSessionHistory } from "@caw/omp-adapter";
 import type { Supervisor, RuntimeLaunchSpec } from "@caw/runtime";
 import { evaluateState } from "@caw/runtime";
@@ -15,12 +15,19 @@ import { findRepoRoot, resolveDistDir, type ServerConfig } from "./config.js";
 import { registerStaticWeb } from "./static-web.js";
 import { createLogger, redactEventPayload, redactLogValue } from "./logger.js";
 import { registerBridgeRoutes } from "./bridge-routes.js";
+import { AGENT_LIMIT_MAX, AGENT_LIMIT_MIN, AgentLimitError, parseAgentLimit, type AgentLimitController, type AgentLimitSource } from "./agent-limit.js";
 import { PathPolicyError, WorkspacePathPolicy } from "./path-policy.js";
 import { DuplicateProjectPathError, type MetadataStore } from "./store.js";
 
 export interface AppDependencies {
   config: ServerConfig;
   auth: AuthenticationService;
+  /**
+   * The live concurrency limit for managed main agents. Optional so a test that
+   * does not exercise admission can omit it; the routes fall back to the server
+   * config value, which is what the limit was before it became adjustable.
+   */
+  agentLimit?: AgentLimitController;
   store: MetadataStore;
   paths?: WorkspacePathPolicy;
   capabilities?: CapabilityService;
@@ -1172,9 +1179,74 @@ export function buildApp(deps: AppDependencies): FastifyInstance<HttpServer> {
 
   app.get("/api/runtime", { preHandler: protectedHook }, async () => {
     const result = deps.supervisor ? await deps.supervisor.activeCount() : { count: 0, known: false, reason: "Conversation lifecycle runtime is not configured." };
-    return ok({ capabilities: await capabilities(), activeCount: result.known ? result.count : null, activeCountReason: result.known ? null : result.reason, maxActive: deps.config.maxActiveAgents, conversations: await deps.store.listAllConversations() });
+    // The limit alone: its source and bounds live on `/api/agent-limit`, which is
+    // the one place the settings UI reads and the one place they are enforced from.
+    return ok({
+      capabilities: await capabilities(),
+      activeCount: result.known ? result.count : null,
+      activeCountReason: result.known ? null : result.reason,
+      maxActive: limitState().limit,
+      conversations: await deps.store.listAllConversations(),
+    });
+  });
+
+  // ── Agent concurrency limit ───────────────────────────────────────────────
+  //
+  // This is the number the supervisor compares occupancy against at admission
+  // (`supervisor.ts`), not a display preference. Reading it and changing it are
+  // both authenticated: the hook below covers every route in the app.
+  app.get("/api/agent-limit", { preHandler: protectedHook }, async () => ok(await agentLimitView()));
+
+  app.put("/api/agent-limit", { preHandler: protectedHook }, async (request, reply) => {
+    const body = (request.body ?? {}) as { limit?: unknown };
+    try {
+      // Validate against the schema bounds on the server. The client's stepper is
+      // a convenience; nothing it sends is trusted.
+      const parsed = parseAgentLimit(body.limit);
+      const state = deps.agentLimit
+        ? await deps.agentLimit.update(parsed)
+        // No controller configured (a test app): refuse rather than pretend, so a
+        // caller can never believe a limit was persisted when it was not.
+        : (() => { throw new AgentLimitError("invalid_limit", "Agent limit settings are not available on this server."); })();
+      // Read occupancy first, then stamp the limit the update just committed. The
+      // other order (view, then override) let a second client's write land inside
+      // the occupancy read and produce a response pairing a fresh limit with an
+      // `overLimit` computed against the previous one. Occupancy cannot be tied to
+      // one instant under concurrent writers, but the limit in the response is
+      // always the one this call committed.
+      const view = await agentLimitView();
+      return ok({ ...view, limit: state.limit, source: state.source, overLimit: view.activeCount !== null && view.activeCount > state.limit });
+    } catch (error) {
+      if (error instanceof AgentLimitError) return reply.code(400).send(fail("invalid_setting", error.message));
+      throw error;
+    }
   });
   return app;
+
+  /** The effective limit plus a fresh, honest occupancy read. */
+  async function agentLimitView(): Promise<AgentLimitResponse> {
+    const state = limitState();
+    const result = deps.supervisor ? await deps.supervisor.activeCount() : { count: 0, known: false, reason: "Conversation lifecycle runtime is not configured." };
+    const activeCount = result.known ? result.count : null;
+    return {
+      limit: state.limit,
+      source: state.source,
+      min: AGENT_LIMIT_MIN,
+      max: AGENT_LIMIT_MAX,
+      fallback: deps.config.maxActiveAgents,
+      activeCount,
+      activeCountReason: result.known ? null : result.reason,
+      // Unknown occupancy is never over the limit: "I could not count" is not a
+      // claim that the machine is full, and the launch path refuses separately.
+      overLimit: activeCount !== null && activeCount > state.limit,
+    };
+  }
+
+  function limitState(): { limit: number; source: AgentLimitSource } {
+    return deps.agentLimit
+      ? deps.agentLimit.current()
+      : { limit: deps.config.maxActiveAgents, source: "default" };
+  }
 }
 
 function pathError(reply: HttpReply, error: unknown) {

@@ -95,7 +95,16 @@ function AdvisorMessageCard({ message }: { message: DisplayMessage }) {
   );
 }
 
-export const MessageRow = memo(function MessageRow({ message }: { message: DisplayMessage | TranscriptMessage }) {
+export const MessageRow = memo(function MessageRow({ message, represented }: {
+  message: DisplayMessage | TranscriptMessage;
+  /**
+   * Tool-call ids that a result row in the same render already shows. Only a
+   * request whose id is in here may be hidden — everywhere else (saved history,
+   * a host-shared journal, a read-only view) the request is the only record of the
+   * call and must be printed.
+   */
+  represented?: ReadonlySet<string>;
+}) {
   const [expanded, setExpanded] = useState(false);
   const blocks = "blocks" in message ? message.blocks : undefined;
   const copy = async (text: string) => { try { await navigator.clipboard.writeText(text); } catch { /* Clipboard permission is optional; content remains selectable. */ } };
@@ -145,13 +154,13 @@ export const MessageRow = memo(function MessageRow({ message }: { message: Displ
            identical prompts expand independently. */
         <CollapsibleMessage identity={message.id} text={message.text}>
           {blocks ? (
-            <div className="message-content">{blocks.map((block, index) => renderTranscriptBlock(block, index))}</div>
+            <div className="message-content">{blocks.map((block, index) => renderTranscriptBlock(block, index, represented))}</div>
           ) : (
             <div className="message-content">{renderMarkdown(message.text)}</div>
           )}
         </CollapsibleMessage>
       ) : blocks && message.role !== "notice" ? (
-        <div className="message-content">{blocks.map((block, index) => renderTranscriptBlock(block, index))}</div>
+        <div className="message-content">{blocks.map((block, index) => renderTranscriptBlock(block, index, represented))}</div>
       ) : (
         <div className="message-content">{message.role === "notice" ? <p>{message.text}</p> : renderMarkdown(message.text)}</div>
       )}
@@ -180,17 +189,46 @@ export const TranscriptList = memo(function TranscriptList({ rows, onOpenFile }:
 }) {
   const entries = useMemo(() => groupActivity(rows), [rows]);
   const pairedArgs = useMemo(() => pairToolArguments(rows), [rows]);
+  /**
+   * Which tool calls this render actually shows a result for. A `bash` request
+   * whose result row is present is displayed by that result's activity card, so
+   * printing the request too would show one execution twice. A request with no
+   * result row on screen is shown as itself, because nothing else records it.
+   */
+  const represented = useMemo(() => {
+    const ids = new Set<string>();
+    for (const row of rows) {
+      if (row.role === "tool" && "toolCallId" in row && typeof row.toolCallId === "string") ids.add(row.toolCallId);
+    }
+    return ids;
+  }, [rows]);
   return (
     <>
       {entries.map((entry) => entry.kind === "row"
-        ? <MessageRow key={entry.row.id} message={entry.row} />
+        ? <MessageRow key={entry.row.id} message={entry.row} represented={represented} />
         : <ActivityGroupRow key={`group:${entry.group.rows[0]?.id ?? ""}`} group={entry.group} pairedArgs={pairedArgs} onOpenFile={onOpenFile} />)}
     </>
   );
 });
 
-function renderTranscriptBlock(block: TranscriptBlock, index: number): React.ReactNode {
-  if (block.type === "toolCall") return <details key={index}><summary>{`[Tool call: ${block.name}${block.intent ? ` — ${block.intent}` : ""}]`}</summary><pre style={{ overflowX: "auto" }}><code>{JSON.stringify(block.arguments, null, 2)}</code></pre></details>;
+/**
+ * One transcript block.
+ *
+ * A tool *request* block is only allowed to disappear when the transcript is
+ * already showing the execution it belongs to. `represented` is the set of
+ * tool-call ids that have a result row in the list being rendered, and its
+ * absence — or an id not in it — means the request is the ONLY record of that
+ * call, so it must be rendered. Suppressing unconditionally cost a reader of
+ * saved history and of a host-shared journal the only trace of the call, which is
+ * the information loss this branch exists to avoid.
+ */
+function renderTranscriptBlock(block: TranscriptBlock, index: number, represented?: ReadonlySet<string>): React.ReactNode {
+  if (block.type === "toolCall") {
+    // `id` is the wire pairing key (`collab-protocol/src/types.ts:33`). Without one
+    // the request cannot be matched to a result, so it is always shown.
+    if (block.id !== undefined && represented?.has(block.id)) return null;
+    return <details key={index}><summary>{`[Tool call: ${block.name}${block.intent ? ` — ${block.intent}` : ""}]`}</summary><pre style={{ overflowX: "auto" }}><code>{JSON.stringify(block.arguments, null, 2)}</code></pre></details>;
+  }
   if (block.type === "image") return block.dataUrl ? <img key={index} src={block.dataUrl} alt="Attachment" style={{ maxWidth: "100%" }} /> : <p key={index}>{block.label}</p>;
   if (block.type === "notice") return <p key={index}>{block.text}</p>;
   return <React.Fragment key={index}>{renderMarkdown(block.text)}</React.Fragment>;

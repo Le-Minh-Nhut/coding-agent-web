@@ -23,6 +23,7 @@ vi.mock("../../apps/web/src/api.js", () => ({
     getMe: vi.fn(),
     getCapabilities: vi.fn(),
     getRuntime: vi.fn(),
+      getAgentLimit: vi.fn(),
     listProjects: vi.fn(),
     updateProject: vi.fn(),
   },

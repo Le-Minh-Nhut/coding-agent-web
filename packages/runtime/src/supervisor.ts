@@ -28,8 +28,16 @@ export interface SupervisorOptions {
   store: ConversationRuntimeStore;
   adapters: RuntimeAdapters;
   clock?: RuntimeClock;
-  /** How many agents may run at once. */
-  maxActive: number;
+  /**
+   * How many agents may run at once.
+   *
+   * A function is read afresh at each admission, so raising or lowering the limit
+   * from the settings API takes effect on the next launch with no restart and no
+   * re-registration. It is read inside the serialized launch section, after the
+   * occupancy count, so the number compared against is the one in force at the
+   * moment of the decision.
+   */
+  maxActive: number | (() => number);
   /** How long to wait for a launched agent to publish itself to the registry. */
   publishTimeoutMs?: number;
   /** Poll interval while waiting for a registry row. */
@@ -632,6 +640,7 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
         const host = conversation.nativeSessionId
           ? hosts.find((row) => row.sessionId === conversation.nativeSessionId) ?? null
           : null;
+        const maxActive = typeof options.maxActive === "function" ? options.maxActive() : options.maxActive;
         const verdict = launchVerdict({
           liveTmux: liveTmux?.alive ? liveTmux : null,
           host,
@@ -640,8 +649,8 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
           activeCountUnknown: !managedResult.ok,
           activeCountReason: managedResult.ok
             ? null
-            : `The running agents could not be enumerated (${managedResult.reason}), so the limit of ${options.maxActive} cannot be enforced.`,
-          maxActive: options.maxActive,
+            : `The running agents could not be enumerated (${managedResult.reason}), so the limit of ${maxActive} cannot be enforced.`,
+          maxActive,
         });
         if (!verdict.allowed) {
           await options.store.recordEvent(conversationId, "launch.refused", { code: verdict.code, message: verdict.message });

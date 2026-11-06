@@ -39,6 +39,7 @@ import { createAuthenticationService } from "./auth.js";
 import { buildApp } from "./app.js";
 import { WorkspacePathPolicy } from "./path-policy.js";
 import { redactLogValue } from "./logger.js";
+import { createAgentLimit } from "./agent-limit.js";
 import { createMetadataStore } from "./store.js";
 
 /**
@@ -440,9 +441,15 @@ const capabilityService = new DefaultCapabilityService({
 });
 
 // ── Supervisor ──────────────────────────────────────────────────────────────
+// The limit the supervisor reads at each admission. Loaded from the journal
+// before the supervisor can admit anything, so a persisted setting is in force
+// from the first launch after a restart rather than reverting to the env default.
+const agentLimit = createAgentLimit({ store, fallback: config.maxActiveAgents });
+await agentLimit.load();
+
 const supervisor = createSupervisor({
   store,
-  maxActive: config.maxActiveAgents,
+  maxActive: () => agentLimit.current().limit,
   adapters: {
     listHosts: () =>
       registry.list().then((hosts) => hosts
@@ -580,6 +587,7 @@ const canonicalProjectPath = async (projectPath: string) => {
 const app = buildApp({
   config,
   auth,
+  agentLimit,
   store,
   paths,
   capabilities: capabilityService,

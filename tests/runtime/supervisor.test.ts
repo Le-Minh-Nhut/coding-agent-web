@@ -2348,3 +2348,103 @@ describe("supervisor.refresh", () => {
     expect(conversation?.statusDetail).toBe("Agent launch was refused: No active slots");
   });
 });
+
+// ── A changeable limit ──────────────────────────────────────────────────────
+//
+// The limit is read at each admission rather than captured at construction, so
+// the settings API can move it without a restart. These pin the two properties
+// that makes it safe: the change lands on the next launch, and the number the
+// admission compares against is the one in force *at that moment* — including
+// when several launches are in flight at once.
+describe("supervisor.start with a live agent limit", () => {
+  it("reads a changeable limit afresh at each admission", async () => {
+    const world = makeWorld();
+    world.seed({ id: "c1", state: "stopped" });
+    world.seed({ id: "c2", state: "stopped" });
+    world.seed({ id: "c3", state: "stopped" });
+    const limit = { value: 1 };
+    const supervisor = createSupervisor({
+      store: world.store, adapters: world.adapters, clock: instantClock,
+      maxActive: () => limit.value, publishTimeoutMs: 0,
+    });
+
+    // One slot: the first launch is admitted, the second is refused.
+    await supervisor.start("c1", { conversationId: "c1", name: "caw-c1", cwd: "/tmp/project" });
+    await expect(supervisor.start("c2", { conversationId: "c2", name: "caw-c2", cwd: "/tmp/project" }))
+      .rejects.toMatchObject({ code: "conflict_limit" });
+    expect(world.launches).toHaveLength(1);
+
+    // Raising the limit admits the next launch with no rebuild and no restart.
+    limit.value = 3;
+    await supervisor.start("c2", { conversationId: "c2", name: "caw-c2", cwd: "/tmp/project" });
+    expect(world.launches).toHaveLength(2);
+
+    // Lowering it back below occupancy refuses the next one while leaving the two
+    // running agents alone: nothing was killed, and no new slot opened.
+    limit.value = 1;
+    await expect(supervisor.start("c3", { conversationId: "c3", name: "caw-c3", cwd: "/tmp/project" }))
+      .rejects.toMatchObject({ code: "conflict_limit" });
+    expect(world.launches).toHaveLength(2);
+    expect(world.kills).toHaveLength(0);
+  });
+
+  it("admits exactly the limit under concurrent launch requests", async () => {
+    const world = makeWorld();
+    const ids = ["c1", "c2", "c3", "c4", "c5", "c6"];
+    for (const id of ids) world.seed({ id, state: "stopped" });
+    const supervisor = createSupervisor({
+      store: world.store, adapters: world.adapters, clock: instantClock,
+      maxActive: () => 3, publishTimeoutMs: 0,
+    });
+
+    // Every request starts in the same tick, which is the race a second browser tab
+    // produces. The launch lock has to serialize them so three is three, not four.
+    const results = await Promise.allSettled(
+      ids.map((id) => supervisor.start(id, { conversationId: id, name: `caw-${id}`, cwd: "/tmp/project" })),
+    );
+    const admitted = results.filter((result) => result.status === "fulfilled");
+    const refused = results.filter((result) => result.status === "rejected");
+    expect(admitted).toHaveLength(3);
+    expect(refused).toHaveLength(3);
+    for (const result of refused) {
+      expect((result as PromiseRejectedResult).reason).toMatchObject({ code: "conflict_limit" });
+    }
+    expect(world.launches).toHaveLength(3);
+  });
+
+  it("does not treat a reattach to a live session as a second admission", async () => {
+    const world = makeWorld();
+    world.seed({ id: "c1", state: "stopped" });
+    const supervisor = createSupervisor({
+      store: world.store, adapters: world.adapters, clock: instantClock,
+      maxActive: () => 1, publishTimeoutMs: 0,
+    });
+
+    await supervisor.start("c1", { conversationId: "c1", name: "caw-c1", cwd: "/tmp/project" });
+    const launchedOnce = world.launches.length;
+
+    // Reattaching means re-reading the live session, not starting it again. A
+    // conversation that is already running occupies exactly one slot: the count is
+    // one, not two, so a limit of one still has no room — and no second process
+    // was created by the re-read.
+    await expect(supervisor.refresh("c1")).resolves.toBeTruthy();
+    await expect(supervisor.activeCount()).resolves.toMatchObject({ count: 1 });
+    expect(world.launches.length).toBe(launchedOnce);
+
+    // And a *second* start of the same live conversation is refused outright: the
+    // one-writer guard fires before concurrency is even consulted.
+    await expect(supervisor.start("c1", { conversationId: "c1", name: "caw-c1", cwd: "/tmp/project" }))
+      .rejects.toThrow(/already running/i);
+    expect(world.launches.length).toBe(launchedOnce);
+  });
+
+  it("still accepts a plain number, so existing callers are unchanged", async () => {
+    const world = makeWorld();
+    world.seed({ id: "c1", state: "stopped" });
+    world.seed({ id: "c2", state: "stopped" });
+    const supervisor = createSupervisor({ store: world.store, adapters: world.adapters, clock: instantClock, maxActive: 0, publishTimeoutMs: 0 });
+    await expect(supervisor.start("c1", { conversationId: "c1", name: "caw-c1", cwd: "/tmp/project" }))
+      .rejects.toMatchObject({ code: "conflict_limit" });
+    expect(world.launches).toHaveLength(0);
+  });
+});

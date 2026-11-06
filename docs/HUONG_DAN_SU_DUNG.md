@@ -37,6 +37,7 @@ Tài liệu dành cho người mới dùng Coding Agent Web (CAW) trên Ubuntu c
 31. [Chỉ báo Advisor](#31-chỉ-báo-advisor)
 32. [Điều hướng và nút Back](#32-điều-hướng-và-nút-back)
 33. [Giới hạn đã biết](#33-giới-hạn-đã-biết)
+34. [Giới hạn số agent chạy song song (Agent limits)](#34-giới-hạn-số-agent-chạy-song-song-agent-limits)
 
 ## 1. Giới thiệu
 
@@ -406,10 +407,10 @@ Chấm tròn đổi màu: xanh khi kết nối đang tốt, vàng khi đang kế
 
 | Chip | Khi nào hiện | Chạm để làm gì |
 | --- | --- | --- |
-| `Adv ⚠` | Có **ít nhất một ghi chú mức `blocker` đã được ghi lại** trong session này | Mở panel Advisor |
+| `Adv ⚠` | Còn **ít nhất một blocker chưa được gỡ** trong session này (blocker đã gỡ thì chip tắt) | Mở panel Advisor |
 | `Vibe ● n` | Chế độ Vibe đang **bật** (đọc từ tiến trình); `n` = số worker **đã xác minh**, và chỉ được in khi n > 0 | Mở panel Vibe mode |
 
-Chip `Adv ⚠` chỉ hiện khi có **một blocker đã được ghi lại**, chứ không phải cảnh báo đang chạy: transport hiện tại không báo được advisor đang bật hay tắt, nên chip không khẳng định điều đó. Số ghi chú đầy đủ nằm ở mục **Advisor (n)** trong menu **⋯**, nên không mất thông tin nào khi chip không hiện (xem [24.6](#246-advisor-ghi-chú-và-chip) và [chương 31](#31-chỉ-báo-advisor)). Chip `Vibe` chỉ hiện khi chế độ đang bật — trạng thái "tắt" là mặc định nên không đáng chiếm chỗ. Cả hai panel luôn mở được từ menu **⋯** dù chip có hiện hay không (xem [chương 22](#22-advisor--mô-hình-review-thứ-hai) và [chương 23](#23-vibe-mode--director-và-worker)).
+Chip `Adv ⚠` chỉ hiện khi còn **một blocker ĐANG ĐỨNG** (chưa có bằng chứng gỡ), chứ không phải cảnh báo đang chạy: transport hiện tại không báo được advisor đang bật hay tắt, nên chip không khẳng định điều đó. Blocker đã được gỡ thì chip tắt. Số ghi chú đầy đủ nằm ở mục **Advisor (n)** trong menu **⋯**, nên không mất thông tin nào khi chip không hiện (xem [24.6](#246-advisor-ghi-chú-và-chip) và [chương 31](#31-chỉ-báo-advisor)). Chip `Vibe` chỉ hiện khi chế độ đang bật — trạng thái "tắt" là mặc định nên không đáng chiếm chỗ. Cả hai panel luôn mở được từ menu **⋯** dù chip có hiện hay không (xem [chương 22](#22-advisor--mô-hình-review-thứ-hai) và [chương 23](#23-vibe-mode--director-và-worker)).
 
 **Menu ⋯ (More actions).** Các thao tác phụ nằm trong menu này, mỗi mục một lần chạm:
 
@@ -627,7 +628,7 @@ Chạm vào dòng đó để mở toàn bộ nội dung, tên advisor đã nói,
 
 Các ghi chú advisor **không bị mất** khi lịch sử được phát lại (replay) hay khi context bị nén (compaction): chúng là một dòng transcript như mọi dòng khác, nên vẫn còn trong **History** và khi xem lại phiên đã lưu.
 
-**Chip `Adv ⚠` trên thanh trên.** Chip **chỉ** xuất hiện khi phiên này có **ít nhất một ghi chú mức `blocker` đã được ghi lại**; nó không hiện chỉ vì có ghi chú mức thấp hơn. Chạm chip để mở panel Advisor. Số ghi chú đầy đủ nằm ở mục **Advisor (n)** trong menu **⋯**, nên không có thông tin nào bị mất khi chip vắng mặt (xem [chương 31](#31-chỉ-báo-advisor)).
+**Chip `Adv ⚠` trên thanh trên.** Chip **chỉ** xuất hiện khi phiên này còn **ít nhất một blocker đang đứng** (chưa có bằng chứng gỡ); nó không hiện chỉ vì có ghi chú mức thấp hơn, và tắt khi blocker đã được gỡ. Chạm chip để mở panel Advisor. Số ghi chú đầy đủ nằm ở mục **Advisor (n)** trong menu **⋯**, nên không có thông tin nào bị mất khi chip vắng mặt (xem [chương 31](#31-chỉ-báo-advisor)).
 
 **Panel Advisor** (menu **⋯ → Advisor**) cho bạn:
 
@@ -845,9 +846,10 @@ Transcript
 
 Ghi chú advisor hiện dưới dạng **dòng gọn** trong chat (`⚠ Advisor · Concern ›`), mở ra xem đầy đủ; mức **blocker** hiện **màu đỏ** và **nội dung được in ngay cả khi chưa mở**.
 
-Chip trên thanh trên **chỉ** hiện khi có **một blocker đã được ghi lại** (`Adv ⚠`), **không** phải trạng thái runtime và **không** phải một con số đứng thường trực:
+Chip trên thanh trên **chỉ** hiện khi còn **một blocker đang đứng** (`Adv ⚠`), **không** phải trạng thái runtime và **không** phải một con số đứng thường trực:
 
-- Chip cho biết **đã từng có một blocker được ghi**, không có nghĩa advisor **đang bật**, và chắc chắn không có nghĩa đang có gì sai **lúc này** (transport hiện tại không báo được trạng thái đó).
+- Chip cho biết **còn một blocker chưa được gỡ**, không có nghĩa advisor **đang bật**, và chắc chắn không có nghĩa đang có gì sai **lúc này** (transport hiện tại không báo được trạng thái đó).
+- Blocker đã được gỡ (theo [31.4](#314-vòng-đời-của-một-vấn-đề-issue-lifecycle)) thì **chip tắt** — chip không còn sáng mãi vì một blocker lịch sử.
 - **Số ghi chú** đầy đủ nằm ở mục `Advisor (n)` trong menu **⋯** — nhãn đọc cho screen reader ghi rõ "N recorded notes".
 - Bật/tắt advisor vẫn phải làm trong **terminal** của phiên (xem [chương 22](#22-advisor--mô-hình-review-thứ-hai) và [chương 31](#31-chỉ-báo-advisor)).
 
@@ -998,7 +1000,7 @@ Nếu agent **rời roster** khi bạn đang mở chi tiết, màn hình ghi **"
 
 ### 25.7 Advisor và Vibe — chip và nơi điều khiển
 
-**Chip `Adv ⚠` là dấu rằng có một blocker ĐÃ ĐƯỢC GHI LẠI, không phải cảnh báo đang chạy.** Nhãn đọc cho screen reader nói đúng điều đó ("recorded a blocker among N notes"), và dấu `⚠` chỉ đánh dấu rằng **trong số ghi chú đã ghi** có một cái mức blocker — không phải "advisor đang báo động lúc này". Transport hiện tại **không** cho biết advisor đang bật hay tắt, nên chip không khẳng định điều đó. Số ghi chú đầy đủ nằm ở mục **Advisor (n)** trong menu **⋯** (xem [chương 31](#31-chỉ-báo-advisor)).
+**Chip `Adv ⚠` là dấu rằng còn một blocker ĐANG ĐỨNG, không phải cảnh báo đang chạy.** Nhãn đọc cho screen reader nói đúng điều đó ("N advisor blockers still open among M notes"), và dấu `⚠` chỉ đánh dấu rằng **còn một vấn đề mức blocker chưa được gỡ** — không phải "advisor đang báo động lúc này". Gỡ được thì chip tắt. Transport hiện tại **không** cho biết advisor đang bật hay tắt, nên chip không khẳng định điều đó. Số ghi chú đầy đủ nằm ở mục **Advisor (n)** trong menu **⋯** (xem [chương 31](#31-chỉ-báo-advisor)).
 
 **Chip `Vibe ● n` chỉ hiện khi chế độ đang bật** (đọc từ tiến trình OMP). Khi hiện, `n` là số **worker đã được xác minh**, không phải toàn bộ roster — nên một subagent lẻ không bị đếm thành "1 worker". Khi chế độ tắt (mặc định), không có chip.
 
@@ -1346,11 +1348,12 @@ Entry của menu mang `conversationId`: một entry do **hội thoại khác** �
 
 ### 31.1 Chip trên thanh trên
 
-**Chip `Adv ⚠` chỉ hiện khi có một ghi chú mức `blocker` đã được ghi lại**, và nó là chip duy nhất của Advisor:
+**Chip `Adv ⚠` chỉ hiện khi còn một blocker `blocker` ĐANG ĐỨNG** — tức blocker chưa có bằng chứng gỡ, và nó là chip duy nhất của Advisor:
 
-- Nhãn trợ năng đọc đúng sự thật: *"Advisor recorded a blocker among N notes."* — quá khứ, đã ghi lại.
+- Nhãn trợ năng đọc đúng sự thật: *"N advisor blockers still open among M notes."*
 - Chạm chip mở panel Advisor.
 - **Số N nằm ở menu, không ở chip.** Mục menu là `Advisor (n)` với nhãn trợ năng *"Advisor (N recorded notes)"*. Nhờ vậy không mất thông tin nào khi chip bị ẩn.
+- Blocker **đã được gỡ** (theo quy tắc ở [31.4](#314-vòng-đời-của-một-vấn-đề-issue-lifecycle)) hoặc **không xác định được** thì **không** làm chip sáng lên. Đây là điều đổi so với các vòng trước: trước đây chỉ cần *có* một blocker trong lịch sử là chip hiện mãi, kể cả sau khi vấn đề đã được xử lý.
 
 ### 31.2 Ghi chú lịch sử **không** phải cảnh báo đang chạy
 
@@ -1358,7 +1361,29 @@ Một con số ghi chú đứng thường trực (`Adv 3`) sẽ đọc thành "a
 
 - Transport hiện tại **không** mang trạng thái bật/tắt của advisor. Một ghi chú chứng minh advisor **đã chạy**; nó không nói advisor **đang** chạy.
 - Ghi chú là các mục OMP đã viết **vào transcript** — có thể đã vài phút hoặc vài giờ.
-- Vì vậy cờ nội bộ dùng để hiện chip chỉ được phép mang nghĩa "**một blocker đã được ghi lại**", không bao giờ "**có gì đó sai ngay bây giờ**".
+- Vì vậy cờ nội bộ dùng để hiện chip chỉ được phép mang nghĩa "**một blocker vẫn đang mở**", không bao giờ "**có gì đó sai ngay bây giờ**".
+
+### 31.4 Vòng đời của một vấn đề (issue lifecycle)
+
+Mỗi ghi chú advisor được CAW theo dõi như một **vấn đề** có định danh ổn định và một **trạng thái suy ra từ transcript**, không phải từ lời văn:
+
+| Trạng thái | Nghĩa | Bằng chứng cần |
+|---|---|---|
+| `Unresolved` | Chưa có gì nói vấn đề đã xong. **Mặc định.** | Không cần — im lặng không phải là đã sửa |
+| `Claimed fixed, unverified` | Có người nói đã sửa, chưa ai xác minh | Một câu khẳng định đã sửa (bằng chứng yếu nhất) |
+| `Resolved` | Đã có xác minh về đúng vấn đề này | Một verification trỏ đúng vấn đề và đạt |
+| `Reopened` | Từng resolved, bằng chứng mới phủ định | Một lần tái hiện thất bại sau đó |
+| `Not determinable` | Không lập được định danh | Không bao giờ dùng để kết luận gì |
+
+**Ba quy tắc không nhượng bộ, vì đây là chỗ dễ nói dối nhất:**
+
+1. **Nói "đã sửa" KHÔNG phải là đã sửa.** Một câu khẳng định chỉ đưa vấn đề tới `Claimed fixed, unverified` và **dừng ở đó**. Chip vẫn sáng.
+2. **Một test pass KHÔNG gỡ được một ghi chú advisor.** Exit code 0 nói lệnh đã chạy xong; nó không nói lệnh đó kiểm tra đúng vấn đề này. Không có trường nào trên transport gắn kết quả với một ghi chú, nên CAW **không** tự suy ra `Resolved` từ một test xanh.
+3. **Một lần thất bại sau đó mở lại vấn đề**, kể cả khi trước đó đã resolved.
+
+**Định danh vấn đề:** tên advisor + văn bản ghi chú (chuẩn hoá chỉ theo chữ hoa/thường và khoảng trắng). Đổi cách diễn đạt một vấn đề tạo ra **vấn đề mới** thay vì thừa hưởng trạng thái cũ — hướng sai an toàn. Cùng văn bản từ **hai advisor khác nhau** là **hai vấn đề**. Ghi chú lặp lại là **một** vấn đề, giữ mức **nặng hơn**.
+
+Panel Advisor còn liệt kê thẳng **những gì nó không thể kiểm tra** (mục *"What this view cannot verify"*) — ví dụ: không có trường trạng thái trên wire, không gắn được kết quả test với một ghi chú. Liệt kê ra thay vì để người đọc tưởng rằng những mục đó đã được kiểm và đạt.
 
 ### 31.3 Mức và cách đọc
 
@@ -1409,3 +1434,65 @@ Nói thẳng những gì **chưa** được xác minh, để không có chương
 - **Số dòng gutter có thể trống.** CAW chỉ vẽ số khi gutter của host mang nó; số còn lại để trống thay vì tính bằng một offset host không gửi. Header `@@` chỉ được dựng khi **mọi** dòng của hunk khớp với dự đoán — một số dòng sai trong patch nguy hiểm hơn một patch không có số.
 - **Ảnh chụp trong chương này là ảnh của vòng kiểm thử này, không phải ảnh baseline đã track từ trước.** `agent-detail-chat.png`, `diff-colors-fixed.png`, `tool-activity-flat.png` được ghi bởi các spec E2E tương ứng ở viewport 390×844; `round54-agents-layer.png` là ảnh vòng 54 dùng lại cho lớp Agents Center (cách vào lớp này không đổi).
 - **Files Center và menu hành động không có ảnh chụp trong vòng này** — hai bộ spec của chúng chỉ đo DOM/thứ tự Tab và không ghi ảnh. Các mục tương ứng ở trên vì vậy không có hình minh hoạ.
+
+## 34. Giới hạn số agent chạy song song (Agent limits)
+
+### 34.1 Đặt ở đâu
+
+**Settings → Agent limits.** Thẻ này hiển thị:
+
+- **Đang chạy: n / giới hạn** — số slot đang bị chiếm trên tổng số cho phép.
+- Ô nhập kèm hai nút **−** và **+** để chỉnh giới hạn.
+- **Nguồn giá trị:** `Persisted setting` (bạn đã lưu) hoặc `Server default (3)` (mặc định của máy chủ).
+- **Dải hợp lệ** (ví dụ `1–100`) lấy từ chính máy chủ, không phải con số trang trí. Nút **−**/**+** tự khoá ở hai đầu dải.
+- **Thay đổi đang chờ** hiện riêng khỏi giá trị đã lưu: `Pending change: 3 → 5`. Chưa bấm **Save changes** thì **chưa có gì được gửi đi**.
+- **Kết quả lưu** hiện rõ thành công (`Limit saved. Effective now: N.`) hoặc lỗi. Nếu lưu **thất bại**, giá trị bạn đang gõ **được giữ nguyên** để thử lại, không bị xoá trắng.
+
+### 34.2 Con số này là thật, không phải để trưng
+
+Giới hạn được **máy chủ thi hành tại thời điểm cấp phát slot**, không phải một tuỳ chọn hiển thị:
+
+- Server đọc giới hạn **tại mỗi lần xin chạy agent**, ngay bên trong vùng đã được tuần tự hoá của bộ cấp phát. Đổi giới hạn có hiệu lực **ở lần chạy kế tiếp**, **không cần restart**.
+- Giá trị lưu trong journal metadata (`settings:maxActiveAgents`), nên sống qua: refresh Safari, mất mạng, đóng trình duyệt, restart backend, restart `systemd`, reboot Ubuntu.
+- **Thứ tự ưu tiên:** giá trị đã lưu trong app **thắng** biến môi trường/khởi động. `CAW_MAX_ACTIVE_AGENTS` (mặc định 3) chỉ là giá trị cho một cài đặt mới tinh — nó **không** phải trần. Không có trần thứ hai nào ngoài dải hợp lệ.
+
+### 34.3 Tăng và giảm giới hạn
+
+**Tăng (ví dụ 3 → 5):** cho phép tới 5 agent sau khi lưu. CAW **không** tự khởi động thêm agent nào.
+
+**Giảm (ví dụ 5 → 2 khi đang có 4 agent chạy):**
+
+- Agent đang chạy **không bị kill, không bị restart, không bị detach** — kể cả bạn hạ giới hạn xuống dưới số đang chạy.
+- Thẻ này ghi rõ: *"N agents are running, above this limit. They are left alone; no new agent can start until the count drops below M."*
+- Giới hạn mới chỉ chặn **lượt cấp phát tiếp theo**.
+
+### 34.4 Đếm cái gì (và không đếm cái gì)
+
+Giới hạn này áp cho **các tiến trình OMP chính do CAW quản lý**. Nó **không** đếm:
+
+- **Subagent bên trong một session** (OMP tự quản lý) — không thay đổi.
+- **Vibe worker** — không thay đổi.
+- **Hội thoại đã lưu trong History** — một dòng lịch sử không chiếm slot.
+
+Mở lại một session đang chạy (reattach) **không** bị tính là một lượt cấp phát mới.
+
+### 34.5 `unknown` không phải số 0
+
+Nếu CAW **không đếm được** tiến trình đang chạy (tmux không đọc được), thẻ ghi ***unknown***, **không** ghi `0`. `0` sẽ là một lời khẳng định "máy đang rảnh" mà dữ liệu không đỡ được, và sẽ mời bạn chạy thêm agent. Chỉ trạng thái `unknown` mới đọc đúng sự thật là "chưa đếm được".
+
+### 34.6 An toàn và tranh chấp (race)
+
+- **Cần đăng nhập** cho cả đọc và ghi. Yêu cầu chưa xác thực trả **401**.
+- Máy chủ **tự kiểm tra** giá trị: số nguyên, nằm trong dải; `0`, `101`, `3.5`, `"3"`, `null`, `true` đều bị **từ chối** (`invalid_setting`), **không** bị kẹp về một con số khác (kẹp lại sẽ khiến cài đặt nói dối về điều nó thi hành).
+- Một giá trị bị từ chối **không thay đổi gì** đang có hiệu lực.
+- **Nhiều tab cùng lúc:** bộ cấp phát giữ một hàng đợi khoá, nên giới hạn 3 với 6 yêu cầu chạy đồng thời **luôn** cấp đúng 3, không bao giờ 4. Đã có regression test cho đúng ca này.
+
+### 34.7 Kiểm chứng
+
+Có script kiểm chứng trong repo, chạy được và lặp lại được:
+
+```bash
+node scripts/verify-agent-limit.mjs
+```
+
+Script tự dựng server riêng ở cổng **8799** (relay **8798**), **không** đụng vào bản đang chạy thật, và **không** khởi động agent nào. Nó kiểm qua HTTP thật: mặc định `3` → đặt `7` (nguồn thành `setting`) → gửi `9999` bị **từ chối** → **khởi động lại tiến trình** → vẫn ra `7` → yêu cầu chưa đăng nhập bị **401**. Kết quả đã chạy trong vòng này: `PASS: limit is real, validated, and persists across restart`.

@@ -156,7 +156,17 @@ export function pairToolArguments(messages: readonly ToolActivityRow[]): Map<str
   const byId = new Map<string, Record<string, unknown>>();
   for (const message of messages) {
     for (const block of message.blocks ?? []) {
-      if (block.type === "toolCall" && block.id !== undefined && isRecord(block.arguments)) byId.set(block.id, block.arguments);
+      if (block.type !== "toolCall" || block.id === undefined || !isRecord(block.arguments)) continue;
+      // `intent` is a field of the request block, not of `arguments`. Journals
+      // normally repeat it as `arguments.i` (fixtures/omp-session/native-edge-cases.jsonl),
+      // but when they do not, the request block was its only carrier — and the
+      // conversation view suppresses that block once the result row is on screen.
+      // Copying it under the host's own key keeps it reachable in the tool detail
+      // without inventing a second way to say the same thing.
+      const paired = block.intent !== undefined && block.intent !== "" && block.arguments.i === undefined
+        ? { ...block.arguments, i: block.intent }
+        : block.arguments;
+      byId.set(block.id, paired);
     }
   }
   return byId;

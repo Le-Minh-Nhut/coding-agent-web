@@ -8,6 +8,7 @@ import {
   requireAppServer,
   welcomeFrame,
   createUserMessageEntry,
+  createAssistantMessageEntry,
   type MockCollabHost,
 } from "./fixture.js";
 
@@ -295,7 +296,7 @@ function advisorEntry(id: string, notes: unknown[]) {
   };
 }
 
-test("the Adv chip follows hasBlocker, and the note count stays reachable from the menu", async ({ page }) => {
+test("the Adv chip follows only STANDING blockers, and the note count stays reachable from the menu", async ({ page }) => {
   const host = await open(page);
   const chip = page.locator(".mode-chip--alert");
 
@@ -311,10 +312,16 @@ test("the Adv chip follows hasBlocker, and the note count stays reachable from t
   await expect(page.locator(MENU).getByRole("button", { name: "Advisor (1 recorded note)" })).toBeVisible();
   await page.keyboard.press("Escape");
 
-  // A recorded blocker is the one case that earns the chip.
+  // A blocker still open is the case that earns the chip.
   await host.send(advisorEntry("adv-2", [{ note: "This will corrupt the journal", severity: "blocker" }]));
   await expect(chip).toBeVisible();
-  await expect(chip).toHaveAttribute("aria-label", /recorded a blocker/);
+  await expect(chip).toHaveAttribute("aria-label", /still open/);
+
+  // The honesty case: the agent SAYING it fixed the issue must not clear the
+  // warning. Only evidence that verifies the fix may, and prose is not evidence.
+  await host.send({ t: "entry", entry: createAssistantMessageEntry("claim-1", "I have fixed the journal corruption problem.", Date.now()) });
+  await expect(chip).toBeVisible();
+  await expect(chip).toHaveAttribute("aria-label", /1 advisor blocker still open/);
 });
 
 test("the Files item opens the Files Center layer, and Back returns to an unchanged conversation", async ({ page }) => {

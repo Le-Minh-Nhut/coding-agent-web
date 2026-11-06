@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import { api } from "../api.js";
-import type { RuntimeSnapshot } from "@caw/contracts";
+import type { AgentLimitResponse, RuntimeSnapshot } from "@caw/contracts";
 
 interface SettingsViewProps {
   onBack: () => void;
@@ -25,6 +25,19 @@ export function SettingsView({ onBack, onLogout }: SettingsViewProps) {
   const [passwordMessage, setPasswordMessage] = useState<string | null>(null);
   const [signingOut, setSigningOut] = useState(false);
   const [signOutError, setSignOutError] = useState<string | null>(null);
+
+  /**
+   * The agent concurrency limit.
+   *
+   * `saved` is the server's effective value and `draft` is what the stepper is
+   * showing. They are separate on purpose: a pending change must be visibly
+   * pending, and a failed save must leave the draft alone so the owner can retry
+   * without losing what they typed.
+   */
+  const [limit, setLimitState] = useState<AgentLimitResponse | null>(null);
+  const [limitDraft, setLimitDraft] = useState<number | null>(null);
+  const [limitBusy, setLimitBusy] = useState(false);
+  const [limitNotice, setLimitNotice] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
 
   /**
    * Confirms sign-out only when the session is actually gone. `api.logout` failing
@@ -82,9 +95,51 @@ export function SettingsView({ onBack, onLogout }: SettingsViewProps) {
     else setRuntimeError(res.error.message || "Could not read runtime status.");
   };
 
+  const loadAgentLimit = async (): Promise<void> => {
+    // A rejected call must not escape as an unhandled rejection, and it must not
+    // leave the card claiming a value nobody read. `limit === null` renders
+    // "could not read the current limit", which is what a failure here means.
+    try {
+      const res = await api.getAgentLimit();
+      if (!res?.ok) {
+        setLimitNotice({ kind: "error", text: res?.error?.message || "Could not read the current limit." });
+        return;
+      }
+      setLimitState(res.data);
+      // Adopt the server value as the draft only when the owner has no pending edit.
+      setLimitDraft((current) => (current === null ? res.data.limit : current));
+    } catch (error) {
+      setLimitNotice({ kind: "error", text: error instanceof Error ? error.message : "Could not read the current limit." });
+    }
+  };
+
   useEffect(() => {
     void loadRuntime();
+    void loadAgentLimit();
   }, []);
+
+  /** Clamp to the bounds the server reports, so the stepper cannot offer a value it will refuse. */
+  const clampLimit = (value: number): number => {
+    if (!limit) return value;
+    return Math.min(limit.max, Math.max(limit.min, value));
+  };
+
+  const saveAgentLimit = async (): Promise<void> => {
+    if (!limit || limitDraft === null || limitBusy) return;
+    setLimitBusy(true);
+    setLimitNotice(null);
+    const res = await api.setAgentLimit(limitDraft);
+    setLimitBusy(false);
+    if (!res.ok) {
+      // The draft is deliberately left as the owner set it: a failed save must not
+      // silently discard their choice, and the effective value is unchanged.
+      setLimitNotice({ kind: "error", text: res.error.message || "Could not save the limit." });
+      return;
+    }
+    setLimitState(res.data);
+    setLimitDraft(res.data.limit);
+    setLimitNotice({ kind: "ok", text: `Limit saved. Effective now: ${res.data.limit}.` });
+  };
 
   return (
     <div className="view-container">
@@ -122,18 +177,96 @@ export function SettingsView({ onBack, onLogout }: SettingsViewProps) {
             {passwordMessage && <p role={passwordMessage.startsWith("Password changed") ? "status" : "alert"}>{passwordMessage}</p>}
             <button type="submit" className="primary" disabled={passwordBusy || !currentPassword || newPassword.length < 12}>{passwordBusy ? "Changing…" : "Change password"}</button>
           </form>
-          {/* Active Conversations Capacity */}
+          {/* Agent limits — a real server-enforced setting, not a display preference. */}
           <div className="card">
-            <h3 style={{ marginBottom: "8px", fontSize: "1rem" }}>Capacity</h3>
-            <p style={{ fontSize: "0.95rem" }}>
-              {/* `null` means we could not enumerate running agents. Rendering that
-                  as 0 would claim the machine is idle and invite another launch. */}
-              Active conversations:{" "}
-              <strong>{runtime?.activeCount === null || runtime?.activeCount === undefined ? "unknown" : runtime.activeCount}</strong>{" "}
-              / {runtime?.maxActive ?? 3}
+            <h3 style={{ marginBottom: "4px", fontSize: "1rem" }}>Agent limits</h3>
+            <p style={{ fontSize: "0.82rem", color: "var(--text-muted)", marginBottom: "12px" }}>
+              How many CAW-managed main agents may run at once. Subagents and Vibe workers inside a
+              session are not counted here.
             </p>
-            {runtime?.activeCountReason && (
-              <p style={{ fontSize: "0.8rem", color: "var(--text-muted)", marginTop: "4px" }}>{runtime.activeCountReason}</p>
+
+            {limit === null ? (
+              <p style={{ fontSize: "0.9rem", color: "var(--text-muted)" }}>Could not read the current limit.</p>
+            ) : (
+              <>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px" }}>
+                  <span style={{ fontSize: "0.95rem" }}>
+                    {/* `null` occupancy is "could not count", never "the machine is idle". */}
+                    Active: <strong>{limit.activeCount === null ? "unknown" : limit.activeCount}</strong> / {limit.limit}
+                  </span>
+                  <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                    <button
+                      type="button" className="ghost" aria-label="Decrease limit"
+                      disabled={limitBusy || limitDraft === null || limitDraft <= limit.min}
+                      onClick={() => setLimitDraft((value) => clampLimit((value ?? limit.limit) - 1))}
+                    >
+                      −
+                    </button>
+                    <input
+                      aria-label="Maximum concurrent agents" type="number" inputMode="numeric"
+                      min={limit.min} max={limit.max} value={limitDraft ?? limit.limit}
+                      disabled={limitBusy}
+                      style={{ width: "4.5rem", textAlign: "center" }}
+                      onChange={(event) => {
+                        // An empty field is a pending edit, not a zero: hold the value
+                        // until it parses so clearing the box cannot save `0`.
+                        const raw = Number.parseInt(event.target.value, 10);
+                        setLimitDraft(Number.isFinite(raw) ? clampLimit(raw) : 0);
+                      }}
+                    />
+                    <button
+                      type="button" className="ghost" aria-label="Increase limit"
+                      disabled={limitBusy || limitDraft === null || limitDraft >= limit.max}
+                      onClick={() => setLimitDraft((value) => clampLimit((value ?? limit.limit) + 1))}
+                    >
+                      +
+                    </button>
+                  </div>
+                </div>
+
+                <p style={{ fontSize: "0.78rem", color: "var(--text-muted)", marginTop: "8px" }}>
+                  {limit.source === "setting" ? "Persisted setting" : `Server default (${limit.fallback})`}
+                  {" · "}allowed range {limit.min}–{limit.max}
+                </p>
+
+                {/* Occupancy above the limit is normal after lowering it: running agents
+                    are preserved, and only new launches wait. */}
+                {limit.overLimit && (
+                  <p role="status" style={{ fontSize: "0.8rem", color: "var(--warning-text, #d29922)", marginTop: "6px" }}>
+                    {limit.activeCount} agents are running, above this limit. They are left alone; no new agent
+                    can start until the count drops below {limit.limit}.
+                  </p>
+                )}
+                {limit.activeCountReason && (
+                  <p style={{ fontSize: "0.78rem", color: "var(--text-muted)", marginTop: "6px" }}>{limit.activeCountReason}</p>
+                )}
+
+                {limitDraft !== null && limitDraft !== limit.limit && (
+                  <p role="status" style={{ fontSize: "0.82rem", marginTop: "8px" }}>
+                    Pending change: {limit.limit} → <strong>{limitDraft}</strong>
+                  </p>
+                )}
+
+                <div style={{ display: "flex", alignItems: "center", gap: "10px", marginTop: "12px" }}>
+                  <button
+                    type="button" className="primary"
+                    disabled={limitBusy || limitDraft === null || limitDraft === limit.limit}
+                    onClick={() => void saveAgentLimit()}
+                  >
+                    {limitBusy ? "Saving…" : "Save changes"}
+                  </button>
+                  {limitDraft !== null && limitDraft !== limit.limit && (
+                    <button type="button" className="ghost" disabled={limitBusy} onClick={() => { setLimitDraft(limit.limit); setLimitNotice(null); }}>
+                      Reset
+                    </button>
+                  )}
+                </div>
+                {limitNotice && (
+                  <p role={limitNotice.kind === "ok" ? "status" : "alert"} style={{ fontSize: "0.85rem", marginTop: "8px" }}>
+                    {limitNotice.text}
+                  </p>
+                )}
+              </>
             )}
           </div>
 

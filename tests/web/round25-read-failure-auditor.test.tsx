@@ -5,7 +5,7 @@ import {act,cleanup,render,screen} from '@testing-library/react';
 import {ProjectsView} from '../../apps/web/src/components/ProjectsView.js';
 import {SettingsView} from '../../apps/web/src/components/SettingsView.js';
 import {api} from '../../apps/web/src/api.js';
-vi.mock('../../apps/web/src/api.js',()=>({api:{listProjects:vi.fn(),getRuntime:vi.fn()}}));
+vi.mock('../../apps/web/src/api.js',()=>({api:{listProjects:vi.fn(),getRuntime:vi.fn(),getAgentLimit:vi.fn()}}));
 afterEach(()=>{cleanup();vi.restoreAllMocks();});
 it.each([false,true])('V25 a failed project list must not claim an empty workspace (failure=%s)',async failure=>{
  vi.mocked(api.listProjects).mockResolvedValue(failure?{ok:false,error:{code:'internal',message:'Project store unavailable'}}:{ok:true,data:[]});

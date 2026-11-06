@@ -6,7 +6,7 @@ import {App} from '../../apps/web/src/App.js';
 import {api} from '../../apps/web/src/api.js';
 import {resetMutationQueues} from '../../apps/web/src/mutation-order.js';
 import {resetProjectMutationState} from '../../apps/web/src/components/ProjectsView.js';
-vi.mock('../../apps/web/src/api.js',()=>({api:Object.fromEntries(['getMe','getCapabilities','getRuntime','listProjects','updateProject'].map(k=>[k,vi.fn()])),setCsrfToken:vi.fn()}));
+vi.mock('../../apps/web/src/api.js',()=>({api:Object.fromEntries(['getMe','getCapabilities','getRuntime','getAgentLimit','listProjects','updateProject'].map(k=>[k,vi.fn()])),setCsrfToken:vi.fn()}));
 afterEach(()=>{cleanup();resetMutationQueues();resetProjectMutationState();vi.restoreAllMocks();});
 const deferred=()=>{let resolve!:()=>void;const promise=new Promise<void>(r=>resolve=r);return {resolve,promise};};
 it.each([[false,false],[true,false],[false,true],[true,true]])('V26 favorite feedback survives remount=%s failure=%s',async(remount,failure)=>{
