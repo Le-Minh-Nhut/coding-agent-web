@@ -104,3 +104,36 @@ describe("Agent limits card", () => {
     expect(screen.getByText(/Could not read the current limit/)).toBeTruthy();
   });
 });
+
+// ── Acceptance case 10: the network dies while saving ───────────────────────
+//
+// The save must not report success it did not get, and must not discard the
+// owner's choice, so a retry after the network returns is one tap.
+describe("agent limit save failures", () => {
+  it("reports a thrown network failure and keeps the draft", async () => {
+    vi.mocked(api.getAgentLimit).mockResolvedValue(limitView({ limit: 3 }) as never);
+    // `request()` resolves an ApiResult for HTTP errors but rejects only when
+    // fetch itself throws — the offline case.
+    vi.mocked(api.setAgentLimit).mockRejectedValue(new Error("Network request failed"));
+    await mount();
+
+    fireEvent.click(screen.getByLabelText("Increase limit"));
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Save changes" })); });
+
+    expect(screen.getByRole("alert").textContent).toContain("Network request failed");
+    // The requested value survives for a retry, and no success was claimed.
+    expect(stepper().value).toBe("4");
+    expect(screen.queryByText(/Limit saved/)).toBeNull();
+    expect(screen.getByText(/Pending change: 3 →/)).toBeTruthy();
+  });
+
+  it("does not claim success when the server refuses the value", async () => {
+    vi.mocked(api.getAgentLimit).mockResolvedValue(limitView({ limit: 3 }) as never);
+    vi.mocked(api.setAgentLimit).mockResolvedValue({ ok: false, error: { code: "invalid_setting", message: "out of range" } } as never);
+    await mount();
+    fireEvent.click(screen.getByLabelText("Increase limit"));
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Save changes" })); });
+    expect(screen.queryByText(/Limit saved/)).toBeNull();
+    expect(screen.getByRole("alert")).toBeTruthy();
+  });
+});

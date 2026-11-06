@@ -128,12 +128,23 @@ export function SettingsView({ onBack, onLogout }: SettingsViewProps) {
     if (!limit || limitDraft === null || limitBusy) return;
     setLimitBusy(true);
     setLimitNotice(null);
-    const res = await api.setAgentLimit(limitDraft);
+    // `request()` resolves an ApiResult for an HTTP error, but rejects when fetch
+    // itself throws — the offline case. Both must land as a visible failure: an
+    // unhandled rejection would leave the button stuck on "Saving…" with no
+    // explanation and no way to tell whether the limit changed.
+    let res;
+    try {
+      res = await api.setAgentLimit(limitDraft);
+    } catch (error) {
+      setLimitBusy(false);
+      setLimitNotice({ kind: "error", text: error instanceof Error ? error.message : "Could not save the limit." });
+      return;
+    }
     setLimitBusy(false);
-    if (!res.ok) {
+    if (!res?.ok) {
       // The draft is deliberately left as the owner set it: a failed save must not
       // silently discard their choice, and the effective value is unchanged.
-      setLimitNotice({ kind: "error", text: res.error.message || "Could not save the limit." });
+      setLimitNotice({ kind: "error", text: res?.error?.message || "Could not save the limit." });
       return;
     }
     setLimitState(res.data);
