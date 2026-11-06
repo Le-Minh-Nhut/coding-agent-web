@@ -13,7 +13,7 @@ import { SettingsView } from "../../apps/web/src/components/SettingsView.js";
 import { api } from "../../apps/web/src/api.js";
 
 vi.mock("../../apps/web/src/api.js", () => ({
-  api: { getRuntime: vi.fn(), getAgentLimit: vi.fn(), setAgentLimit: vi.fn() },
+  api: { getConversationEvents: vi.fn().mockResolvedValue({ ok: true, data: { events: [], nextAfter: null, nextBefore: null } }), getRuntime: vi.fn(), getAgentLimit: vi.fn(), setAgentLimit: vi.fn() },
   setCsrfToken: vi.fn(),
 }));
 

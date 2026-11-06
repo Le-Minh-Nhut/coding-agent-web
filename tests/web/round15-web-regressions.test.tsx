@@ -16,6 +16,7 @@ import { resetMutationQueues } from "../../apps/web/src/mutation-order.js";
 
 vi.mock("../../apps/web/src/api.js", () => ({
   api: {
+    getConversationEvents: vi.fn(async () => ({ ok: true, data: { events: [], nextAfter: null, nextBefore: null } })),
     setConversationModel: vi.fn(), restartConversation: vi.fn(), getConversation: vi.fn(),
     getAttachInstructions: vi.fn(), getConversationLink: vi.fn(),
     getConversationHistory: vi.fn().mockResolvedValue({ ok: false, error: { code: "not_found", message: "No history" } }),

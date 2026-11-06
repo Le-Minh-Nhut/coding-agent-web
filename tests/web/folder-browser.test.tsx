@@ -6,6 +6,7 @@ import { FolderBrowser } from "../../apps/web/src/components/FolderBrowser.js";
 import { api } from "../../apps/web/src/api.js";
 vi.mock("../../apps/web/src/api.js", () => ({
   api: {
+    getConversationEvents: vi.fn(async () => ({ ok: true, data: { events: [], nextAfter: null, nextBefore: null } })),
     browse: vi.fn(),
     createDirectory: vi.fn(),
   },
@@ -181,6 +182,7 @@ describe("FolderBrowser", () => {
 
     cleanup();
     vi.clearAllMocks();
+    vi.mocked(api.getConversationEvents).mockResolvedValue({ ok: true, data: { events: [], nextAfter: null, nextBefore: null } });
     vi.mocked(api.browse).mockResolvedValueOnce({ ok: true, data: firstPage });
     await act(async () => { render(<FolderBrowser onSelect={() => {}} onCancel={() => {}} />); });
     vi.mocked(api.browse).mockResolvedValueOnce({ ok: false, error: { code: "path_forbidden", message: "Invalid directory cursor" } });

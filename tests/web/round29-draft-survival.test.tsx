@@ -8,7 +8,7 @@ import { api } from "../../apps/web/src/api.js";
 import { App } from "../../apps/web/src/App.js";
 
 vi.mock("../../apps/web/src/api.js", () => ({
-  api: { getMe: vi.fn(), getCapabilities: vi.fn(), getAgentLimit: vi.fn() },
+  api: { getConversationEvents: vi.fn().mockResolvedValue({ ok: true, data: { events: [], nextAfter: null, nextBefore: null } }), getMe: vi.fn(), getCapabilities: vi.fn(), getAgentLimit: vi.fn() },
   setCsrfToken: vi.fn(),
 }));
 

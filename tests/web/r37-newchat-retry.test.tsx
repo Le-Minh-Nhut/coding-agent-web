@@ -5,7 +5,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { api } from "../../apps/web/src/api.js";
 import { ProjectDetailView } from "../../apps/web/src/components/ProjectDetailView.js";
 
-vi.mock("../../apps/web/src/api.js", () => ({ api: { listProjects: vi.fn(), listConversations: vi.fn(), listNativeSessions: vi.fn(), createConversation: vi.fn(), restartConversation: vi.fn(), attachLiveSession: vi.fn() } }));
+vi.mock("../../apps/web/src/api.js", () => ({ api: { getConversationEvents: vi.fn().mockResolvedValue({ ok: true, data: { events: [], nextAfter: null, nextBefore: null } }), listProjects: vi.fn(), listConversations: vi.fn(), listNativeSessions: vi.fn(), createConversation: vi.fn(), restartConversation: vi.fn(), attachLiveSession: vi.fn() } }));
 afterEach(() => { cleanup(); vi.clearAllMocks(); });
 describe("R37 failed new-chat retry", () => {
   it("refreshes persisted error row after failed launch and retries same id", async () => {

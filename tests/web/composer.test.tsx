@@ -8,6 +8,7 @@ import { CollabSocket, type GuestFrame, type HostFrame } from "@caw/collab-proto
 
 vi.mock("../../apps/web/src/api.js", () => ({
   api: {
+    getConversationEvents: vi.fn(async () => ({ ok: true, data: { events: [], nextAfter: null, nextBefore: null } })),
     getConversation: vi.fn(),
     getAttachInstructions: vi.fn(),
     getConversationLink: vi.fn(),
@@ -19,6 +20,7 @@ vi.mock("../../apps/web/src/api.js", () => ({
 describe("Composer behaviour", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(api.getConversationEvents).mockResolvedValue({ ok: true, data: { events: [], nextAfter: null, nextBefore: null } });
     vi.mocked(api.getConversation).mockResolvedValue({
       ok: true,
       data: {

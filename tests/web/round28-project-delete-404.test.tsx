@@ -19,6 +19,7 @@ import { resetMutationQueues } from "../../apps/web/src/mutation-order.js";
 
 vi.mock("../../apps/web/src/api.js", () => ({
   api: {
+    getConversationEvents: vi.fn(async () => ({ ok: true, data: { events: [], nextAfter: null, nextBefore: null } })),
     listProjects: vi.fn(), updateProject: vi.fn(), deleteProject: vi.fn(), createProject: vi.fn(),
     browse: vi.fn(), createDirectory: vi.fn(),
   },

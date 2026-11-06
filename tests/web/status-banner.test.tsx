@@ -8,6 +8,7 @@ import { openModelSheet, withinModelSheet } from "./model-sheet.js";
 
 vi.mock("../../apps/web/src/api.js", () => ({
   api: {
+    getConversationEvents: vi.fn(async () => ({ ok: true, data: { events: [], nextAfter: null, nextBefore: null } })),
     getConversation: vi.fn(),
     getAttachInstructions: vi.fn(),
     getConversationLink: vi.fn(),
@@ -24,6 +25,7 @@ describe("Connection status banners", () => {
   beforeEach(() => {
     cleanup();
     vi.clearAllMocks();
+    vi.mocked(api.getConversationEvents).mockResolvedValue({ ok: true, data: { events: [], nextAfter: null, nextBefore: null } });
     mockGetConversation.mockResolvedValue({
       ok: true,
       data: {

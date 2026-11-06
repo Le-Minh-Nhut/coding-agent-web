@@ -34,6 +34,7 @@ import { openRecoverySheet, recoveryRecords, recoverySummary, recoveryText } fro
 
 vi.mock("../../apps/web/src/api.js", () => ({
   api: {
+    getConversationEvents: vi.fn(async () => ({ ok: true, data: { events: [], nextAfter: null, nextBefore: null } })),
     getConversation: vi.fn(), getAttachInstructions: vi.fn(), getConversationLink: vi.fn(), getModels: vi.fn(),
     getConversationHistory: vi.fn(), getMe: vi.fn(), getCapabilities: vi.fn(), listProjects: vi.fn(),
     listConversations: vi.fn(), listNativeSessions: vi.fn(),

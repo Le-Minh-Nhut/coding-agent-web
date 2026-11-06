@@ -12,7 +12,7 @@ import { FolderBrowser } from "../../apps/web/src/components/FolderBrowser.js";
 import { ProjectsView } from "../../apps/web/src/components/ProjectsView.js";
 
 vi.mock("../../apps/web/src/api.js", () => ({
-  api: { listProjects: vi.fn(), updateProject: vi.fn(), createProject: vi.fn(), deleteProject: vi.fn(), browse: vi.fn(), createDirectory: vi.fn() },
+  api: { getConversationEvents: vi.fn().mockResolvedValue({ ok: true, data: { events: [], nextAfter: null, nextBefore: null } }), listProjects: vi.fn(), updateProject: vi.fn(), createProject: vi.fn(), deleteProject: vi.fn(), browse: vi.fn(), createDirectory: vi.fn() },
 }));
 
 const project = (id: string, favorite = false) => ({ id, label: id, path: `/work/${id}`, favorite, conversationCount: 0, lastActivityAt: null, createdAt: "", updatedAt: "" });

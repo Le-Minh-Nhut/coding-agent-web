@@ -4,7 +4,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, within } from "@testing-library/react";
 import { ProjectsView } from "../../apps/web/src/components/ProjectsView.js";
 import { api } from "../../apps/web/src/api.js";
-vi.mock("../../apps/web/src/api.js", () => ({ api: { listProjects: vi.fn(), updateProject: vi.fn() } }));
+vi.mock("../../apps/web/src/api.js", () => ({ api: { getConversationEvents: vi.fn().mockResolvedValue({ ok: true, data: { events: [], nextAfter: null, nextBefore: null } }), listProjects: vi.fn(), updateProject: vi.fn() } }));
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 it("V14 stars: another project's flight must not let an older response overwrite a later unstar", async () => {
   const projects = ["A", "B"].map(id => ({id, label:id, path:`/work/${id}`, favorite:false, conversationCount:0, lastActivityAt:null, createdAt:"", updatedAt:""}));

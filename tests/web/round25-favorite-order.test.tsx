@@ -20,6 +20,7 @@ import { resetProjectMutationState } from "../../apps/web/src/components/Project
  */
 vi.mock("../../apps/web/src/api.js", () => ({
   api: {
+    getConversationEvents: vi.fn(async () => ({ ok: true, data: { events: [], nextAfter: null, nextBefore: null } })),
     getMe: vi.fn(),
     getCapabilities: vi.fn(),
     getRuntime: vi.fn(),

@@ -9,7 +9,7 @@ import { ConversationView, autosizeComposer } from "../../apps/web/src/component
 import { MarkdownCodeBlock, renderMarkdown } from "../../apps/web/src/sanitize.js";
 
 vi.mock("../../apps/web/src/api.js", () => ({
-  api: { getConversation: vi.fn(), getAttachInstructions: vi.fn(), getConversationLink: vi.fn(), getConversationHistory: vi.fn().mockResolvedValue({ ok: false, error: { code: "not_found", message: "No history" } }), getModels: vi.fn().mockResolvedValue({ ok: true, data: { models: [], source: "omp", reason: null } }) },
+  api: { getConversation: vi.fn(), getAttachInstructions: vi.fn(), getConversationLink: vi.fn(), getConversationHistory: vi.fn().mockResolvedValue({ ok: false, error: { code: "not_found", message: "No history" } }), getModels: vi.fn().mockResolvedValue({ ok: true, data: { models: [], source: "omp", reason: null } }), getConversationEvents: vi.fn().mockResolvedValue({ ok: true, data: { events: [], nextAfter: null, nextBefore: null } }), },
 }));
 
 let socket: CollabSocket | null = null;
@@ -77,6 +77,7 @@ function promptFrames() {
 describe("mobile reading behavior", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(api.getConversationEvents).mockResolvedValue({ ok: true, data: { events: [], nextAfter: null, nextBefore: null } });
     vi.mocked(api.getConversation).mockResolvedValue({ ok: true, data: {
       id: "c-1", projectId: "p-1", nativeSessionId: null, nativeSessionPath: null, title: "Test", model: "model",
       ownership: "managed", state: "idle", tmuxSessionId: null, tmuxSessionName: null, tmuxServerIdentity: null,

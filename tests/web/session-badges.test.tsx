@@ -8,6 +8,7 @@ import type { Conversation, NativeSessionSummary } from "@caw/contracts";
 
 vi.mock("../../apps/web/src/api.js", () => ({
   api: {
+    getConversationEvents: vi.fn(async () => ({ ok: true, data: { events: [], nextAfter: null, nextBefore: null } })),
     listProjects: vi.fn(),
     listConversations: vi.fn(),
     listNativeSessions: vi.fn(),
@@ -63,6 +64,7 @@ describe("native session liveness badge", () => {
   beforeEach(() => {
     cleanup();
     vi.clearAllMocks();
+    vi.mocked(api.getConversationEvents).mockResolvedValue({ ok: true, data: { events: [], nextAfter: null, nextBefore: null } });
     vi.mocked(api.listConversations).mockResolvedValue({ ok: true, data: [] } as never);
   });
 

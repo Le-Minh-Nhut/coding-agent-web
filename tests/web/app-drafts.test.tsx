@@ -6,7 +6,7 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import { api } from "../../apps/web/src/api.js";
 import { App } from "../../apps/web/src/App.js";
 
-vi.mock("../../apps/web/src/api.js", () => ({ api: { getMe: vi.fn(), getCapabilities: vi.fn() }, setCsrfToken: vi.fn() }));
+vi.mock("../../apps/web/src/api.js", () => ({ api: { getConversationEvents: vi.fn().mockResolvedValue({ ok: true, data: { events: [], nextAfter: null, nextBefore: null } }), getMe: vi.fn(), getCapabilities: vi.fn() }, setCsrfToken: vi.fn() }));
 vi.mock("../../apps/web/src/components/LoginView.js", () => ({
   LoginView: () => React.createElement("div", null, "Login"),
 }));

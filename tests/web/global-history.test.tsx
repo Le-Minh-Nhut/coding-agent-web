@@ -6,7 +6,7 @@ import { HistoryView } from "../../apps/web/src/components/HistoryView.js";
 import { api } from "../../apps/web/src/api.js";
 import type { GlobalSessionSummary } from "@caw/contracts";
 
-vi.mock("../../apps/web/src/api.js", () => ({ api: { listGlobalSessions: vi.fn(), getSavedSessionHistory: vi.fn(), createConversation: vi.fn(), attachLiveSession: vi.fn() } }));
+vi.mock("../../apps/web/src/api.js", () => ({ api: { getConversationEvents: vi.fn().mockResolvedValue({ ok: true, data: { events: [], nextAfter: null, nextBefore: null } }), listGlobalSessions: vi.fn(), getSavedSessionHistory: vi.fn(), createConversation: vi.fn(), attachLiveSession: vi.fn() } }));
 const session = (over: Partial<GlobalSessionSummary> = {}): GlobalSessionSummary => ({ sessionId: "session-1", journalPath: "/journal", cwd: "/work", cwdAvailable: true, projectId: "p1", conversationId: null, title: null, updatedAt: null, startedAt: null, live: false, tracked: false, hasCollabHost: false, relayConnected: null, ...over });
 const page = (sessions: GlobalSessionSummary[], extra = {}) => ({ ok: true as const, data: { sessions, nextCursor: null, filesScanned: 2, truncated: false, excludedOutsideRoots: 0, skippedNonJournal: 0, unreadableJournals: 0, unreadableCwds: 0, ...extra } });
 

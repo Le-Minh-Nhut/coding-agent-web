@@ -8,6 +8,7 @@ import { CollabSocket, type HostFrame, type GuestFrame } from "@caw/collab-proto
 
 vi.mock("../../apps/web/src/api.js", () => ({
   api: {
+    getConversationEvents: vi.fn(async () => ({ ok: true, data: { events: [], nextAfter: null, nextBefore: null } })),
     getConversation: vi.fn(),
     getAttachInstructions: vi.fn(),
     getConversationLink: vi.fn(),
@@ -22,6 +23,7 @@ describe("Approval handling & FIFO queueing", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(api.getConversationEvents).mockResolvedValue({ ok: true, data: { events: [], nextAfter: null, nextBefore: null } });
     sentFrames = [];
     activeSocket = null;
 

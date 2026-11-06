@@ -8,7 +8,7 @@ import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { api } from "../../apps/web/src/api.js";
 import { ProjectsView } from "../../apps/web/src/components/ProjectsView.js";
 import { createMetadataStore } from "../../apps/server/src/store.js";
-vi.mock("../../apps/web/src/api.js", () => ({ api: { listProjects: vi.fn(), updateProject: vi.fn() } }));
+vi.mock("../../apps/web/src/api.js", () => ({ api: { getConversationEvents: vi.fn().mockResolvedValue({ ok: true, data: { events: [], nextAfter: null, nextBefore: null } }), listProjects: vi.fn(), updateProject: vi.fn() } }));
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 it("V17 a late older Rename Save must not overwrite the latest label on the server", async () => {
   const dir = await mkdtemp(join(tmpdir(), "caw-r17-rename-"));

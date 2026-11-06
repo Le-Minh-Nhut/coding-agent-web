@@ -4,7 +4,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { FolderBrowser } from "../../apps/web/src/components/FolderBrowser.js";
 import { api } from "../../apps/web/src/api.js";
-vi.mock("../../apps/web/src/api.js", () => ({ api: { browse: vi.fn(), createDirectory: vi.fn() } }));
+vi.mock("../../apps/web/src/api.js", () => ({ api: { getConversationEvents: vi.fn().mockResolvedValue({ ok: true, data: { events: [], nextAfter: null, nextBefore: null } }), browse: vi.fn(), createDirectory: vi.fn() } }));
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 const listing = (names: string[], cursor: string | null = null) => ({ ok: true as const, data: { path: "/work", parent: null, roots: ["/work"], entries: names.map(name => ({ name, path: `/work/${name}`, isDirectory: true, allowed: true, hasProject: false })), hasMore: cursor !== null, nextCursor: cursor } });
 it("V17 clicking Roots during the initial root load must not invalidate its only completion", async () => {

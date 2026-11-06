@@ -5,7 +5,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { api } from "../../apps/web/src/api.js";
 import { ProjectDetailView } from "../../apps/web/src/components/ProjectDetailView.js";
 
-vi.mock("../../apps/web/src/api.js", () => ({ api: { listProjects: vi.fn(), listConversations: vi.fn(), listNativeSessions: vi.fn(), createConversation: vi.fn(), restartConversation: vi.fn(), attachLiveSession: vi.fn() } }));
+vi.mock("../../apps/web/src/api.js", () => ({ api: { getConversationEvents: vi.fn().mockResolvedValue({ ok: true, data: { events: [], nextAfter: null, nextBefore: null } }), listProjects: vi.fn(), listConversations: vi.fn(), listNativeSessions: vi.fn(), createConversation: vi.fn(), restartConversation: vi.fn(), attachLiveSession: vi.fn() } }));
 const managed = (id: string, ownership: "managed" | "external", state: "error" | "running" | "stopped") => ({ id, projectId: "p1", title: id, nativeSessionId: "native", nativeSessionPath: null, ownership, state, model: null, modelPreference: null, tmuxSessionId: null, tmuxSessionName: null, tmuxServerIdentity: null, tmuxPanePid: null, hostInstanceId: "host", hostGeneration: 1, createdAt: "", updatedAt: "", lastActivityAt: null });
 const session = { sessionId: "native", path: "/tmp/session", cwd: "/tmp", title: "Native", updatedAt: "", live: false, hasCollabHost: false, tracked: true };
 async function mount(conversations: unknown[], onSelect = vi.fn()) {

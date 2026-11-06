@@ -1695,18 +1695,25 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
   useEffect(() => {
     let cancelled = false;
     void (async () => {
-      const result = await api.getConversationEvents(conversationId, { limit: 20 });
-      if (cancelled || !viewActiveRef.current) return;
-      if (!result.ok) return;
-      const events = result.data.events;
-      const committed = [...events].reverse().find((event) => event.type === "handoff-committed");
-      if (committed === undefined) return;
-      // Only a commit with no later start is outstanding: a start after it means
-      // the user has already begun another operation, whose own status is current.
-      const superseded = events.some((event) => event.type === "handoff-start" && event.seq > committed.seq);
-      if (superseded) return;
-      setHandoffNoticeTone("success");
-      setHandoffNotice(handoffCompletedText(handoffCommitEntryId(committed.payload)));
+      try {
+        const result = await api.getConversationEvents(conversationId, { limit: 20 });
+        if (cancelled || !viewActiveRef.current) return;
+        if (!result.ok) return;
+        const events = result.data.events;
+        const committed = [...events].reverse().find((event) => event.type === "handoff-committed");
+        if (committed === undefined) return;
+        // Only a commit with no later start is outstanding: a start after it means
+        // the user has already begun another operation, whose own status is current.
+        const superseded = events.some((event) => event.type === "handoff-start" && event.seq > committed.seq);
+        if (superseded) return;
+        setHandoffNoticeTone("success");
+        setHandoffNotice(handoffCompletedText(handoffCommitEntryId(committed.payload)));
+      } catch {
+        // Best effort by definition: a read that failed is a read with no
+        // evidence, and "no evidence" is the safe answer — it must never become
+        // an unhandled rejection from a background reconciliation, and it must
+        // never invent a completion.
+      }
     })();
     return () => { cancelled = true; };
   }, [conversationId]);

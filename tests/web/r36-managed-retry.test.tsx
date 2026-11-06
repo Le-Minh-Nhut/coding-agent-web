@@ -5,7 +5,7 @@ import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { api } from "../../apps/web/src/api.js";
 import { ProjectDetailView } from "../../apps/web/src/components/ProjectDetailView.js";
 
-vi.mock("../../apps/web/src/api.js", () => ({ api: { listProjects: vi.fn(), listConversations: vi.fn(), listNativeSessions: vi.fn(), createConversation: vi.fn(), restartConversation: vi.fn() } }));
+vi.mock("../../apps/web/src/api.js", () => ({ api: { getConversationEvents: vi.fn().mockResolvedValue({ ok: true, data: { events: [], nextAfter: null, nextBefore: null } }), listProjects: vi.fn(), listConversations: vi.fn(), listNativeSessions: vi.fn(), createConversation: vi.fn(), restartConversation: vi.fn() } }));
 afterEach(() => { cleanup(); vi.clearAllMocks(); });
 const conversation = { id: "failed-id", projectId: "p", title: "Failed chat", ownership: "managed", state: "error", nativeSessionId: null, model: null, modelPreference: null, statusDetail: "Launch failed" } as const;
 const ok = (data: unknown) => ({ ok: true as const, data });

@@ -6,7 +6,7 @@ import { CollabSocket, type HostFrame } from "@caw/collab-protocol";
 import { api } from "../../apps/web/src/api.js";
 import { ConversationView } from "../../apps/web/src/components/ConversationView.js";
 import { recoveryText } from "./recovery-sheet.js";
-vi.mock("../../apps/web/src/api.js", () => ({ api: { getConversation: vi.fn(), getAttachInstructions: vi.fn(), getConversationLink: vi.fn(), getModels: vi.fn() } }));
+vi.mock("../../apps/web/src/api.js", () => ({ api: { getConversationEvents: vi.fn().mockResolvedValue({ ok: true, data: { events: [], nextAfter: null, nextBefore: null } }), getConversation: vi.fn(), getAttachInstructions: vi.fn(), getConversationLink: vi.fn(), getModels: vi.fn() } }));
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 it.each([false, true])("V17 a refused prompt remains recoverable (newer composer draft=%s)", async (hasNewDraft) => {
   vi.mocked(api.getConversation).mockResolvedValue({ ok: true, data: { id: "c", title: "Chat", state: "idle", ownership: "managed" } } as any);

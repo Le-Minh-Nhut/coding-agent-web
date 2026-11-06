@@ -15,6 +15,7 @@ import { ConversationView } from "../../apps/web/src/components/ConversationView
 
 vi.mock("../../apps/web/src/api.js", () => ({
   api: {
+    getConversationEvents: vi.fn(async () => ({ ok: true, data: { events: [], nextAfter: null, nextBefore: null } })),
     getConversation: vi.fn(),
     getAttachInstructions: vi.fn(),
     getConversationLink: vi.fn(),
@@ -93,6 +94,7 @@ const abortFrames = () => sent.filter((frame) => frame.t === "abort");
 describe("stop generating vs stop OMP session", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(api.getConversationEvents).mockResolvedValue({ ok: true, data: { events: [], nextAfter: null, nextBefore: null } });
     Object.defineProperty(globalThis, "crypto", { configurable: true, value: webcrypto });
     Object.defineProperty(globalThis, "WebSocket", { configurable: true, value: RecordingWebSocket as unknown as typeof WebSocket });
     vi.mocked(api.getConversation).mockResolvedValue({ ok: true, data: conversationRecord() as never });

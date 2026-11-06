@@ -4,7 +4,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { App } from "../../apps/web/src/App.js";
 import { api } from "../../apps/web/src/api.js";
-vi.mock("../../apps/web/src/api.js", () => ({ api: { getMe:vi.fn(),getCapabilities:vi.fn(),listProjects:vi.fn(),listConversations:vi.fn(),listNativeSessions:vi.fn(),createConversation:vi.fn() }, setCsrfToken: vi.fn() }));
+vi.mock("../../apps/web/src/api.js", () => ({ api: { getConversationEvents: vi.fn().mockResolvedValue({ ok: true, data: { events: [], nextAfter: null, nextBefore: null } }), getMe:vi.fn(),getCapabilities:vi.fn(),listProjects:vi.fn(),listConversations:vi.fn(),listNativeSessions:vi.fn(),createConversation:vi.fn() }, setCsrfToken: vi.fn() }));
 vi.mock("../../apps/web/src/components/ProjectsView.js", () => ({ ProjectsView: ({onSelectProject}:any) => <div><button onClick={()=>onSelectProject("p1")}>Open P1</button><button onClick={()=>onSelectProject("p2")}>Open P2</button></div>, resetProjectMutationState: () => {} }));
 vi.mock("../../apps/web/src/components/ConversationView.js", () => ({ ConversationView: ({conversationId}:any) => <div data-testid="conversation">Conversation {conversationId}</div> }));
 afterEach(()=>{cleanup();vi.restoreAllMocks();});
