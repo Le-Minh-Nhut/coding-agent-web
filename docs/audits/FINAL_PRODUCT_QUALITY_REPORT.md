@@ -132,12 +132,13 @@ would have been a false rollback artifact.
 
 ## J. Blocked / unverified
 
-- **CI status is reported from the API, not assumed.** Run `42161036708` (for
-  `6836d7d`) was **cancelled** when a later push superseded it in the concurrency
-  group — cancellation is not a pass. The run for the final SHA `29b0b73` is the
-  one that counts; its conclusion is stated in the delivery message for this round
-  rather than guessed here. The last fully completed run, `42114734744` for
-  `7385320`, concluded `success`.
+- **CI: passing for the final SHA.** Run `42162368037` on `51a9e30` completed
+  successfully (run page reports `Success`; the workflow badge for `main` reads
+  `CI - passing`). Earlier runs for `6836d7d`, `420ffce`, `29b0b73`, `3ba6273` and
+  `d00281a` were **cancelled** by the concurrency group when a later push
+  superseded them — cancellation is not a pass, and none of them is reported as
+  one. The gap in coverage is closed by the final run, which contains every commit:
+  `51a9e30`'s tree is the union of the whole round.
 - **No physical iPhone test.** Keyboard behaviour, `safe-area` and iOS tab
   eviction are handled in code and exercised in Chromium at phone viewports, not
   on the device. Physical Safari is unavailable to this session.
