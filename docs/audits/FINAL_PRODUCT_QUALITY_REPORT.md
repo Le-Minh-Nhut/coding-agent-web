@@ -1,7 +1,8 @@
 # Final product quality report — round 56
 
-Commit reported on: **6836d7d** (parent `7385320`). Branch `main`, pushed to
-`origin/main`. Every number below was produced by a command run in this round; a
+Commits reported on: **6836d7d**, **420ffce**, **29b0b73** (parent `7385320`). Branch `main`,
+pushed to `origin/main`. The three are one round: the feature, the report, and an
+audit fix that landed after it. Every number below was produced by a command run in this round; a
 claim that was not measured says so in §J.
 
 ## A. Executive summary
@@ -34,6 +35,7 @@ one in (1); all five are fixed with regressions. Details in §B.
 | AUD-2 | P2 | yes — `"I fixed the retry timeout…"` marked an unrelated note | one shared word was enough | match needs the majority of the note's identifying words, min 2 | AUD-2 | fixed |
 | AUD-3 | P1 | yes — a spoken fix claim cleared the warn chip | chip keyed on any recorded blocker | chip keys on `standingBlockerCount` | AUD-3, `action-menu.spec.ts` | fixed |
 | AUD-4 | P2 | yes — two notes collided on a 32-bit digest and shared one lifecycle | identity was a truncated hash | identity is the full normalized text | AUD-4 | fixed |
+| D3 | P3 | yes — a request whose `arguments` were not a record could be hidden with its only copy | suppression ignored whether the paired card could carry the data | suppression also requires `isRecord(arguments)` | `round56-tool-presentation.test.tsx` (11) | fixed |
 | D2 | P3 | yes — `block.intent` lost when not repeated as `arguments.i` | `pairToolArguments` copied only `arguments` | intent copied under the host's own `i` key | covered by presentation suite | fixed |
 | D4 | P3 | yes — PUT could pair a fresh limit with a stale `overLimit` | occupancy read before the limit was stamped | read occupancy, then stamp the committed limit | `round56-agent-limit.test.ts` | fixed |
 | D5 | P3 | n/a | dead contract fields I had added | removed `AgentLimitUpdateRequest`, `maxActiveSource`, `maxActiveBounds` | typecheck | fixed |
@@ -80,7 +82,7 @@ of the deployed origin, not a screenshot review:
 
 | Suite | Result |
 |---|---|
-| Unit + integration (`npx vitest run`) | **1681 passed, 8 skipped** (189 files; 2 files skipped) |
+| Unit + integration (`npx vitest run`) | **1685 passed, 8 skipped** (189 files; 2 files skipped) |
 | `pnpm -r typecheck` | clean (0 errors, 8 packages) |
 | Chromium E2E (`playwright test --project=chromium`) | **115 passed, 0 failed** |
 
@@ -108,9 +110,9 @@ calls) and they pass.
 
 | Item | Value |
 |---|---|
-| Final Git SHA | `6836d7d` (pushed to `origin/main`) |
-| Deployed revision | backend restarted from `6836d7d` source; frontend `dist` rebuilt from `6836d7d` |
-| JS asset | `assets/index-MuuLYR_f.js`, sha256 `ac545b84eea44fc707f59a5d2dda2b20706ae13fc3d9d82b06a682b2a1bee08c` |
+| Final Git SHA | `29b0b73` (pushed to `origin/main`) |
+| Deployed revision | backend restarted from `6836d7d` source (unchanged by later commits); frontend `dist` rebuilt from `29b0b73` |
+| JS asset | `assets/index-rJMq0QkO.js`, sha256 `694b8970e516494f39313d8d3ac9fa26001a9bd96f3b105637012ed7f3aa90ea` |
 | CSS asset | `assets/index-Cwr45H40.css`, sha256 `9040b1fdf54c0293f20dae907526b114f8d0a75036a41b99afd2165b141036ac` |
 | Served vs disk hash | identical (HTTPS-served bundle byte-matches `apps/web/dist`) |
 | systemd | `active`; `MainPID 3831506` after restart |
@@ -129,9 +131,12 @@ would have been a false rollback artifact.
 
 ## J. Blocked / unverified
 
-- **CI for `6836d7d` was still `in_progress`** when this report was written. Run
-  `42161036708`. The previous revision's run (`42114734744`, `7385320`) concluded
-  `success`; this report does **not** claim the new one passed.
+- **CI status is reported from the API, not assumed.** Run `42161036708` (for
+  `6836d7d`) was **cancelled** when a later push superseded it in the concurrency
+  group — cancellation is not a pass. The run for the final SHA `29b0b73` is the
+  one that counts; its conclusion is stated in the delivery message for this round
+  rather than guessed here. The last fully completed run, `42114734744` for
+  `7385320`, concluded `success`.
 - **No physical iPhone test.** Keyboard behaviour, `safe-area` and iOS tab
   eviction are handled in code and exercised in Chromium at phone viewports, not
   on the device. Physical Safari is unavailable to this session.
