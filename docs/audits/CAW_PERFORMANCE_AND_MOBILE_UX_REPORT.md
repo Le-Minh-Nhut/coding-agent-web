@@ -374,18 +374,21 @@ State as of this commit, with the distinction the repository requires
 | OMP processes preserved | pane pids `1204278`, `2080435`, `2082046` all alive; tmux sessions `$0`, `$1`, `$2` intact |
 | Reachability | origin index HTTP 200; unauthenticated `/api/agent-limit` HTTP 401 (auth intact) |
 
-### Pending at the time of writing
+### CI
+
+| item | result |
+| --- | --- |
+| CI result | **run 108 passed** (`perf(web): compact running header…`, covering `6c33db1` and `2d819d3`). Run 107 also passed. Run 106 reads `cancelled`, which is the expected supersession when a docs commit follows another on the same concurrency group — a cancelled run is not reported as a pass |
+### Blocked
 
 | item | status |
 | --- | --- |
-| CI result for `6c33db1` / `2d819d3` | run 108 started for the perf commit; run 107 (`docs: separate the code-bearing revision from HEAD`) **completed successfully**. The verdict for 108 is recorded in the round's closing note rather than asserted here |
-| Authenticated production UI read | **blocked** — needs the owner's session cookie |
-| Live `/api/agent-limit` authenticated read | **blocked** — needs the owner's session cookie |
-| Physical iPhone Safari / WebKit | **blocked** — no WebKit build present (§I.4) |
+| Authenticated production UI read (logged-in screen, `/api/agent-limit`) | **blocked** — needs the owner's session cookie. The unauthenticated boundary is verified (401); a successful authenticated response was not observed |
+| Physical iPhone Safari / WebKit | **blocked** — no WebKit build present in `~/.cache/ms-playwright` (§I.4) |
 
-This section deliberately does **not** claim a green CI run, a systemd restart, or a
-served-asset match it has not observed. The owner-facing closing message states the
-same distinction.
+Nothing in this section is claimed without having been observed: the served-asset
+match, the CI verdict, the preserved pids and the HTTP codes were each read from the
+live system, and the two blocked items are named as blocked rather than skipped.
 
 ## I — Unresolved limitations
 
