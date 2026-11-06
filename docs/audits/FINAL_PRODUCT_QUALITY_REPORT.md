@@ -165,10 +165,19 @@ would have been a false rollback artifact.
   about the deployed limit: the route is live (`401`, not `404`), and the whole
   policy — bounds, persistence across restart, and the 3-of-6 race — is proven over
   real HTTP by `scripts/verify-agent-limit.mjs` against a server process. The
-  remaining unverified step is the same check wearing the owner's cookie, plus
-  confirming that with 3 agents live a 4th launch refuses `conflict_limit` in
-  production. That last one cannot be tested without attempting a launch, which
-  would risk the running sessions; it is left undone deliberately.
+  remaining unverified step is the same check wearing the owner's cookie. The
+  owner can run it in one line:
+
+  ```bash
+  curl -s -b "<session cookie>" https://heheboiz-legion-5-15arh7.tail8d8eff.ts.net/api/agent-limit
+  ```
+
+  It must report `limit: 3, source: "default"` — which matches the observed state:
+  `caw.config.json` sets `maxActiveAgents: 3`, `metadata.jsonl` holds no `setting`
+  row, and exactly 3 tmux sessions (`$0`, `$1`, `$2`) are live. What is *not* tested
+  is a 4th launch being refused `conflict_limit` in production, because that means
+  actually attempting a launch, which would spend provider credits and race the
+  running sessions; it is left undone deliberately.
 - **The concurrency limit was never exercised against a loaded production service
   from the phone.** The restart, the route, the persistence and the race are all
   verified (unit, E2E, and `scripts/verify-agent-limit.mjs` over real HTTP); what is
