@@ -1,6 +1,6 @@
 # Final product quality report — round 56
 
-Commits reported on: **6836d7d**, **420ffce**, **29b0b73** (parent `7385320`). Branch `main`,
+Commits reported on: **6836d7d**, **420ffce**, **29b0b73**, **3ba6273**, **d00281a** (parent `7385320`). Branch `main`,
 pushed to `origin/main`. The three are one round: the feature, the report, and an
 audit fix that landed after it. Every number below was produced by a command run in this round; a
 claim that was not measured says so in §J.
@@ -35,6 +35,7 @@ one in (1); all five are fixed with regressions. Details in §B.
 | AUD-2 | P2 | yes — `"I fixed the retry timeout…"` marked an unrelated note | one shared word was enough | match needs the majority of the note's identifying words, min 2 | AUD-2 | fixed |
 | AUD-3 | P1 | yes — a spoken fix claim cleared the warn chip | chip keyed on any recorded blocker | chip keys on `standingBlockerCount` | AUD-3, `action-menu.spec.ts` | fixed |
 | AUD-4 | P2 | yes — two notes collided on a 32-bit digest and shared one lifecycle | identity was a truncated hash | identity is the full normalized text | AUD-4 | fixed |
+| D6 | P2 | yes — an offline save left the button on "Saving…" with no message | `api.setAgentLimit` was awaited without a catch, so a thrown fetch escaped | the save path catches and reports it, keeping the draft | `round56-agent-limit-ui.test.tsx` (9) | fixed |
 | D3 | P3 | yes — a request whose `arguments` were not a record could be hidden with its only copy | suppression ignored whether the paired card could carry the data | suppression also requires `isRecord(arguments)` | `round56-tool-presentation.test.tsx` (11) | fixed |
 | D2 | P3 | yes — `block.intent` lost when not repeated as `arguments.i` | `pairToolArguments` copied only `arguments` | intent copied under the host's own `i` key | covered by presentation suite | fixed |
 | D4 | P3 | yes — PUT could pair a fresh limit with a stale `overLimit` | occupancy read before the limit was stamped | read occupancy, then stamp the committed limit | `round56-agent-limit.test.ts` | fixed |
@@ -82,7 +83,7 @@ of the deployed origin, not a screenshot review:
 
 | Suite | Result |
 |---|---|
-| Unit + integration (`npx vitest run`) | **1685 passed, 8 skipped** (189 files; 2 files skipped) |
+| Unit + integration (`npx vitest run`) | **1687 passed, 8 skipped** (189 files; 2 files skipped) |
 | `pnpm -r typecheck` | clean (0 errors, 8 packages) |
 | Chromium E2E (`playwright test --project=chromium`) | **115 passed, 0 failed** |
 
@@ -110,9 +111,9 @@ calls) and they pass.
 
 | Item | Value |
 |---|---|
-| Final Git SHA | `29b0b73` (pushed to `origin/main`) |
-| Deployed revision | backend restarted from `6836d7d` source (unchanged by later commits); frontend `dist` rebuilt from `29b0b73` |
-| JS asset | `assets/index-rJMq0QkO.js`, sha256 `694b8970e516494f39313d8d3ac9fa26001a9bd96f3b105637012ed7f3aa90ea` |
+| Final Git SHA | `d00281a` (pushed to `origin/main`) |
+| Deployed revision | backend restarted from `6836d7d` source (no server file changed after it); frontend `dist` rebuilt from `d00281a` |
+| JS asset | `assets/index-DVGo8aHh.js`, sha256 `39b4433276d3d697d1c677483fa08f52718b4ab14b769044840b9b432fef1435` |
 | CSS asset | `assets/index-Cwr45H40.css`, sha256 `9040b1fdf54c0293f20dae907526b114f8d0a75036a41b99afd2165b141036ac` |
 | Served vs disk hash | identical (HTTPS-served bundle byte-matches `apps/web/dist`) |
 | systemd | `active`; `MainPID 3831506` after restart |
@@ -146,6 +147,10 @@ would have been a false rollback artifact.
   limit, documented rather than papered over: nothing on the wire ties a
   verification result to a specific note.
 - **Performance was not re-measured.**
+- **The concurrency limit was never exercised against a loaded production service
+  from the phone.** The restart, the route, the persistence and the race are all
+  verified (unit, E2E, and `scripts/verify-agent-limit.mjs` over real HTTP); what is
+  not verified is the owner's real phone driving a live limit change.
 - **Not claimed:** that the system is bug-free. Two adversarial audits found five
   real defects in the first cut of these changes; the same class of defect may
   remain in code neither audit examined.
