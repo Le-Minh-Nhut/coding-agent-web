@@ -440,8 +440,9 @@ State as of this commit, with the distinction the repository requires
 
 | item | value |
 | --- | --- |
-| Commits | `6c33db1` (the core fixes), `2d819d3` (header + gates + report), `18091ed` (the audit's notice defects), `018e607` (the visual-review fixes) |
-| Pushed | all four on `main`; `origin/main` advanced from `d115a35` to `018e607` |
+| Commits | `6c33db1` (the core fixes), `2d819d3` (header + gates + report), `18091ed` (the audit's notice defects), `018e607` (the visual-review fixes), then report corrections `fdca89a`, `6513339`, `091e8f4`, `6b7eef1` |
+| Code-bearing revision | `018e607` — everything after it is documentation only |
+| Pushed | `origin/main` advanced from `d115a35` to `6b7eef1` |
 | Local verification | 1746 unit tests / 0 unhandled errors; `pnpm -r typecheck` clean; Chromium E2E and the PERF gate suite run locally (§F) |
 | Build | `pnpm --filter @caw/web build` — `apps/web/dist` rebuilt locally |
 | Code-bearing scope | web assets only. Nothing under `apps/server`, `packages/omp-adapter`, `packages/runtime` or `packages/relay` changed, so the running backend does not need a restart for these fixes |
@@ -455,7 +456,7 @@ State as of this commit, with the distinction the repository requires
 
 | item | result |
 | --- | --- |
-| CI result | **run 109 passed** for the final commit `018e607`. Run 108 passed for the perf commit pair, and run 107 for the docs commit. Run 106 reads `cancelled`, which is the expected supersession when a commit follows another in the same concurrency group — a cancelled run is never reported as a pass |
+| CI result | **run 112 passed** for the last commit (`6b7eef1`, the amber-attribution correction), and run 109 passed for the last code-bearing commit (`018e607`). The code itself was green at run 109; 110 and 111 read `cancelled`, which is the expected supersession when a docs commit follows another in the same concurrency group. A cancelled run is never reported as a pass |
 ### Blocked
 
 | item | status |
