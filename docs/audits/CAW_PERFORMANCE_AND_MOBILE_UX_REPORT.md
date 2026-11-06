@@ -306,50 +306,51 @@ recorded again in §I as the round's largest remaining limitation.
 
 ## E — Visual quality
 
-Screenshots are captured at 320, 375, 390 and 430 px, idle **and while a turn is
-running**, into `docs/audits/assets/round57/`. Image content was read by a subagent
-(the main agent's model lane rejects multimodal input — `AGENTS.md` rule 11), and the
-per-image findings are recorded in §E2 after capture.
+Captures: `docs/audits/assets/round57/` — `idle-*` and `running-*` at 320x568,
+375x667, 390x844 and 430x932, produced by `tests/e2e/perf-running-header.spec.ts`
+against the built bundle. The **running** state is the one that matters: every
+earlier redesign in this project was judged on idle layouts, and the owner's
+complaint is about the app while an agent works.
 
-<!-- E2: filled from the subagent's reading of the running-state screenshots. -->
+Image content was read by a subagent (`caw-luna`), because the main agent's model
+lane rejects multimodal payloads (`AGENTS.md` rule 11). Its readings are quoted
+below. Geometry assertions are independent of them and run in the spec.
 
----
+### E1 — Geometry, asserted numerically
 
-### C8. What an independent audit found, and what it cost
+At all four widths: Stop is 44x44 with `controlsOverlap: false`,
+`undersizedControls: []` and no horizontal overflow; the composer's send control
+measures exactly **44.00 x 44.00**; the title is fully readable at 375/390/430.
 
-An adversarial review of the round's own commit (`6c33db1`) was commissioned, ran for
-78 minutes with 26 scratch suites and 724 throwaway tests, and its verdict was
-**mixed, not clean**. It confirmed five of the six changes correct — the `MessageRow`
-comparator (539 matrix cases plus 720 fuzz cases), the `WeakMap` row cache (200-step
-differential equality against a rebuild), the diff cap, the advisor index/amortisation
-(300+ pairs diffed against the old implementation), and incremental agent decode
-(25 seeds × 60 random frames equal to a cold parse).
+### E2 — What the images actually showed, and what it changed
 
-It found three **real defects in the notice change**, all now fixed:
+The first capture round was **wrong in three ways, all of which the visual read
+caught and the geometry assertions had missed**:
 
-1. **P1, data loss.** The call site keyed the notice on its *message text*. A notice
-   repeating a text used earlier in the session therefore reused the retired element
-   and rendered **nothing** — including an `error` re-emitted with the same words. The
-   audit's reproduction: the second Stop produced an empty transcript row and `0`
-   alert elements. Now keyed on a monotonic identity (`transcript.ts`, `setNotice`),
-   and the expiry flag resets on every new notice.
-2. **P2, hidden state.** `info` was treated as a synonym for "transient", so a retry
-   waiting on a provider (up to minutes) and a running compaction expired after 6 s
-   and took the only report of that state with them. Notices now carry a `kind`
-   derived from the *event* that produced them: only `event` notices may expire;
-   `status` notices never do.
-3. The expiry flag had no reset path, which is what made (1) permanent.
+| finding | disposition |
+| --- | --- |
+| Stop read as a **solid red alert box** despite a transparent fill: a full-saturation `rgb(220,38,38)` 2px ring around a filled `rgb(248,113,113)` square | fixed. Border softened to `color-mix(--danger 45%)`, then the interior given an 18% tint after a re-read called the bare transparent box "a red chip in a box". Final read: "one continuous object — soft maroon frame, dim maroon fill, one salmon square… I'd call this correct" |
+| Title **elided with a literal `...` at every width, including 430** — the model label held a 42% column even while running | fixed. The label is `display: none` at <=480px; the title now ends at css 224 with ~113px of clearance and no ellipsis at 430, and the full model id remains on `title`/`aria-label` and in Model settings |
+| 300-670 css px of **dead space above the composer** | **not a defect — a bad fixture of mine.** Measured with 30 entries: last row bottom y=779, composer top y=779, a 1px gap. Tail-follow pins the newest row to the composer; the first fixture seeded 4 entries, so there was nothing to fill the viewport. The subagent independently confirmed the pin in pixels: "last content row y=1721, composer top y=1722" |
+| A **wordless amber chip**, ellipsised to a bare glyph cluster | fixed. Below 360px a chip with no room for its label hides rather than degrading; both panels stay reachable by name from the overflow menu. Re-scan found no amber ink in the header at all |
+| Green status word was the **second-loudest colour on screen** | softened to `color-mix(#3fb950 72%, var(--text-muted))`. Measured after: no `rgb(63,185,80)` pixel survives in the header, and the green now sits below the prose in visual weight |
+| Send control reported as **43.5px, under the 44px minimum** | **not a defect.** `getBoundingClientRect` measures exactly 44.00 x 44.00 at all four widths; 43.5 is the 2x-DPR subpixel of a genuine 44. Not "fixed" — the assertion now pins 43.9 as the floor and names the reason |
 
-Two more audit findings were accuracy corrections rather than defects, and both are
-applied: the FileDiffView "data loss" claim is retracted (§A2), and the claim that the
-comparator fixed *all* re-rendering is narrowed — tool rows never reach `MessageRow`,
-so `groupActivity`/`pairToolArguments` still rebuild per frame and about 3,056 of
-4,075 rows are covered by the comparator. The other 1,019 are activity groups. That
-is an accuracy point, not a latency one: measured in jsdom, the per-append cost of
-those rebuilds is 0.17 ms.
+Final verdict on the running state: **"reads as a cohesive coding-agent app now, no
+longer a debug console"** — real transcript, tool cards with a tick and a label,
+consistent card borders, tail pinned flush, no overlap, no clipping, no overflow.
 
-New regression tests, `tests/web/round57-notice-identity.test.tsx` (8). **Fail-before
-is proven**: reverting the two fixes fails 4 of the 8, and restoring them passes all 8.
+### E3 — Remaining visual observations, accepted rather than changed
+
+1. **The status dot + word (`● running`) is telemetry in the chrome.** It is calm now,
+   but it is instrumentation. It stays: it is the element that announces a link change
+   to a screen reader (`role="status"`, `aria-live="polite"`) and the only surface that
+   distinguishes "the agent is working" from "the link is up".
+2. **The dashboard tiles carry a stats readout (`0 running · all-time`) in the first
+   screenful of a conversation.** The observation is about placement, not rendering.
+   It is recorded here rather than acted on: moving it changes navigation the owner
+   has not asked to move, and the tiles are the primary route to Agents, Files and
+   Activity.
 
 ## F — Regression tests
 

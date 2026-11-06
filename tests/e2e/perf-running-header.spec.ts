@@ -42,6 +42,10 @@ interface HeaderGeometry {
   stopVisible: boolean;
   stopBox: { width: number; height: number; x: number; y: number } | null;
   stopBackground: string | null;
+  /** Alpha of the Stop control's background: 0 = invisible, 1 = solid fill. */
+  stopAlpha: number;
+  /** The composer's send control, measured rather than read off a screenshot. */
+  sendBox: { width: number; height: number } | null;
   stopAccessibleName: string | null;
   menuBox: { width: number; height: number; x: number; y: number } | null;
   titleText: string;
@@ -56,23 +60,49 @@ interface HeaderGeometry {
   undersizedControls: Array<{ label: string; width: number; height: number }>;
 }
 
-/** A live turn: user prompt, assistant text, tool traffic, then a running state. */
-async function seedRunningTurn(host: MockCollabHost): Promise<void> {
+/**
+ * A live turn with a full viewport of history.
+ *
+ * The first version of this fixture seeded four entries, so every capture showed a
+ * mostly-empty screen with 300-670 css px of dead space between the transcript and
+ * the composer — a property of the fixture, not of the product, but it made the
+ * captures useless for judging density. A real session has history behind the
+ * current turn, so this seeds one.
+ */
+async function seedRunningTurn(host: MockCollabHost, entries = 30): Promise<void> {
   await host.send({
     t: "welcome",
     proto: 3,
     header: { type: "session", id: "native-1", cwd: "/workspace", timestamp: "2026-01-01T00:00:00Z", title: "Refactor the auth layer" },
     state: { isStreaming: true, queuedMessageCount: 0, cwd: "/workspace", participants: [] },
     agents: [],
-    entryCount: 0,
+    entryCount: entries + 4,
   });
-  const entries = [
-    createUserMessageEntry("u-1", "Audit the session lifecycle and fix the lease probe.", 1_700_000_000_000),
-    createAssistantMessageEntry("a-1", "I'll start by reading the supervisor and the adapter.\n\n- `packages/runtime/src/supervisor.ts`\n- `packages/omp-adapter/src/tmux.ts`", 1_700_000_000_001),
-    createToolResultEntry("t-1", "call-1", "read", "$ sed -n '470,520p' packages/runtime/src/supervisor.ts\n… 50 lines …", false, 1_700_000_000_002),
-    createToolResultEntry("t-2", "call-2", "bash", "$ pnpm -r typecheck\nDone in 12.4s", false, 1_700_000_000_003),
-  ];
-  await host.send({ t: "snapshot-chunk", entries, final: true });
+  const history: unknown[] = [];
+  for (let index = 0; index < entries; index += 1) {
+    const at = 1_700_000_000_000 + index;
+    switch (index % 3) {
+      case 0:
+        history.push(createUserMessageEntry(`h-u-${index}`, `Follow-up ${index}: check the lease probe and the ownership path.`, at));
+        break;
+      case 1:
+        history.push(createAssistantMessageEntry(`h-a-${index}`, `Reading the supervisor and the adapter for step ${index}. The probe reads the pane pid before deciding ownership, so an unreachable socket is not treated as an exit.`, at));
+        break;
+      default:
+        history.push(createToolResultEntry(`h-t-${index}`, `h-call-${index}`, "bash", `$ pnpm -r typecheck\nDone in ${index}.4s`, false, at));
+    }
+  }
+  await host.send({
+    t: "snapshot-chunk",
+    entries: [
+      ...history,
+      createUserMessageEntry("u-1", "Audit the session lifecycle and fix the lease probe.", 1_700_000_999_000),
+      createAssistantMessageEntry("a-1", "I'll start by reading the supervisor and the adapter.\n\n- `packages/runtime/src/supervisor.ts`\n- `packages/omp-adapter/src/tmux.ts`", 1_700_000_999_001),
+      createToolResultEntry("t-1", "call-1", "read", "$ sed -n '470,520p' packages/runtime/src/supervisor.ts\n… 50 lines …", false, 1_700_000_999_002),
+      createToolResultEntry("t-2", "call-2", "bash", "$ pnpm -r typecheck\nDone in 12.4s", false, 1_700_000_999_003),
+    ],
+    final: true,
+  });
   // A streaming assistant message, so the header is in its generating state.
   await host.send({
     t: "event",
@@ -118,6 +148,27 @@ async function readHeaderGeometry(page: Page, viewport: string): Promise<HeaderG
       stopVisible: stop !== null && stop.getBoundingClientRect().width > 0,
       stopBox,
       stopBackground: stop === null ? null : getComputedStyle(stop).backgroundColor,
+      stopAlpha: (() => {
+        if (stop === null) return 1;
+        const probe = document.createElement("div");
+        probe.style.backgroundColor = getComputedStyle(stop).backgroundColor;
+        document.body.appendChild(probe);
+        const resolved = getComputedStyle(probe).backgroundColor;
+        probe.remove();
+        // Chromium keeps an oklab()/color-mix() value verbatim, so resolve it by
+        // painting onto a scratch element is unreliable; parse whatever form we get.
+        const slash = resolved.match(/\/\s*([\d.]+)\s*\)/);
+        if (slash !== null) return Number(slash[1]);
+        const rgba = resolved.match(/rgba?\([^)]*?,\s*([\d.]+)\s*\)$/);
+        if (rgba !== null) return Number(rgba[1]);
+        return resolved === "rgba(0, 0, 0, 0)" || resolved === "transparent" ? 0 : 1;
+      })(),
+      sendBox: (() => {
+        const send = document.querySelector<HTMLElement>(".composer-send");
+        if (send === null) return null;
+        const rect = send.getBoundingClientRect();
+        return { width: Math.round(rect.width * 10) / 10, height: Math.round(rect.height * 10) / 10 };
+      })(),
       stopAccessibleName: stop?.getAttribute("aria-label") ?? null,
       menuBox,
       titleText: title?.textContent?.trim() ?? "",
@@ -167,11 +218,26 @@ test("the running header at the four phone widths", async ({ browser }) => {
     expect(geometry.undersizedControls, `${geometry.viewport}: every header control clears 44px`).toEqual([]);
     expect(geometry.titleText.length, `${geometry.viewport}: the title must remain readable`).toBeGreaterThan(0);
   }
-  // And the "compact icon, not a solid red block" requirement, at EVERY phone width
-  // including 430 (iPhone Pro Max): a tinted control, not a filled danger button.
+  // And the "compact control, not a solid red block" requirement, at EVERY phone
+  // width including 430 (iPhone Pro Max).
+  //
+  // The first version of this assertion demanded a fully transparent background and
+  // then failed against the fix: a bare transparent box around a floating glyph read
+  // as "a red chip" in the visual review, so the control gained a deliberate 18% tint.
+  // Pinning the colour string would re-break on any intentional restyle; what must
+  // hold is that the control is translucent and far from the solid fill the owner
+  // photographed. Checked numerally, not by string.
   for (const geometry of results) {
     expect(geometry.stopBox?.width, `${geometry.viewport}: Stop must be the compact square, not the labelled pill`).toBe(44);
-    expect(geometry.stopBackground, `${geometry.viewport}: Stop must not be a filled block`).toMatch(/rgba\(0, 0, 0, 0\)|transparent/);
+    expect(geometry.stopAlpha, `${geometry.viewport}: Stop must be tinted rather than invisible (alpha ${geometry.stopAlpha})`).toBeGreaterThan(0);
+    expect(geometry.stopAlpha, `${geometry.viewport}: Stop must stay far below a solid fill (alpha ${geometry.stopAlpha})`).toBeLessThan(0.35);
+  }
+  // The composer's send control must clear the same minimum the header honours.
+  // Measured exactly, because a visual review reported 43.5px — the 2x-DPR subpixel
+  // of a genuine 44, which is not a defect and must not be "fixed".
+  for (const geometry of results) {
+    expect(geometry.sendBox, `${geometry.viewport}: the composer must expose a send control`).not.toBeNull();
+    expect(Math.min(geometry.sendBox!.width, geometry.sendBox!.height), `${geometry.viewport}: send must be at least 44x44 (${JSON.stringify(geometry.sendBox)})`).toBeGreaterThanOrEqual(43.9);
   }
 });
 
@@ -193,12 +259,15 @@ test("the idle conversation at the four phone widths", async ({ browser }) => {
       header: { type: "session", id: "native-1", cwd: "/workspace", timestamp: "2026-01-01T00:00:00Z" },
       state: { isStreaming: false, queuedMessageCount: 0, cwd: "/workspace", participants: [] },
       agents: [],
-      entryCount: 2,
+      entryCount: 23,
     });
     await host.send({
       t: "snapshot-chunk",
       entries: [
         createUserMessageEntry("u-1", "Audit the session lifecycle and fix the lease probe.", 1_700_000_000_000),
+        ...Array.from({ length: 20 }, (_, index) => index % 2 === 0
+          ? createUserMessageEntry(`i-u-${index}`, `Follow-up ${index}: check the lease probe and the ownership path.`, 1_700_000_000_100 + index)
+          : createAssistantMessageEntry(`i-a-${index}`, `Reading the supervisor and the adapter for step ${index}. The probe reads the pane pid before deciding ownership, so an unreachable socket is not treated as an exit.`, 1_700_000_000_100 + index)),
         createAssistantMessageEntry("a-1", "Reading the supervisor now.", 1_700_000_000_001),
       ],
       final: true,

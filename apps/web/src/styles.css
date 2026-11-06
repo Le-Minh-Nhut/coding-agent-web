@@ -1700,8 +1700,12 @@ details[open] summary {
   background: currentColor;
 }
 
+/* Liveness is also visible in the transcript itself, so the status word does not
+   need full-saturation green to be noticed — a visual review measured `#3fb950` as
+   the second-loudest colour on the screen, competing with the one destructive
+   control. The state stays legible and hue-coded; the volume comes down. */
 .header-status--idle,
-.header-status--running { color: #3fb950; }
+.header-status--running { color: color-mix(in oklab, #3fb950 72%, var(--text-muted)); }
 .header-status--connecting,
 .header-status--reconnecting { color: var(--warning); }
 .header-status--disconnected,
@@ -1737,8 +1741,14 @@ details[open] summary {
      a bare class selector (0,1,0). Verified in a real browser — the class-only form
      still computed to `rgb(220, 38, 38)`. */
   button.header-stop {
-    background-color: transparent;
-    border-color: var(--danger);
+    /* A tint, not a fill, and not a bare ring around a floating glyph.
+       Two measured attempts before this one: a solid `--danger` fill (the owner's
+       screenshot), then a soft ring with a transparent interior, which the visual
+       review read as "a lone salmon square in an empty box — a red chip, not a
+       control". The tint covers the whole 44px target so the control reads as one
+       object, while staying far below the saturation of the old filled button. */
+    background-color: color-mix(in oklab, var(--danger) 18%, transparent);
+    border-color: color-mix(in oklab, var(--danger) 45%, transparent);
     color: var(--danger-text);
     /* Square: the label is hidden at this width, so the extra horizontal padding
        would only enlarge the target past the 44px minimum for no benefit. */
@@ -1756,6 +1766,16 @@ details[open] summary {
     display: block;
   }
 
+  /* While a turn is in flight the title is the thing that must stay readable, so on
+     a phone the model label yields to it entirely. It is not lost: `title` and
+     `aria-label` still carry the full identifier (`agent-model.ts:modelDisplayName`
+     keeps it on the element) and Model settings shows it in full. The visual review
+     found the title elided with a literal `...` at all four widths, including 430,
+     because the label held a 42% column. */
+  .header-status-model {
+    display: none;
+  }
+
   /* The chips are bounded so the model label keeps a readable column. A chip is a
      status, not an action, so it ellipsises before the title does. */
   .header-chips {
@@ -1769,6 +1789,16 @@ details[open] summary {
     text-overflow: ellipsis;
     white-space: nowrap;
     min-width: 0;
+  }
+}
+
+/* On a very narrow phone a chip with a glyph and a count cannot ellipsise into
+   anything meaningful — measured, it became a bare amber glyph cluster with no
+   label, which reads as a stray log token rather than app chrome. Both panels stay
+   reachable by name from the overflow menu, so the chip hides rather than degrade. */
+@media (max-width: 360px) {
+  .mode-chip {
+    display: none;
   }
 }
 
