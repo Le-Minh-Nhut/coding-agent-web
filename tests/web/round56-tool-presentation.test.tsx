@@ -205,3 +205,45 @@ describe("a live failure still shows its reason", () => {
     expect(container.textContent).toContain("Context window exceeded");
   });
 });
+
+// ── A contract-violating request is still readable ──────────────────────────
+//
+// The wire promises `arguments` is a record. If a host ever sends something else,
+// the paired tool card cannot carry it (both `pairToolArguments` and
+// `argumentsFor` keep records only), so suppressing the request would make its
+// arguments unreachable everywhere. The request must then stay on screen.
+describe("arguments that are not a record are never dropped", () => {
+  it("keeps the request when its arguments cannot be carried elsewhere", () => {
+    const rows = [
+      {
+        id: "a1", role: "assistant", text: "", source: "entry",
+        blocks: [{ type: "toolCall", name: "read", arguments: ["ZULU_TOKEN_ONE"], id: "tc-odd" }],
+      },
+      {
+        id: "t1", role: "tool", text: "ok", toolName: "read", toolCallId: "tc-odd",
+        source: "entry", toolResult: { content: [{ type: "text", text: "ok" }], details: {} },
+      },
+    ] as unknown as ToolActivityRow[];
+    const { container } = render(<TranscriptList rows={rows} />);
+    // The result row is present, but the arguments live only in the request.
+    expect(container.textContent).toContain("ZULU_TOKEN_ONE");
+  });
+
+  it("still suppresses an ordinary record-valued request whose result is shown", () => {
+    const rows = [
+      {
+        id: "a1", role: "assistant", text: "", source: "entry",
+        blocks: [{ type: "toolCall", name: "read", arguments: { path: "/tmp/notes.md" }, id: "tc-ok" }],
+      },
+      {
+        id: "t1", role: "tool", text: "ok", toolName: "read", toolCallId: "tc-ok",
+        source: "entry", toolResult: { content: [{ type: "text", text: "ok" }], details: {} },
+        toolArgs: { path: "/tmp/notes.md" },
+      },
+    ] as unknown as ToolActivityRow[];
+    const { container } = render(<TranscriptList rows={rows} />);
+    expect(container.textContent).not.toContain("[Tool call:");
+    // Reachable on demand instead.
+    expect(container.querySelectorAll(".activity-group").length).toBe(1);
+  });
+});

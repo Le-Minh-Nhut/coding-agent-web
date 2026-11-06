@@ -13,6 +13,7 @@ import { advisorNotesOf } from "../advisor.js";
 import { CollapsibleMessage } from "./CollapsibleMessage.js";
 import { ActivityGroupRow } from "./ToolActivity.js";
 import { groupActivity, pairToolArguments } from "../tool-activity.js";
+import { isRecord } from "../guest-tools.js";
 import type { TranscriptBlock, TranscriptMessage, ToolResultLike } from "../transcript.js";
 
 export interface DisplayMessage {
@@ -224,9 +225,15 @@ export const TranscriptList = memo(function TranscriptList({ rows, onOpenFile }:
  */
 function renderTranscriptBlock(block: TranscriptBlock, index: number, represented?: ReadonlySet<string>): React.ReactNode {
   if (block.type === "toolCall") {
-    // `id` is the wire pairing key (`collab-protocol/src/types.ts:33`). Without one
-    // the request cannot be matched to a result, so it is always shown.
-    if (block.id !== undefined && represented?.has(block.id)) return null;
+    // Three conditions, all required, before this request may be dropped:
+    //  1. it has an `id` — the wire pairing key (`collab-protocol/src/types.ts:33`);
+    //  2. a result row for that id is on screen, so the execution is still shown;
+    //  3. its `arguments` are a record, so the paired tool card can actually carry
+    //     them. `pairToolArguments` keeps only records (`tool-activity.ts:159`), so
+    //     suppressing a request whose arguments are, say, an array would leave them
+    //     unreachable at every disclosure level — a contract violation upstream
+    //     still must not cost the reader the arguments.
+    if (block.id !== undefined && represented?.has(block.id) && isRecord(block.arguments)) return null;
     return <details key={index}><summary>{`[Tool call: ${block.name}${block.intent ? ` — ${block.intent}` : ""}]`}</summary><pre style={{ overflowX: "auto" }}><code>{JSON.stringify(block.arguments, null, 2)}</code></pre></details>;
   }
   if (block.type === "image") return block.dataUrl ? <img key={index} src={block.dataUrl} alt="Attachment" style={{ maxWidth: "100%" }} /> : <p key={index}>{block.label}</p>;
