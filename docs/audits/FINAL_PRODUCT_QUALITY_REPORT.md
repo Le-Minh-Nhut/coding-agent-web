@@ -142,13 +142,15 @@ would have been a false rollback artifact.
   (`42161036708`, `42161544991`, `42161878426`, `42161929503`, `42162331002`) were
   **cancelled** by the workflow's concurrency group when a later push superseded
   them; cancellation is not a pass and none of them is reported as one.
-- **The workflow badge may read `failing` at HEAD, and that is not a code failure.**
-  GitHub badges the newest run, and my last pushes were docs-only commits whose runs
-  were themselves superseded. The authoritative statement about the code is run 93
-  above; the docs-only commits after it change no executable file.
+- **CI is green at the final HEAD too.** Run 98 (`3b43b1d`) completed
+  **successfully**. Prior runs were cancelled only when a later push superseded
+  them in the concurrency group; that chain ended here because nothing was pushed
+  after `3b43b1d`. So both the last code-bearing revision (`51a9e30`, run 93) and
+  the final tree (`3b43b1d`, run 98) have a completed green run.
 - **`d00281a`'s own run was cancelled**, so that one commit never had a standalone
-  green run. Its content is covered by run 93, and it was verified locally (full
-  `vitest run`, `pnpm typecheck`, and the `round56-agent-limit-ui` case that found it).
+  green run. Its content is covered by runs 93 and 98 (`git merge-base --is-ancestor
+  d00281a 51a9e30` succeeds), and locally by the full `vitest run`, `pnpm typecheck`,
+  and the `round56-agent-limit-ui` case that found the defect it fixes.
 
 - **No physical iPhone test.** Keyboard behaviour, `safe-area` and iOS tab
   eviction are handled in code and exercised in Chromium at phone viewports, not
