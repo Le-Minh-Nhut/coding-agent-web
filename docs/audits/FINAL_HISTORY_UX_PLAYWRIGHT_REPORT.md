@@ -1,8 +1,10 @@
 # History recovery and mobile UX — Playwright report
 
 Round 57. Three commits on `main`: `54ef6e0` (the fix), `d254ad7` (the visual-review
-follow-up), `a2dd2e5` (the eight defects an independent audit found in `54ef6e0`).
-Deployed to the live service and verified against the owner's own running sessions.
+follow-up), `a2dd2e5` (the eight defects an independent audit found in `54ef6e0`),
+`c5deb7d` (report/guide corrections) and `dc5c0a6` (handoff reconciliation across a
+reload). Deployed to the live service and verified against the owner's own running
+sessions.
 
 ## A — Reported symptom
 
@@ -190,7 +192,7 @@ All runs: Chromium (`channel: "chrome"`), the project's own config, real built
 assets, mock Collab host (no agent is launched, so a full run is free). Test
 timeouts are the spec's own; `HIST-03` sets 120 s because the stall window is 30 s.
 
-Full browser suite: **152 passed, 0 failed** (`npx playwright test --project=chromium`,
+Full browser suite: **154 passed, 0 failed** (`npx playwright test --project=chromium`,
 ~3.8 min). The rounds' own specs:
 
 ### `tests/e2e/history-loading.spec.ts` — 15/15 PASS
@@ -213,7 +215,7 @@ Full browser suite: **152 passed, 0 failed** (`npx playwright test --project=chr
 | HIST-14 | 300-entry snapshot in 12 chunks never fails on total duration | 2.9 s |
 | HIST-15 | malformed entries do not take valid rows down | 744 ms |
 
-### `tests/e2e/handoff-completion.spec.ts` — 10/10 PASS
+### `tests/e2e/handoff-completion.spec.ts` — 12/12 PASS
 
 | Test | What it proves |
 | --- | --- |
@@ -227,6 +229,8 @@ Full browser suite: **152 passed, 0 failed** (`npx playwright test --project=chr
 | navigate away | the notification survives leaving the panel |
 | mobile viewport | the banner sits above the composer, transcript still scrollable |
 | buried commit | a commit under 120 later events is still found (forward cursor; fails on the old window) |
+| reload reconciliation | a completion that landed while the view was away is reported on mount |
+| superseded commit | a commit followed by a newer `handoff-start` is not announced |
 
 ### `tests/e2e/sync-states-visual.spec.ts` — 12/12 PASS
 
@@ -297,12 +301,12 @@ Back, draft preservation, and no duplicate WebSocket connections.
 
 | Item | Value |
 | --- | --- |
-| Git SHA | `a2dd2e5` (`main`), working tree clean |
-| Deployed revision | `a2dd2e5` — the service runs `node --import tsx apps/server/src/server.ts`, so the relay fix is live after a restart |
-| Served JS | `assets/index-DBdTy_gx.js` sha256 `84cec8ee92f3fea3a6554fe7186e9b4c94fccfab75338e1f1ab1b8564304040e` |
-| Served CSS | `assets/index-BvDiuVt1.css` |
+| Git SHA | `dc5c0a6` (`main`), working tree clean |
+| Deployed revision | `dc5c0a6` — the service runs `node --import tsx apps/server/src/server.ts`, so the relay fix is live after a restart |
+| Served JS | `assets/index-BodkII7y.js` sha256 `b66fb89f00b47a4c89fda3380abf7dbe23e0a6766ecdfd6cfe27bcc9ed914ac9` |
+| Served CSS | `assets/index-vYzOAbXC.css` |
 | Asset match | served `index.html` references exactly those two files; both byte-match `apps/web/dist` |
-| systemd | `coding-agent-web.service` active, MainPID `4089959` |
+| systemd | `coding-agent-web.service` active, MainPID `4121707` |
 | Reconcile | `{"adopted":3,"external":0,"stopped":2,"unknown":1,"registered":2}` |
 | HTTPS | `GET /` → 200 over the Tailscale origin; `/api/agent-limit` → 401 unauthenticated (route mounted, not authenticated) |
 | **Preserved OMP pids** | `1204278`, `2080435`, `2082046` — **all alive and unchanged** across the restart |
