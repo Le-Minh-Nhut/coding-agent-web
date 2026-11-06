@@ -301,8 +301,8 @@ Back, draft preservation, and no duplicate WebSocket connections.
 
 | Item | Value |
 | --- | --- |
-| Git SHA | `24f1e53` (`main`), working tree clean |
-| Deployed revision | `24f1e53` — the service runs `node --import tsx apps/server/src/server.ts`, so the relay fix is live after a restart |
+| Git SHA | `e2ca8c3` (`main`) at the time of writing; the **code-bearing** revision is `24f1e53`, whose CI run 105 was green. Commits after it are documentation only. |
+| Deployed revision | `24f1e53` (the last code change) — the service runs `node --import tsx apps/server/src/server.ts`, so the relay fix is live after a restart |
 | Served JS | `assets/index-DMZ5X4pG.js` |
 | Served CSS | built alongside the JS above |
 | Asset match | served `index.html` references exactly those two files; both byte-match `apps/web/dist` |
@@ -320,7 +320,12 @@ Back, draft preservation, and no duplicate WebSocket connections.
 | --- | --- | --- |
 | 102 | `c5deb7d` | completed successfully |
 | 104 | `34d2c4f` | **failed** — see below |
-| 105 | `24f1e53` | completed successfully (final revision) |
+| 105 | `24f1e53` | completed successfully (last code change) |
+
+Documentation-only commits after `24f1e53` each cancel the previous run through the
+workflow's concurrency group, so the badge can read `cancelled` on a revision whose
+predecessor passed. A cancelled run is not a pass and is not reported as one; the
+authoritative statement about the code is run 105 on `24f1e53`.
 
 **Run 104 failed and the failure was real and mine.** It reported 227 unhandled
 rejections of `api.getConversationEvents is not a function`. My new mount-time
