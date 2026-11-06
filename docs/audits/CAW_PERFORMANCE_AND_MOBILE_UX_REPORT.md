@@ -410,13 +410,13 @@ State as of this commit, with the distinction the repository requires
 
 | item | value |
 | --- | --- |
-| Commits | `6c33db1` (the fixes) and `2d819d3` (header + gates + this report) |
-| Pushed | both on `main`, `origin/main` advanced from `d115a35` |
+| Commits | `6c33db1` (the core fixes), `2d819d3` (header + gates + report), `18091ed` (the audit's notice defects), `018e607` (the visual-review fixes) |
+| Pushed | all four on `main`; `origin/main` advanced from `d115a35` to `018e607` |
 | Local verification | 1746 unit tests / 0 unhandled errors; `pnpm -r typecheck` clean; Chromium E2E and the PERF gate suite run locally (§F) |
 | Build | `pnpm --filter @caw/web build` — `apps/web/dist` rebuilt locally |
 | Code-bearing scope | web assets only. Nothing under `apps/server`, `packages/omp-adapter`, `packages/runtime` or `packages/relay` changed, so the running backend does not need a restart for these fixes |
 | OMP sessions | **not disturbed**: no agent launched, stopped, restarted or attached to during this round |
-| Served assets | **verified**: the production origin serves `assets/index-LXBdcZTt.js` and `assets/index-BSkXns12.css`, and that CSS contains `button.header-stop` and `max-width:480px` — the two selectors the phone-header fix depends on. The server reads them from `apps/web/dist` (`apps/server/src/app.ts:286`) and `apps/web/dist` is the rebuilt output, so the fixes are live **without a backend restart**, which is why none was performed |
+| Served assets | **verified**: the production origin serves `assets/index-C2QexEsC.js` and `assets/index-C6e9qhob.css`, and that CSS contains `button.header-stop` and `color-mix` — the selectors the header fix depends on. The server reads them from `apps/web/dist` (`apps/server/src/app.ts:286`), which is the rebuilt output, so the fixes are live **without a backend restart**, which is why none was performed |
 | Service | `coding-agent-web.service` active (MainPID 92072); **not restarted** — none was needed |
 | OMP processes preserved | pane pids `1204278`, `2080435`, `2082046` all alive; tmux sessions `$0`, `$1`, `$2` intact |
 | Reachability | origin index HTTP 200; unauthenticated `/api/agent-limit` HTTP 401 (auth intact) |
@@ -425,7 +425,7 @@ State as of this commit, with the distinction the repository requires
 
 | item | result |
 | --- | --- |
-| CI result | **run 108 passed** (`perf(web): compact running header…`, covering `6c33db1` and `2d819d3`). Run 107 also passed. Run 106 reads `cancelled`, which is the expected supersession when a docs commit follows another on the same concurrency group — a cancelled run is not reported as a pass |
+| CI result | **run 109 passed** for the final commit `018e607`. Run 108 passed for the perf commit pair, and run 107 for the docs commit. Run 106 reads `cancelled`, which is the expected supersession when a commit follows another in the same concurrency group — a cancelled run is never reported as a pass |
 ### Blocked
 
 | item | status |
