@@ -147,7 +147,7 @@ Before the relay fix the same read could not complete at all over a real client.
    and releases the whole backlog in arrival order once it drains to
    `RESUME_BYTES` (256 KiB). A paused peer keeps its room membership and peer id,
    so a resync is a resume, not a rejoin. Only a peer that never drains is closed,
-   past `MAX_QUEUED_BYTES` (16 MiB) — measured on the queued side, because a paused
+   past `MAX_QUEUED_BYTES` (64 MiB) — measured on the queued side, because a paused
    peer's `bufferedAmount` is not what is growing.
 2. **A sync state machine replaces the length check** (`apps/web/src/transcript.ts`).
    `SyncStatus = loading | stalled | ready | empty`. `empty` requires positive

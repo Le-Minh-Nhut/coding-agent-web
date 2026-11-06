@@ -901,7 +901,7 @@ Dòng trạng thái **chỉ in trạng thái kết nối live**, kèm một ch�
 | `disconnected` | đỏ | Mất kết nối tới live room (không chứng minh process đã dừng) |
 | `unknown` | đỏ | Không xác minh được trạng thái agent |
 
-**Model chỉ hiện khi host thực sự báo.** Nếu host không báo model cho chính hội thoại này, dòng trạng thái **không** in gì thêm — CAW không lấy "model ưu tiên" đã lưu rồi in ra như thể đó là model đang chạy. Khi có, nó nối sau trạng thái dưới dạng ` · <model-id>` (ví dụ `running · vendor/model-id`), và mờ hơn chữ trạng thái.
+**Model chỉ hiện khi host thực sự báo.** Nếu host không báo model cho chính hội thoại này, dòng trạng thái **không** in gì thêm — CAW không lấy "model ưu tiên" đã lưu rồi in ra như thể đó là model đang chạy. Khi có, nó nối sau trạng thái dưới dạng ` · <tên-model>`, và mờ hơn chữ trạng thái. **Tên hiển thị là đoạn cuối** của định danh (ví dụ `9router/wdb/deepseek-ai/DeepSeek-V4.1-Flash` chỉ hiện `DeepSeek-V4.1-Flash`), vì in cả đường dẫn provider đẩy phần còn lại của header ra khỏi màn hình điện thoại. **Định danh đầy đủ vẫn còn nguyên** trong thuộc tính `title` của dòng đó và trong phần chi tiết session — bạn rê chuột (hoặc chạm giữ) là thấy.
 
 **Nút Stop generating** chỉ hiện khi agent đang chạy, và **nằm ngoài menu** — một lần chạm, không phải mở menu (xem [chương 14](#14-giao-diện-di-động-mới-thanh-trên-menu-nút-latest)).
 

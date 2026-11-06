@@ -137,6 +137,16 @@ body {
 .header-status-model {
   color: var(--text-muted);
   font-weight: 400;
+  /* A model id with no separators (`sonnet-4.5-very-long-preview-name`) is one
+     unbreakable token and would push the status word out of a 320px header. The
+     full identifier stays on the element's `title`/`aria-label`, so truncating
+     the visible copy loses nothing. */
+  display: inline-block;
+  max-width: 42%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
 }
 
 /* Three navigation summaries, ~56px tall, each a real touch target. Horizontal

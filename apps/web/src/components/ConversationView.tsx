@@ -1679,6 +1679,38 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
   const handoffCompletedText = (entryId?: string | null): string =>
     `✓ Handoff completed — context compacted successfully${entryId ? ` (journal entry ${entryId}).` : "."}`;
 
+  /**
+   * Reconcile a handoff that finished while this view was not running.
+   *
+   * The in-flight watch cannot survive a reload or a reconnect, which the mission
+   * explicitly requires it to. The durable `handoff-committed` event can, so this
+   * runs once per mount: if the timeline holds a commit that is *not* answered by
+   * a later start — i.e. an operation finished and nothing has superseded it — the
+   * completion is reported. Bounded to one read, no polling, and silent when there
+   * is nothing to reconcile.
+   *
+   * Deliberately read-only and additive: it never writes, never launches, and
+   * never claims anything the timeline does not contain.
+   */
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      const result = await api.getConversationEvents(conversationId, { limit: 20 });
+      if (cancelled || !viewActiveRef.current) return;
+      if (!result.ok) return;
+      const events = result.data.events;
+      const committed = [...events].reverse().find((event) => event.type === "handoff-committed");
+      if (committed === undefined) return;
+      // Only a commit with no later start is outstanding: a start after it means
+      // the user has already begun another operation, whose own status is current.
+      const superseded = events.some((event) => event.type === "handoff-start" && event.seq > committed.seq);
+      if (superseded) return;
+      setHandoffNoticeTone("success");
+      setHandoffNotice(handoffCompletedText(handoffCommitEntryId(committed.payload)));
+    })();
+    return () => { cancelled = true; };
+  }, [conversationId]);
+
   const awaitHandoffCommit = async (conversationAtHandoff: string, operationGeneration: number, baselineSeq: number | null, attempts = 12): Promise<void> => {
     // Without a baseline the correlation cannot be established at all, and an
     // uncorrelated match is exactly the fabrication this guards against: an

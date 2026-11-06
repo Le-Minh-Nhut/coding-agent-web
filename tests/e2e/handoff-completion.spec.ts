@@ -168,6 +168,43 @@ test("a commit beyond a window of unrelated events is still found", async ({ pag
   await expect(banner).toContainText("comp-buried");
 });
 
+test("a handoff that finished while the view was away is reported after a reload", async ({ page }) => {
+  // The mission requires the completion to work after a browser refresh. The
+  // in-flight watch cannot survive one, so the durable event is re-read on mount.
+  await mockHandoff(page, handoffResponse("delivered"));
+  await mockEvents(page, [
+    { seq: 1, type: "handoff-start", ts: "2026-01-01T00:00:00Z", payload: {} },
+    { seq: 2, type: "handoff-committed", ts: "2026-01-01T00:01:00Z", payload: { entryId: "comp-reload" } },
+  ]);
+  const fixture = harnessFixture();
+  const host = await installMockCollabHost(page, { conversationId: fixture.seededConversationId });
+  await openSeededConversation(page);
+  await host.send(welcomeFrame(false));
+
+  // No handoff is run in this page: the commit is already in the timeline, as it
+  // would be after a reload that lost the in-flight watch.
+  const banner = page.locator(".banner.success");
+  await expect(banner).toBeVisible();
+  await expect(banner).toContainText(/Handoff completed/i);
+  await expect(banner).toContainText("comp-reload");
+});
+
+test("a commit already superseded by a newer handoff is not reported", async ({ page }) => {
+  // The other half of the rule: an old commit must not be announced as the state
+  // of an operation the user has since started again.
+  await mockHandoff(page, handoffResponse("delivered"));
+  await mockEvents(page, [
+    { seq: 1, type: "handoff-committed", ts: "2026-01-01T00:00:00Z", payload: { entryId: "comp-old" } },
+    { seq: 2, type: "handoff-start", ts: "2026-01-01T00:02:00Z", payload: {} },
+  ]);
+  const fixture = harnessFixture();
+  const host = await installMockCollabHost(page, { conversationId: fixture.seededConversationId });
+  await openSeededConversation(page);
+  await host.send(welcomeFrame(false));
+
+  await expect(page.locator(".banner.success")).toHaveCount(0);
+});
+
 test("a committed result is reported immediately, without waiting", async ({ page }) => {
   await mockHandoff(page, handoffResponse("committed", { compactionEntryId: "comp-7" }));
   await mockEvents(page, []);
