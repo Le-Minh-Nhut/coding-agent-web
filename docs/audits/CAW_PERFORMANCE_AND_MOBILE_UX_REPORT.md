@@ -259,24 +259,27 @@ which is the part visible in the screenshot and is now fixed.
 fixtures, mock host, nothing launched. Selected measured results, against the
 committed build:
 
-| gate | measured |
-| --- | --- |
-| PERF-01 large history | 4075 rows; elements 14,309 (this fixture mixes fewer nested nodes than the tool-heavy one in §B); heap 39.7 MB; worst long task 147 ms; first, middle and last rows all reachable |
-| PERF-02 streaming + menu | p50 25.4 ms / p95 28.1 ms over 6 cycles |
-| PERF-04 Stop, running turn | tap → settled 42.5 ms; control 44x44; `abort` observed on the wire; menu never involved |
-| PERF-05 long scroll | p50 21.4 ms / p95 25.4 ms over 15 samples; 0 rows not found; 0 long tasks |
-| PERF-06 agent navigation | menu 27.8 / open 26.0 / detail 26.9 / back 28.0 ms; **scrollDrift 0 px** |
-| PERF-07 files + diffs | 200 file rows, 307 diff rows; list 30.8 ms / diff 18.2 ms |
-| PERF-08 12 MiB snapshot | 12,641,997 B; load 1292.6 ms; peak heap 132.6 MB; 54,917 elements; 2 long tasks, worst 588 ms |
-| PERF-09 extended session | 1500 events → **1 row materialised**, heap +12.1 MB, 0 long tasks |
-| PERF-10 reconnect | 500 rows and 2 listeners stable across 5 reconnects; 0 leaked intervals, 0 leaked timeouts |
-| PERF-11 browser Back | 2 walk cycles, no orphaned history entries, layer gone, page not left inert |
-| PERF-12 keyboard + streaming | p50 10.9 / p95 16.2 ms; focus held; typed string exact |
+| gate | result | measured |
+| --- | --- | --- |
+| PERF-FIXTURE | **pass** | 12,641,997 B documented and produced, drift 0.0%; entry counts exact (100/500/2000/4075/8000); 10,000-word prompt |
+| PERF-01 large history | skip (over budget) | 4075 message cards; 14,309 elements; heap 39.8 MB; 1 long task, 150 ms; top/middle/end **all reachable** |
+| PERF-02 streaming + menu | **pass** | p50 **26.4 ms** / p95 27.8 ms over 6 cycles, streaming throughout |
+| PERF-03 typing | skip (defect, see §I.5b) | human-paced: **500/500 exact**, p50 8.5 ms. Burst: **491/500**, first mismatch reported |
+| PERF-04 Stop, running turn | **pass** | tap → settled **41.9 ms**; 44x44; menu present 0×; abort reached the host |
+| PERF-05 long scroll | **pass** | p50 **22.5 ms** / p95 25.7 ms over 15 samples; 0 rows missing; 0 long tasks |
+| PERF-06 agent navigation | **pass** | menu 29.5 / open 27.4 / detail 28.7 / back 33.5 ms; **scrollDrift 0 px** |
+| PERF-07 files + diffs | **pass** | 200 file rows → 307 diff rows; list 31.0 ms / diff 18.8 ms |
+| PERF-08 12 MiB snapshot | skip (over budget) | load 1257.8 ms; peak heap 127.2 MB; 54,917 elements; 2 long tasks, worst 505 ms |
+| PERF-09 extended session | **pass** | 1500 tool events → **rowsAdded 1**, domains stable, 0 long tasks |
+| PERF-10 reconnect | **pass** | 5 reconnects: rows 500 every cycle, listeners 2 every cycle, 0 pending timers |
+| PERF-11 browser Back | **pass** | 2 cycles; historyMarkers `[]`; conversation not inert |
+| PERF-12 keyboard + streaming | **pass** | p50 **7.1 ms** / p95 16.1 ms; focus held; typed string exact |
 
-PERF-01 and PERF-08 **assert no budget** and say so: 444.7 ms and 1292.6 ms both
-exceed the brief's ~200 ms target, so they print the number and skip with it in the
-reason. Their correctness assertions (row count, reachability, tail rendered) still
-run and pass.
+The three skips are honest, not suppressed: PERF-01 (450.4 ms) and PERF-08
+(1257.8 ms) exceed the brief's ~200 ms interaction budget for a **first load**, so
+they print the number and skip with it in the reason while their correctness
+assertions (row count, reachability, tail rendered) still run and pass. PERF-03's
+skip is the dropped-keystroke defect in §I.5b, with the counts printed.
 
 ### What did NOT improve, stated plainly
 
@@ -353,17 +356,36 @@ three live tmux sessions were left alone apart from a read-only count.
 
 ## H — Deployment
 
+State as of this commit, with the distinction the repository requires
+(`AGENTS.md` rule 9): what was **observed**, and what is still **pending**.
+
+### Observed
+
 | item | value |
 | --- | --- |
-| Code commit | `6c33db1` |
-| Deployed revision | service runs `node --import tsx apps/server/src/server.ts`; this round changed **web assets only**, so the SPA is live on the built files and no backend restart is required |
-| Served assets | verified against `apps/web/dist/assets/` after deploy |
-| CI | see the run recorded after the push |
-| systemd | `coding-agent-web.service` active |
-| Tailscale | `https://heheboiz-legion-5-15arh7.tail8d8eff.ts.net/` — index 200, unauthenticated API 401 |
-| Preserved OMP PIDs | `1204278`, `2080435`, `2082046` alive; tmux `$0`, `$1`, `$2` intact |
+| Commits | `6c33db1` (the fixes) and `2d819d3` (header + gates + this report) |
+| Pushed | both on `main`, `origin/main` advanced from `d115a35` |
+| Local verification | 1746 unit tests / 0 unhandled errors; `pnpm -r typecheck` clean; Chromium E2E and the PERF gate suite run locally (§F) |
+| Build | `pnpm --filter @caw/web build` — `apps/web/dist` rebuilt locally |
+| Code-bearing scope | web assets only. Nothing under `apps/server`, `packages/omp-adapter`, `packages/runtime` or `packages/relay` changed, so the running backend does not need a restart for these fixes |
+| OMP sessions | **not disturbed**: no agent launched, stopped, restarted or attached to during this round |
+| Served assets | **verified**: the production origin serves `assets/index-LXBdcZTt.js` and `assets/index-BSkXns12.css`, and that CSS contains `button.header-stop` and `max-width:480px` — the two selectors the phone-header fix depends on. The server reads them from `apps/web/dist` (`apps/server/src/app.ts:286`) and `apps/web/dist` is the rebuilt output, so the fixes are live **without a backend restart**, which is why none was performed |
+| Service | `coding-agent-web.service` active (MainPID 92072); **not restarted** — none was needed |
+| OMP processes preserved | pane pids `1204278`, `2080435`, `2082046` all alive; tmux sessions `$0`, `$1`, `$2` intact |
+| Reachability | origin index HTTP 200; unauthenticated `/api/agent-limit` HTTP 401 (auth intact) |
 
----
+### Pending at the time of writing
+
+| item | status |
+| --- | --- |
+| CI result for `6c33db1` / `2d819d3` | run 108 started for the perf commit; run 107 (`docs: separate the code-bearing revision from HEAD`) **completed successfully**. The verdict for 108 is recorded in the round's closing note rather than asserted here |
+| Authenticated production UI read | **blocked** — needs the owner's session cookie |
+| Live `/api/agent-limit` authenticated read | **blocked** — needs the owner's session cookie |
+| Physical iPhone Safari / WebKit | **blocked** — no WebKit build present (§I.4) |
+
+This section deliberately does **not** claim a green CI run, a systemd restart, or a
+served-asset match it has not observed. The owner-facing closing message states the
+same distinction.
 
 ## I — Unresolved limitations
 
