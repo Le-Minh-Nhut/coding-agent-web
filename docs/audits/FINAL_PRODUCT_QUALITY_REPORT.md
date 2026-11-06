@@ -111,8 +111,10 @@ calls) and they pass.
 
 | Item | Value |
 |---|---|
-| Final Git SHA | `d00281a` (pushed to `origin/main`) |
+| Deployed code revision | `d00281a` |
+| Repo HEAD | `2a07283` (three docs-only commits after `d00281a`, all in this round, none touching app code) |
 | Deployed revision | backend restarted from `6836d7d` source (no server file changed after it); frontend `dist` rebuilt from `d00281a` |
+| Live limit state | `metadata.jsonl` holds no `setting` row, so the effective limit is the config default **3** — consistent with the 3 adopted sessions |
 | JS asset | `assets/index-DVGo8aHh.js`, sha256 `39b4433276d3d697d1c677483fa08f52718b4ab14b769044840b9b432fef1435` |
 | CSS asset | `assets/index-Cwr45H40.css`, sha256 `9040b1fdf54c0293f20dae907526b114f8d0a75036a41b99afd2165b141036ac` |
 | Served vs disk hash | identical (HTTPS-served bundle byte-matches `apps/web/dist`) |
@@ -132,13 +134,14 @@ would have been a false rollback artifact.
 
 ## J. Blocked / unverified
 
-- **CI: passing for the final SHA.** Run `42162368037` on `51a9e30` completed
+- **CI: passing.** Run `42162368037` on `51a9e30` completed
   successfully (run page reports `Success`; the workflow badge for `main` reads
   `CI - passing`). Earlier runs for `6836d7d`, `420ffce`, `29b0b73`, `3ba6273` and
   `d00281a` were **cancelled** by the concurrency group when a later push
   superseded them — cancellation is not a pass, and none of them is reported as
-  one. The gap in coverage is closed by the final run, which contains every commit:
-  `51a9e30`'s tree is the union of the whole round.
+  one. Every commit of this round is contained in `51a9e30` — the two commits after
+  it (`d00281a`, `2a07283`) are a SettingsView fix and docs, and their content is
+  covered by the local gates below rather than by a green remote run.
 - **No physical iPhone test.** Keyboard behaviour, `safe-area` and iOS tab
   eviction are handled in code and exercised in Chromium at phone viewports, not
   on the device. Physical Safari is unavailable to this session.
@@ -148,6 +151,16 @@ would have been a false rollback artifact.
   limit, documented rather than papered over: nothing on the wire ties a
   verification result to a specific note.
 - **Performance was not re-measured.**
+- **The deployed backend was not exercised with an authenticated session.** Every
+  authenticated read (`/api/runtime`, `/api/agent-limit`) needs the owner's
+  password, which this session does not hold and will not guess. What *is* proven
+  about the deployed limit: the route is live (`401`, not `404`), and the whole
+  policy — bounds, persistence across restart, and the 3-of-6 race — is proven over
+  real HTTP by `scripts/verify-agent-limit.mjs` against a server process. The
+  remaining unverified step is the same check wearing the owner's cookie, plus
+  confirming that with 3 agents live a 4th launch refuses `conflict_limit` in
+  production. That last one cannot be tested without attempting a launch, which
+  would risk the running sessions; it is left undone deliberately.
 - **The concurrency limit was never exercised against a loaded production service
   from the phone.** The restart, the route, the persistence and the race are all
   verified (unit, E2E, and `scripts/verify-agent-limit.mjs` over real HTTP); what is
