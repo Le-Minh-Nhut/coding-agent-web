@@ -13,7 +13,7 @@ import { AgentDetail } from "./AgentDetail.js";
 import { FilesCenter } from "./FilesCenter.js";
 import { VibePanel, vibeVerdictLabel } from "./VibePanel.js";
 import { advisorEvidence, advisorIssues, advisorIssueViews, advisorNotesOf, standingBlockerCount, summarizeAdvisorNotes } from "../advisor.js";
-import { agentCounts, agentViews, vibeWorkerIds } from "../agent-model.js";
+import { agentCounts, agentViews, modelDisplayName, vibeWorkerIds } from "../agent-model.js";
 import {
   CollabSocket,
   parseCollabLink,
@@ -22,7 +22,7 @@ import {
   type HostFrame,
   type SessionEntry,
 } from "@caw/collab-protocol";
-import { clearTranscriptRequests, createTranscriptState, forgetTranscriptRequest, reduceHostFrame, setConnectionStatus, textFromContent, trackTranscriptRequest, transcriptMessagesFromEntries, type TranscriptMessage, type TranscriptReply, type TranscriptState } from "../transcript.js";
+import { clearTranscriptRequests, createTranscriptState, forgetTranscriptRequest, markSnapshotStalled, reduceHostFrame, setConnectionStatus, SNAPSHOT_PROGRESS_TIMEOUT_MS, snapshotProgress, textFromContent, trackTranscriptRequest, transcriptMessagesFromEntries, type TranscriptMessage, type TranscriptReply, type SyncStatus, type TranscriptState } from "../transcript.js";
 import { findSlashCommand, slashCommands, type SlashCommand } from "../commands.js";
 import { summarizeFileChanges, pairToolArguments } from "../tool-activity.js";
 import { collectChangedFiles, summarizeChangedFiles } from "../files.js";
@@ -169,7 +169,7 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
   const [handoffNotice, setHandoffNotice] = useState<string | null>(null);
   // A refusal is positive evidence the agent declined, so it must not be painted
   // with the green "running" tone that means "we delivered it".
-  const [handoffNoticeTone, setHandoffNoticeTone] = useState<"running" | "warning">("running");
+  const [handoffNoticeTone, setHandoffNoticeTone] = useState<"running" | "warning" | "success">("running");
   const [handoffRefusal, setHandoffRefusal] = useState<string | null>(null);
   // The code decides whether the refusal is confirmable (`draft_unconfirmed`, an
   // unprovable risk the user can accept) or hard (`terminal_attached`, where the
@@ -676,6 +676,15 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
       ...optimisticMessages.filter((pending) => (hostCounts.get(pending.text) ?? 0) <= (pending.hostEchoCount ?? 0)),
     ];
   }, [transcript.messages, optimisticMessages]);
+
+  /**
+   * The transcript's own sync verdict — except in saved-history mode, where the
+   * rendered rows come from the journal read rather than the live socket. There the
+   * saved read's completion is what authorises an empty screen, so the live
+   * snapshot's state must not leak in and claim the conversation is still loading.
+   */
+  const sync: SyncStatus = isShowingSavedHistory ? (historyLoading ? "loading" : "ready") : transcript.sync;
+
   /**
    * Saved mode has exactly one transcript source (the journal). Prompts the host
    * never acknowledged would otherwise vanish, so they stay visible under the same
@@ -832,6 +841,43 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     }
     if (frame.t === "state" && frame.state.model) setEffectiveModel({ conversationId, model: frame.state.model.id });
     if ((frame.t === "welcome" || frame.t === "state") && next.error === null) setSendError(null);
+  };
+
+  /**
+   * Snapshot stall watchdog.
+   *
+   * The reducer decides *whether* a snapshot has stalled (a pure function of the
+   * stream and a clock); this only re-evaluates that verdict on a timer while a
+   * snapshot is outstanding. Without it a truncated snapshot leaves the view on
+   * "Loading conversation…" forever with no way out — the reported symptom, and the
+   * exact gap the upstream guest closes with its own progress timeout.
+   *
+   * The timer is armed only while a snapshot exists, so an idle conversation costs
+   * nothing, and it polls at a fraction of the timeout so the verdict lands within
+   * a second or two of the real deadline.
+   */
+  useEffect(() => {
+    if (transcript.pendingSnapshot === null) return;
+    const interval = setInterval(() => {
+      const stalled = markSnapshotStalled(transcriptRef.current, Date.now());
+      if (stalled === transcriptRef.current) return;
+      transcriptRef.current = stalled;
+      setTranscript(stalled);
+    }, Math.max(500, Math.floor(SNAPSHOT_PROGRESS_TIMEOUT_MS / 15)));
+    return () => clearInterval(interval);
+  }, [transcript.pendingSnapshot]);
+
+  /**
+   * Retry the live link in place.
+   *
+   * Deliberately the *same* operation as the initial connect: same conversation
+   * id, same link request, same socket construction. It cannot launch a process,
+   * submit a prompt, or drop the draft, because it touches none of those — it only
+   * asks for a new link and rejoins. Verified rows are kept: a retry resyncs, it
+   * does not clear what is already proven.
+   */
+  const retrySync = (): void => {
+    void connectToCollab(true);
   };
 
   const flushPendingStream = (expectedConnection?: number): void => {
@@ -1571,6 +1617,66 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
       : result.error.message);
   };
 
+  /**
+   * Reconcile a `delivered` handoff against the durable record.
+   *
+   * A `delivered` answer proves only that the keystrokes reached the pane; the
+   * native compaction lands later, if it lands at all. The server writes a
+   * `handoff-committed` event at the moment it reads that compaction from the
+   * journal, so this waits for that evidence and reports success only then — the
+   * client must never promote "delivered" to "finished" on its own, because the
+   * entry that proves it exists in the journal and nowhere else.
+   *
+   * Bounded and one-shot per operation: a handful of reads over ~90s, never a
+   * poll loop, and nothing is retried if the evidence does not appear. Silence
+   * stays the honest `delivered`.
+   */
+  /**
+   * The journal entry id out of a `handoff-committed` payload, or `null`.
+   *
+   * The event payload is `unknown` at this boundary, so this reads the one field
+   * it needs and proves its type rather than asserting a shape.
+   */
+  const handoffCommitEntryId = (payload: unknown): string | null => {
+    if (typeof payload !== "object" || payload === null) return null;
+    if (!("entryId" in payload)) return null;
+    const entryId = payload.entryId;
+    return typeof entryId === "string" && entryId !== "" ? entryId : null;
+  };
+
+  /**
+   * The one completion sentence. A commit is announced with the journal entry that
+   * proves it — the evidence is the difference between "we believe it worked" and
+   * "the session's own journal says it did", which is the whole point of the
+   * state machine. The request path and the reconciliation path both call this so
+   * they cannot drift.
+   */
+  const handoffCompletedText = (entryId?: string | null): string =>
+    `✓ Handoff completed — context compacted successfully${entryId ? ` (journal entry ${entryId}).` : "."}`;
+
+  const awaitHandoffCommit = async (conversationAtHandoff: string, operationGeneration: number, baselineSeq: number | null, attempts = 12): Promise<void> => {
+    // Without a baseline the correlation cannot be established at all, and an
+    // uncorrelated match is exactly the fabrication this guards against: an
+    // *earlier* handoff's commit would acknowledge this one. So a missing
+    // baseline means no reconciliation, and the answer stays `delivered`.
+    if (baselineSeq === null) return;
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 7_500));
+      if (!viewActiveRef.current || operationGenerationRef.current !== operationGeneration || conversationIdRef.current !== conversationAtHandoff) return;
+      const result = await api.getConversationEvents(conversationAtHandoff, { limit: 50 });
+      if (!result.ok) return;
+      // Correlated by the store's own sequence number, not by a timestamp: the
+      // phone's clock is not the server's, so a wall-clock comparison would be
+      // wrong exactly when the two drift. `seq` is assigned by the one writer.
+      const committed = result.data.events.find((event) => event.type === "handoff-committed" && event.seq > baselineSeq);
+      if (!committed) continue;
+      if (!viewActiveRef.current || operationGenerationRef.current !== operationGeneration || conversationIdRef.current !== conversationAtHandoff) return;
+      setHandoffNoticeTone("success");
+      setHandoffNotice(handoffCompletedText(handoffCommitEntryId(committed.payload)));
+      return;
+    }
+  };
+
   const runHandoff = async (confirmDraftRisk = false): Promise<void> => {
     // One request at a time, and never from a state the server would refuse. The
     // ref is the real guard: two clicks in the same tick both see `handoffBusy`
@@ -1583,26 +1689,55 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     setHandoffNotice(null);
     setHandoffRefusal(null);
     setHandoffRefusalCode(null);
+    // The event-sequence baseline for this operation, read BEFORE the paste: any
+    // commit at or below it belongs to an earlier handoff and must not be allowed
+    // to acknowledge this one. An unreadable baseline disables reconciliation
+    // rather than defaulting to "match anything".
+    const baseline = await api.getConversationEvents(conversationAtHandoff, { limit: 1 });
+    const baselineSeq = baseline.ok ? (baseline.data.events.at(-1)?.seq ?? 0) : null;
     // The unsent draft is deliberately untouched by this action: it is not a send.
     const result = await api.requestHandoff(conversationAtHandoff, confirmDraftRisk).finally(() => { handoffInFlightRef.current = false; });
     if (!viewActiveRef.current || operationGenerationRef.current !== operationGeneration || conversationIdRef.current !== conversationAtHandoff) return;
     setHandoffBusy(false);
     if (result.ok) {
       setInterceptedCommand(null);
+      // The card is an offer, the banner is the report — and the banner only
+      // renders once the card is closed. Leaving it open hid the outcome behind
+      // the very panel that asked for it, so every settled result closes it.
+      setHandoffConfirming(false);
       // Three outcomes, never collapsed into one. `delivered` only proves the
       // keystrokes reached the pane. `refused` is positive evidence the agent
       // itself declined, so a retry is meaningful immediately. `committed` is the
       // journal proof. Never claim a compaction the journal has not recorded.
-      setHandoffNoticeTone(result.data.state === "delivered" && result.data.refused === true ? "warning" : "running");
+      // Tone follows the outcome, not a default. Only a journal-proven commit may
+      // wear the success colour; a refusal is a settled "no", and anything else is
+      // still generating.
+      setHandoffNoticeTone(
+        result.data.state === "committed"
+          ? "success"
+          : result.data.state === "delivered" && result.data.refused === true
+            ? "warning"
+            : "running",
+      );
       setHandoffNotice(result.data.state === "committed"
-        ? `Handoff committed — the journal records the compaction${result.data.compactionEntryId ? ` (${result.data.compactionEntryId})` : ""}.`
+        ? handoffCompletedText(result.data.compactionEntryId)
         : result.data.refused === true
           ? "Handoff refused — the agent declined it (nothing to hand off). Nothing was compacted; you can run it again once there is context to compact."
           : "Handoff delivered — OMP may still be generating; the transcript will show the compression when it commits.");
+      // `delivered` may still become `committed`; the journal is the only witness
+      // and the server records it as an event, so watch for that rather than
+      // guessing. Refused is a settled outcome, never reconciled.
+      if (result.data.state === "delivered" && result.data.refused !== true) {
+        void awaitHandoffCommit(conversationAtHandoff, operationGeneration, baselineSeq);
+      }
       return;
     }
     setHandoffRefusalCode(result.error.code);
     setHandoffRefusal(handoffRefusalText(result.error.code, result.error.message));
+    // Same rule as the success path: a refusal is reported by the banner, which
+    // only renders once the card is closed. `draft_unconfirmed` is the one
+    // exception — its override button lives on the card, so the card must stay.
+    if (result.error.code !== "draft_unconfirmed") setHandoffConfirming(false);
   };
 
   const handleUiResponse = (value: string | undefined, reqId?: number): void => {
@@ -2291,7 +2426,15 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
             >
               <span className="header-status-dot" aria-hidden="true" />
               {status}
-              {reportedModel !== null && <span className="header-status-model"> · {reportedModel}</span>}
+              {/* The friendly name, with the authoritative identifier kept as the
+                  accessible name and tooltip — the header shows what was chosen,
+                  the details still carry exactly what the host reported. */}
+              {reportedModel !== null && (
+                <span className="header-status-model" title={reportedModel} aria-label={`Model ${reportedModel}`}>
+                  {" · "}
+                  {modelDisplayName(reportedModel)}
+                </span>
+              )}
             </span>
           </div>
         </div>
@@ -2733,26 +2876,96 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
           </div>
         ) : null}
 
-        {/* A brand-new conversation has nothing to show, which reads as a broken
-            screen. Say what the session actually is instead of leaving a void.
-            Deliberately NOT role="status": the status banners above are the single
-            live region for connection state, and a second one advertising the same
-            state makes assistive tech (and any test filtering by role) ambiguous. */}
+        {/* Empty, loading, stalled and broken are four different truths and must
+            not look alike. The empty state is authorised ONLY by `sync === "empty"`
+            — a host-verified zero, or a completed snapshot that carried nothing —
+            because an incomplete snapshot is indistinguishable from an empty
+            session by message count alone. That single rule is what the reported
+            bug violated: a 3238-entry conversation rendered as "No prompts yet"
+            while its snapshot was still in flight. */}
         {messages.length === 0 && !streamingText && !linkUnavailable && (
-          <div className="empty-transcript">
-            {/* Same rule as the status row: a live idle link outranks the
-                record's stale `starting`, so the connected copy is the true one. */}
-            {status === "idle" && (
-              <>
-                <p>Connected to this conversation&apos;s agent.</p>
-                <p>No prompts yet. Send one below to start the turn.</p>
-              </>
+          <div className="empty-transcript" data-sync={sync}>
+            {sync === "loading" && (
+              <div className="empty-state" role="status" aria-live="polite">
+                <div className="empty-state-icon" aria-hidden="true">
+                  <span className="spinner" />
+                </div>
+                <p className="empty-state-title">Loading conversation…</p>
+                <p className="empty-state-sub">
+                  {snapshotProgress(transcript) === null
+                    ? "Waiting for the session's history."
+                    : `${snapshotProgress(transcript)!.received} of ${snapshotProgress(transcript)!.total} entries received.`}
+                </p>
+              </div>
             )}
-            {conversation?.state === "starting" && status !== "idle" && status !== "running" && <p>The host is starting up. Prompting may be refused until it finishes.</p>}
-            {status === "running" && <p>The agent is working. Output appears here as it streams.</p>}
-            {status === "connecting" && <p>Contacting the agent…</p>}
-            {(status === "reconnecting" || status === "disconnected") && (
-              <p>The live transcript is unavailable while the connection is down.</p>
+            {sync === "stalled" && (
+              <div className="empty-state" role="alert">
+                <div className="empty-state-icon" aria-hidden="true">!</div>
+                <p className="empty-state-title">History did not finish loading</p>
+                <p className="empty-state-sub">
+                  The session&apos;s transcript stopped arriving partway. It may be
+                  a slow connection, or the host may be resending a large history.
+                </p>
+                <button type="button" className="primary empty-state-action" onClick={retrySync}>
+                  Retry
+                </button>
+              </div>
+            )}
+            {sync === "empty" && status === "idle" && (
+              <div className="empty-state">
+                <div className="empty-state-icon" aria-hidden="true">›_</div>
+                <p className="empty-state-title">Start the conversation</p>
+                <p className="empty-state-sub">This session has no prompts yet.</p>
+              </div>
+            )}
+            {/* A managed session whose record still says `starting` may refuse a
+                prompt, and that is information the user needs before typing. It
+                outranks the neutral empty state, which would otherwise say the
+                session is ready. */}
+            {sync === "empty" && conversation?.state === "starting" && status !== "idle" && status !== "running" && (
+              <div className="empty-state">
+                <p className="empty-state-title">The host is starting up</p>
+                <p className="empty-state-sub">Prompting may be refused until it finishes.</p>
+              </div>
+            )}
+            {sync === "empty" && status === "running" && (
+              <div className="empty-state">
+                <p className="empty-state-title">The agent is working</p>
+                <p className="empty-state-sub">Output appears here as it streams.</p>
+              </div>
+            )}
+            {sync === "ready" && status === "running" && (
+              <div className="empty-state">
+                <p className="empty-state-title">The agent is working</p>
+                <p className="empty-state-sub">Output appears here as it streams.</p>
+              </div>
+            )}
+            {status === "connecting" && sync !== "stalled" && (
+              <div className="empty-state">
+                {/* The record's startup warning outranks the generic line: a
+                    session that may refuse a prompt must say so, not just that
+                    something is happening. A healthy idle link never reaches
+                    here (it is handled above). */}
+                {conversation?.state === "starting" ? (
+                  <>
+                    <p className="empty-state-title">The host is starting up</p>
+                    <p className="empty-state-sub">Prompting may be refused until it finishes.</p>
+                  </>
+                ) : (
+                  <p className="empty-state-title">Contacting the agent…</p>
+                )}
+              </div>
+            )}
+            {(status === "reconnecting" || status === "disconnected") && sync !== "stalled" && (
+              <div className="empty-state">
+                <p className="empty-state-title">The live transcript is unavailable</p>
+                <p className="empty-state-sub">
+                  The connection is down. Verified history is kept; it returns on reconnect.
+                </p>
+                <button type="button" className="empty-state-action" onClick={retrySync}>
+                  Reconnect
+                </button>
+              </div>
             )}
           </div>
         )}

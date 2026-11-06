@@ -137,6 +137,17 @@ const KINDS: Record<string, (payload: Record<string, unknown> | null) => Activit
     const sessionId = str(payload?.sessionId);
     return { label: "Handoff started", detail: sessionId === null ? null : `Native session ${sessionId}`, tone: "neutral", debugOnly: false };
   },
+  // The operation is over and the journal says so: this is the only handoff
+  // outcome that may read as success, and it names the entry that proves it.
+  "handoff-committed": (payload) => {
+    const entryId = str(payload?.entryId);
+    return {
+      label: "Handoff completed",
+      detail: entryId === null ? "Context compacted." : `Context compacted (journal entry ${entryId}).`,
+      tone: "success",
+      debugOnly: false,
+    };
+  },
   // The marker was retired: internal bookkeeping with no user-visible step behind
   // it, so it reads quieter than the rest.
   "handoff-cancelled": () => ({ label: "Handoff cancelled", detail: null, tone: "neutral", debugOnly: true }),

@@ -27,6 +27,10 @@ vi.mock("../../apps/web/src/api.js", () => ({
     getConversationHistory: vi.fn(),
     getModels: vi.fn(),
     requestHandoff: vi.fn(),
+    // The handoff flow reads the event tail before pasting, to establish which
+    // commits predate this operation. Default: an empty timeline, so a test that
+    // does not care about reconciliation still exercises the correlation read.
+    getConversationEvents: vi.fn(),
   },
 }));
 
@@ -114,6 +118,7 @@ describe("/handoff", () => {
     vi.mocked(api.getAttachInstructions).mockResolvedValue({ ok: true, data: { conversationId: "c-1", available: false, command: null, tmuxSessionName: null, reason: null } });
     vi.mocked(api.getModels).mockResolvedValue({ ok: true, data: { models: ["model-a"], source: "omp", reason: null } });
     vi.mocked(api.getConversationHistory).mockResolvedValue({ ok: false, error: { code: "not_found", message: "No history" } });
+    vi.mocked(api.getConversationEvents).mockResolvedValue({ ok: true, data: { events: [], nextAfter: null, nextBefore: null } });
     vi.mocked(api.getConversationLink).mockResolvedValue({ ok: true, data: { url: "ws://127.0.0.1:7466/r/0123456789abcdef.AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE", access: "full", instanceId: "i", generation: 1 } });
     vi.mocked(api.requestHandoff).mockResolvedValue({ ok: true, data: { state: "delivered", paneId: "pane-1" } });
   });
@@ -166,7 +171,13 @@ describe("/handoff", () => {
     await sendFromComposer(view, "/handoff");
     await act(async () => { fireEvent.click(view.getByRole("button", { name: "Run handoff" })); });
 
-    await waitFor(() => expect(view.getByText("Handoff committed — the journal records the compaction (compaction-7).")).toBeTruthy());
+    // R57: a journal-proven commit is reported as a completion, and only the
+    // commit may read that way. The completion sentence keeps the evidence pointer
+    // — the entry id is the difference between "we believe it worked" and "the
+    // session's own journal says it did".
+    await waitFor(() => expect(view.getByText(/✓ Handoff completed — context compacted successfully \(journal entry compaction-7\)\./)).toBeTruthy());
+    // The offer card closes on a settled outcome, so the banner is what is seen.
+    expect(view.queryByRole("group", { name: "Handoff context" })).toBeNull();
   });
 
   it("reports an agent-stated refusal distinctly, not as a delivery", async () => {

@@ -671,6 +671,9 @@ textarea::placeholder {
 /* m6: `.banner.info` deleted — NoticeRow owns info presentation now (a quiet muted
    line, so a routine collab join cannot paint a bright blue full-width bar). */
 .banner.warning { background-color: #3a2b10; color: #d29922; border-bottom: 1px solid #9e6a03; }
+/* A handoff that the journal proves committed: the one handoff banner that is
+   good news, and the only one that may use the success colour. */
+.banner.success { background-color: #0f2a17; color: #3fb950; border-bottom: 1px solid #238636; }
 .banner.error { background-color: #3b181a; color: #f85149; border-bottom: 1px solid #da3633; }
 
 /* Views Layout */
@@ -717,6 +720,14 @@ textarea::placeholder {
      this is where most of the reclaimed vertical space comes from. */
   gap: 10px;
   min-width: 0;
+  /* Fill the scroller so a state that centres itself inside the transcript (the
+     empty/loading/failed block) actually has free space to centre in. Without
+     this the wrapper is content-sized, the state block hugs the top, and an empty
+     conversation looks like a stray line of text rather than a deliberate state.
+     `flex: 1 1 auto` with `min-height: 0` still lets a long transcript grow past
+     the viewport and scroll. */
+  flex: 1 1 auto;
+  min-height: 0;
 }
 
 .model-controls {
@@ -1134,11 +1145,15 @@ details[open] summary {
   margin-bottom: 12px;
 }
 
-/* Empty transcript: a fresh conversation is not a broken screen, it is a session
-   with nothing in it yet, and it should say which. */
+/* The transcript's own scroller is a flex column, so claiming the free space is
+   what centres the state in the usable content area (between header and composer)
+   without absolute positioning or a fixed height. */
 .empty-transcript {
+  flex: 1 1 auto;
   display: flex;
   flex-direction: column;
+  align-items: center;
+  justify-content: center;
   gap: 6px;
   padding: 24px 16px;
   color: var(--text-muted);
@@ -1146,6 +1161,67 @@ details[open] summary {
   text-align: center;
 }
 .empty-transcript p { margin: 0; }
+
+/* One deliberate empty/loading/failed presentation. `margin: auto` keeps it
+   centred even if a parent forgets the flex rules above. */
+.empty-state {
+  margin: auto;
+  max-width: 320px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  text-align: center;
+}
+.empty-state-icon {
+  width: 44px;
+  height: 44px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  color: var(--text-faint);
+  font-size: 0.95rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.empty-state-title {
+  color: var(--text-primary);
+  font-size: 0.98rem;
+  font-weight: 600;
+  margin: 0;
+}
+.empty-state-sub {
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  line-height: 1.45;
+  margin: 0;
+}
+.empty-state-action {
+  margin-top: 2px;
+  min-height: 36px;
+  padding: 0 16px;
+  border-radius: var(--radius-control);
+  border: 1px solid var(--border-strong);
+  background: var(--surface-secondary);
+  color: var(--text-primary);
+  font-size: 0.88rem;
+}
+.empty-state-action:hover { background: var(--surface-hover); }
+
+/* A progress spinner for the loading state: a rotating arc, no image, and it
+   honours reduced-motion by falling back to a static ring. */
+.spinner {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 2px solid var(--border-strong);
+  border-top-color: var(--primary);
+  animation: caw-spin 0.9s linear infinite;
+}
+@keyframes caw-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .spinner { animation: none; }
+}
 
 @media (max-width: 420px) {
   .conversation-header-actions {

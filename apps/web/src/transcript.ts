@@ -71,18 +71,52 @@ export interface TranscriptRequest {
 export type TurnStatus = "idle" | "running";
 export type ConnectionStatus = "connecting" | "live" | "reconnecting" | "unknown" | "disconnected";
 
+/**
+ * Whether the transcript on screen is the conversation's real history.
+ *
+ * This exists because `messages.length === 0` cannot distinguish "this session
+ * has no prompts" from "the history has not arrived yet". The empty state used
+ * that length as its only test, so an in-flight (or truncated) snapshot rendered
+ * "No prompts yet" — which is exactly the reported symptom: an existing
+ * conversation with thousands of native entries looked brand new.
+ *
+ * `empty` is the only state that authorises the empty-state copy, and it is set
+ * only by a source that has positively established the conversation is empty:
+ * a `welcome` declaring zero entries, or a completed snapshot that carried none.
+ * Anything else is `loading` or `stalled`, never empty.
+ */
+export type SyncStatus =
+  /** No snapshot or history read is outstanding and the transcript is authoritative. */
+  | "ready"
+  /** An initial snapshot is in flight; entries are being received. */
+  | "loading"
+  /** A snapshot began but no chunk has arrived for too long; the data may be gone. */
+  | "stalled"
+  /** The sink is known to hold no displayable messages. */
+  | "empty";
+
 type QueuedLiveFrame = Extract<HostFrame, { t: "entry" | "event" }>;
 
 interface PendingSnapshot {
   entries: SessionEntry[];
   live: QueuedLiveFrame[];
   total: number;
+  /**
+   * When this snapshot's last progress was seen, on the caller's clock.
+   *
+   * Held in the state rather than in a timer so the decision "this snapshot has
+   * stopped moving" is a pure function of the stream, and can be re-evaluated
+   * after a reconnect or a re-render without owning a timer per attempt.
+   */
+  startedAt: number;
 }
 
 export interface TranscriptState {
   entries: SessionEntry[];
   messages: TranscriptMessage[];
   pendingSnapshot: PendingSnapshot | null;
+  /** Whether the transcript is authoritative, still arriving, or stalled. */
+  sync: SyncStatus;
   agents: AgentSnapshot[];
   nextLiveMessageId: number;
   streamingMessage: AssistantMessage | null;
@@ -146,6 +180,9 @@ export function createTranscriptState(): TranscriptState {
     entries: [],
     messages: [],
     pendingSnapshot: null,
+    // Nothing is known yet: a freshly mounted view has no transcript, and until a
+    // source says otherwise that is "loading", never "empty".
+    sync: "loading",
     agents: [],
     streamingMessage: null,
     turnStatus: "idle",
@@ -675,12 +712,64 @@ function withSessionState(state: TranscriptState, session: SessionState): Transc
 }
 
 /**
+ * Whether an in-flight snapshot has stopped making progress.
+ *
+ * Pure: the caller supplies the clock, so a view can re-evaluate this on a timer
+ * (or after a reconnect) without the reducer owning any timer of its own.
+ */
+export function snapshotStalled(state: TranscriptState, now: number): boolean {
+  const pending = state.pendingSnapshot;
+  if (pending === null) return false;
+  return now - pending.startedAt >= SNAPSHOT_PROGRESS_TIMEOUT_MS;
+}
+
+/**
+ * How much of the promised snapshot has arrived, for a progress line.
+ *
+ * `received` counts entries the host has actually delivered; `total` is what its
+ * `welcome` promised. Both are real host numbers — no percentage is invented.
+ */
+export function snapshotProgress(state: TranscriptState): { received: number; total: number } | null {
+  const pending = state.pendingSnapshot;
+  if (pending === null) return null;
+  return { received: pending.entries.length, total: pending.total };
+}
+
+/**
+ * Mark a still-in-flight snapshot as stalled. A no-op when the snapshot has since
+ * completed, so a late timer cannot rewrite a finished transcript's state.
+ */
+export function markSnapshotStalled(state: TranscriptState, now: number): TranscriptState {
+  if (!snapshotStalled(state, now)) return state;
+  return state.sync === "stalled" ? state : { ...state, sync: "stalled" };
+}
+
+/**
+ * How long a snapshot may go without progress before it is called stalled.
+ *
+ * Mirrors upstream's own guest (`packages/guest/src/lib/client.ts`), which arms
+ * a `SNAPSHOT_PROGRESS_TIMEOUT_MS = 30_000` between chunks and ends the join when
+ * it fires. It is a *progress* timeout, not a total-duration one: a 3238-entry,
+ * ~10.2 MB snapshot must be allowed to take as long as it needs, as long as each
+ * chunk moves it forward.
+ */
+export const SNAPSHOT_PROGRESS_TIMEOUT_MS = 30_000;
+
+/**
  * Pure Collab transcript reducer. A welcome starts replacement snapshot; chunks
  * stay private until final (or entry count reached), then snapshot entries publish
  * in order before queued live entries/events. Durable rows use entry IDs; live
  * event rows are paired one-to-one with durable twins by message correlation.
+ *
+ * `now` is injected so the stall decision is a pure function of the stream plus a
+ * caller-supplied clock: tests advance it instead of waiting, and a re-render
+ * cannot change the verdict.
  */
-export function reduceHostFrame(state: TranscriptState, frame: HostFrame): TranscriptState {
+export function reduceHostFrame(
+  state: TranscriptState,
+  frame: HostFrame,
+  now: number = Date.now(),
+): TranscriptState {
   switch (frame.t) {
     case "welcome": {
       const base = {
@@ -696,9 +785,17 @@ export function reduceHostFrame(state: TranscriptState, frame: HostFrame): Trans
         streamingMessage: null,
         uiRequests: { current: null, queue: [] },
       };
+      // A host that reports zero entries has positively established this session is
+      // empty — that is the one authoritative source for the empty state. A host
+      // that reports N has established the opposite: N entries exist and none of
+      // them are on screen yet, which is `loading`, never `empty`.
       return frame.entryCount === 0
-        ? { ...base, entries: [], messages: [], pendingSnapshot: null }
-        : { ...base, pendingSnapshot: { entries: [], live: [], total: frame.entryCount } };
+        ? { ...base, entries: [], messages: [], pendingSnapshot: null, sync: "empty" }
+        : {
+            ...base,
+            pendingSnapshot: { entries: [], live: [], total: frame.entryCount, startedAt: now },
+            sync: "loading",
+          };
     }
 
     case "snapshot-chunk": {
@@ -706,19 +803,36 @@ export function reduceHostFrame(state: TranscriptState, frame: HostFrame): Trans
       const pending = {
         ...state.pendingSnapshot,
         entries: [...state.pendingSnapshot.entries, ...frame.entries],
+        // Every chunk that carries anything is progress, and progress is what the
+        // timeout measures. An empty non-final chunk is not progress.
+        startedAt: frame.entries.length > 0 || frame.final ? now : state.pendingSnapshot.startedAt,
       };
-      if (!frame.final && pending.entries.length < pending.total) return { ...state, pendingSnapshot: pending };
-      const published = addEntriesBatch({ ...state, entries: [], messages: [], pendingSnapshot: null }, pending.entries);
-      return pending.live.reduce(applyLiveFrame, published);
+      if (!frame.final && pending.entries.length < pending.total) {
+        return state.sync === "stalled"
+          // A stalled snapshot that moves again is loading again; the banner clears.
+          ? { ...state, pendingSnapshot: pending, sync: "loading" }
+          : { ...state, pendingSnapshot: pending };
+      }
+      const published = addEntriesBatch(
+        { ...state, entries: [], messages: [], pendingSnapshot: null, sync: "loading" },
+        pending.entries,
+      );
+      // `empty` requires positive evidence, and there are exactly two forms of it:
+      // the host promised nothing (`total === 0`), or it delivered entries that
+      // simply are not displayable. A snapshot that promised entries and delivered
+      // none is neither — it is an unexplained transcript, and the empty-state copy
+      // ("this session has no prompts yet") would be a claim about the native
+      // journal that this evidence does not support.
+      const establishedEmpty = published.messages.length === 0 && (pending.total === 0 || pending.entries.length > 0);
+      const sync: SyncStatus = published.messages.length > 0 ? "ready" : establishedEmpty ? "empty" : "stalled";
+      return { ...pending.live.reduce(applyLiveFrame, published), sync };
     }
     case "entry":
-      return state.pendingSnapshot
-        ? { ...state, pendingSnapshot: { ...state.pendingSnapshot, live: [...state.pendingSnapshot.live, frame] } }
-        : addEntry(state, frame.entry);
+      if (!state.pendingSnapshot) return addEntry(state, frame.entry);
+      return { ...state, pendingSnapshot: { ...state.pendingSnapshot, live: [...state.pendingSnapshot.live, frame] } };
     case "event":
-      return state.pendingSnapshot
-        ? { ...state, pendingSnapshot: { ...state.pendingSnapshot, live: [...state.pendingSnapshot.live, frame] } }
-        : applyEvent(state, frame.event);
+      if (!state.pendingSnapshot) return applyEvent(state, frame.event);
+      return { ...state, pendingSnapshot: { ...state.pendingSnapshot, live: [...state.pendingSnapshot.live, frame] } };
     case "state":
       return withSessionState(state, frame.state);
     case "agents":
@@ -732,7 +846,20 @@ export function reduceHostFrame(state: TranscriptState, frame: HostFrame): Trans
     case "error":
       return { ...state, error: frame.message };
     case "bye":
-      return { ...state, connectionStatus: "disconnected", sessionEnded: true, error: frame.reason };
+      // A `bye` mid-snapshot means the promised entries are never coming on this
+      // connection. Whatever partial chunks arrived are NOT a transcript — they are
+      // an arbitrary prefix of one — so they are dropped rather than published, which
+      // is what keeps a truncated snapshot from rendering as a short conversation.
+      // An established transcript is kept: it is the last authoritative read.
+      return {
+        ...state,
+        ...(state.pendingSnapshot === null
+          ? {}
+          : { pendingSnapshot: null, sync: state.messages.length === 0 ? "stalled" : "ready" }),
+        connectionStatus: "disconnected",
+        sessionEnded: true,
+        error: frame.reason,
+      };
     case "bus": {
       // Field names are the host's, verified against
       // `packages/tui/src/overlays/session-observer-registry.ts:10-40`:

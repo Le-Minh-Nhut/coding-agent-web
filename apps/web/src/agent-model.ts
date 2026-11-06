@@ -146,6 +146,22 @@ export function agentViews(agents: readonly AgentSnapshot[], workerIds: Readonly
 }
 
 /** Counts for the header chip. Never counts a non-worker as a worker. */
+/**
+ * A short, friendly name for a model identifier, for places where the full
+ * provider path wastes the line it is on.
+ *
+ * The header used to print the whole `provider/scope/model` string — the owner's
+ * own session rendered `9router/wdb/deepseek-ai/DeepSeek-V4.1-Flash` beside the
+ * status dot on a 390px phone, which pushed everything else off the row. The
+ * authority is the last path segment: it names the model the user actually chose,
+ * while the full identifier stays available in the model sheet and as this
+ * element's `title`, so nothing is lost or misreported.
+ */
+export function modelDisplayName(model: string): string {
+  const lastSegment = model.split("/").filter((segment) => segment !== "").at(-1);
+  return lastSegment ?? model;
+}
+
 export function agentCounts(views: readonly AgentView[]): {
   total: number;
   workers: number;

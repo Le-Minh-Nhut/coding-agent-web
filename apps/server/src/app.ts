@@ -923,6 +923,17 @@ export function buildApp(deps: AppDependencies): FastifyInstance<HttpServer> {
             // The operation is finished: retire the marker rather than leaving
             // the next reader to infer its end from the compaction it just saw.
             await clearHandoffMarker(conversation.id);
+            // A durable record of the *outcome*, not just the start. The client
+            // cannot see a native compaction over Collab (the wire entry carries
+            // no `method`), so this event is how a completion survives a reload or
+            // a reconnect — and it is written only here, where the journal has
+            // actually been read for it.
+            await deps.store.recordEvent(
+              conversation.id,
+              "handoff-committed",
+              { entryId: evidence.entryId, sessionId: nativeSessionId },
+              new Date().toISOString(),
+            );
             app.log.info({ conversationId: conversation.id, entryId: evidence.entryId }, "handoff compaction observed");
             return ok({ state: "committed", paneId: result.paneId, compactionEntryId: evidence.entryId } satisfies HandoffResponse);
           }

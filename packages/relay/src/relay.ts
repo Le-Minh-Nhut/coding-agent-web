@@ -73,11 +73,39 @@ export const DEFAULT_MAX_ROOMS = 32;
 export const MAX_FRAME_BYTES = 8 * 1024 * 1024;
 
 /**
- * Per-socket send buffer ceiling. A guest that stops reading must not grow the relay without
- * bound; past this the peer is closed with 1013 instead of buffering.
- * ponytail: drop-and-close, no per-peer queue; add a bounded queue if a slow phone must survive.
+ * Hard ceiling on what one paused peer may owe. A peer that never drains must
+ * not grow the relay without bound, so past this it is closed with 1013 — the
+ * last resort, and the only place a socket is closed for being slow.
+ *
+ * This is measured on the *queued* side, not on `bufferedAmount`: while a peer
+ * is paused nothing is handed to `ws`, so `bufferedAmount` stays flat and cannot
+ * police the backlog. 16 MiB fits the largest real snapshot (the owner's is
+ * ~10.2 MB / 3238 entries) with room for the live frames that follow it, while
+ * still bounding what one stuck guest can pin in relay memory.
  */
-const MAX_BUFFERED_BYTES = 4 * 1024 * 1024;
+const MAX_QUEUED_BYTES = 16 * 1024 * 1024;
+
+/**
+ * Flow-control thresholds, in bytes buffered by the peer's socket.
+ *
+ * A guest that cannot keep up with a session snapshot must see the *same*
+ * snapshot, just later. Upstream's host sends one `snapshot-chunk` per 512 KiB
+ * (`collab/host.ts:134`) from a snapshot that is routinely several MB — the
+ * owner's own session is 3238 entries / ~10.2 MB — and a phone on Tailscale
+ * cannot absorb that at line rate. The old behaviour closed the peer the moment
+ * its buffer crossed a threshold, which `packages/guest/src/lib/client.ts` and
+ * the web reducer both read as an interrupted snapshot; the client then
+ * reconnected and was closed again, forever, leaving a permanent blank screen.
+ *
+ * So: stop pushing once a peer is this far behind, and resume once it has
+ * drained to {@link RESUME_BYTES}. The gap between the two prevents a
+ * pause/resume oscillation on every frame boundary.
+ */
+const PAUSE_BYTES = 1 * 1024 * 1024;
+/** Resume pushing once a paused peer's socket buffer falls back to this. */
+const RESUME_BYTES = 256 * 1024;
+/** How often a paused peer's backlog is re-checked. Only runs while a backlog exists. */
+const FLOW_POLL_MS = 25;
 
 /**
  * Idle probe interval. Both OMP and the browser client ping on their own
@@ -208,6 +236,88 @@ function toBuffer(data: RawData): Buffer {
   return Buffer.from(data as ArrayBuffer);
 }
 
+/**
+ * Per-peer send pump shared by every socket the relay forwards to.
+ *
+ * The queue exists only while a peer is behind; once its socket has drained to
+ * {@link RESUME_BYTES} the whole backlog is handed to `ws` in arrival order and
+ * the entry is forgotten. A peer with nothing queued takes the direct `send`
+ * path, so the normal case allocates nothing.
+ */
+function createFlowControl(deps: {
+  send: (target: WebSocket, frame: Buffer) => void;
+  close: (target: WebSocket, code: number, reason: string) => void;
+  logger: RelayLogger;
+}): {
+  send(target: WebSocket, frame: Buffer): void;
+  forget(target: WebSocket): void;
+} {
+  interface Paused {
+    queue: Buffer[];
+    bytes: number;
+    timer: NodeJS.Timeout;
+  }
+  const paused = new Map<WebSocket, Paused>();
+
+  const release = (target: WebSocket, entry: Paused): void => {
+    paused.delete(target);
+    clearInterval(entry.timer);
+    const queued = entry.queue.splice(0, entry.queue.length);
+    entry.bytes = 0;
+    for (const frame of queued) deps.send(target, frame);
+  };
+
+  const drain = (target: WebSocket, entry: Paused): void => {
+    if (paused.get(target) !== entry) return;
+    if (target.readyState !== WebSocket.OPEN) {
+      deps.logger.warn("[relay] discarding queued frames for a closed peer");
+      paused.delete(target);
+      clearInterval(entry.timer);
+      entry.queue.length = 0;
+      return;
+    }
+    if (target.bufferedAmount > RESUME_BYTES) return;
+    release(target, entry);
+  };
+
+  return {
+    send(target, frame): void {
+      const entry = paused.get(target);
+      if (entry) {
+        entry.queue.push(frame);
+        entry.bytes += frame.byteLength;
+        if (entry.bytes > MAX_QUEUED_BYTES) {
+          deps.logger.warn("[relay] closing peer that never drains: queued backlog over ceiling");
+          paused.delete(target);
+          clearInterval(entry.timer);
+          entry.queue.length = 0;
+          deps.close(target, 1013, "peer too slow");
+        }
+        return;
+      }
+      if (target.readyState !== WebSocket.OPEN) return;
+      if (target.bufferedAmount >= PAUSE_BYTES) {
+        // This frame is what crossed the threshold, so it joins the backlog too:
+        // the peer must still see it, and still see it first.
+        const state: Paused = { queue: [frame], bytes: frame.byteLength, timer: null as unknown as NodeJS.Timeout };
+        state.timer = setInterval(() => drain(target, state), FLOW_POLL_MS);
+        // The timer must never be the reason the process stays alive.
+        state.timer.unref?.();
+        paused.set(target, state);
+        return;
+      }
+      deps.send(target, frame);
+    },
+    forget(target): void {
+      const entry = paused.get(target);
+      if (!entry) return;
+      paused.delete(target);
+      clearInterval(entry.timer);
+      entry.queue.length = 0;
+    },
+  };
+}
+
 /** Complete an upgrade that the relay refuses to establish, without touching WebSocket framing. */
 function rejectUpgrade(socket: Duplex, status: number, message: string): void {
   if (!socket.writable) {
@@ -257,15 +367,29 @@ export function createRelay(options: RelayOptions = {}): Relay {
     });
   };
 
-  /** Data frame to a peer, with a backpressure ceiling. */
+  /**
+   * Per-peer send pump, created before `deliver` so its closure is initialised
+   * by the time the first frame is routed.
+   *
+   * A peer that is merely behind is paused, never dropped: the snapshot it is
+   * receiving is the only copy of the session's history on that channel, and
+   * closing the socket mid-snapshot is indistinguishable from a failure on both
+   * guests (see {@link PAUSE_BYTES}). A paused peer keeps its room membership and
+   * its peer id — a resync is a resume, not a rejoin. The only 1013 close left is
+   * a peer that never drains at all (see {@link MAX_QUEUED_BYTES}).
+   */
+  const flow = createFlowControl({
+    send: (target, frame) => {
+      if (target.readyState !== WebSocket.OPEN) return;
+      target.send(frame);
+    },
+    close: (target, code, reason) => target.close(code, reason),
+    logger,
+  });
+
+  /** Data frame to a peer, subject to that peer's flow control. */
   const deliver = (target: WebSocket, frame: Buffer): void => {
-    if (target.readyState !== WebSocket.OPEN) return;
-    if (target.bufferedAmount > MAX_BUFFERED_BYTES) {
-      logger.warn("[relay] closing backed-up peer: send buffer over ceiling");
-      target.close(1013, "peer too slow");
-      return;
-    }
-    target.send(frame);
+    flow.send(target, frame);
   };
 
   /** Tiny control frame; never subject to the data-path backpressure guard. */
@@ -298,6 +422,8 @@ export function createRelay(options: RelayOptions = {}): Relay {
     });
     ws.on("close", () => {
       liveness.delete(ws);
+      // A closed peer may still hold a pause timer and a backlog; both must go.
+      flow.forget(ws);
     });
     // A receiver-level failure (oversized frame, malformed frame) is reported as a socket error;
     // `ws` closes those with 1009. Without this handler an unhandled 'error' event would take the
@@ -590,6 +716,9 @@ export function createRelay(options: RelayOptions = {}): Relay {
           room.host.close(1001, "relay shutting down");
         }
         rooms.clear();
+        // Pause timers outlive their sockets otherwise, and `unref` alone would
+        // leave the queues holding the last snapshot for the process's lifetime.
+        for (const socket of sockets) flow.forget(socket);
         // Give the queued close frames a bounded chance to flush, then enforce.
         await Promise.all(
           sockets.map(

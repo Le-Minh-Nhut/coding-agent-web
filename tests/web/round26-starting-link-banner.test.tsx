@@ -69,8 +69,11 @@ describe("V26 starting record vs live link", () => {
     const header = view.container.querySelector(".header-status");
     expect(header).not.toBeNull();
     expect(header!.textContent).toBe("idle");
-    expect(await screen.findByText("Connected to this conversation's agent.")).toBeTruthy();
-    expect(view.queryByText("The host is starting up. Prompting may be refused until it finishes.")).toBeNull();
+    // R57: the empty state is now a deliberate card rather than two grey
+    // paragraphs. The claim is unchanged — a healthy idle link shows the neutral
+    // empty state and never the record's startup warning.
+    expect(await screen.findByText("Start the conversation")).toBeTruthy();
+    expect(view.queryByText("The host is starting up")).toBeNull();
   });
 
   it("while the link is still connecting the startup warning is the honest row", async () => {
@@ -78,8 +81,8 @@ describe("V26 starting record vs live link", () => {
     expect(await screen.findByText("Host is starting up; prompting may be refused.")).toBeTruthy();
     expect(view.queryByText("Connected — no turn in flight")).toBeNull();
     // The empty-transcript copy switches back to the warning too.
-    expect(await screen.findByText("The host is starting up. Prompting may be refused until it finishes.")).toBeTruthy();
-    expect(screen.queryByText("Connected to this conversation's agent.")).toBeNull();
+    expect(await screen.findByText("The host is starting up")).toBeTruthy();
+    expect(screen.queryByText("Start the conversation")).toBeNull();
     // A link that is not healthy must show its own state, not the record's idle.
     expect(view.container.querySelector(".header-status")!.textContent).toBe("connecting");
   });

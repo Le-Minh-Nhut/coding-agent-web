@@ -1496,3 +1496,80 @@ node scripts/verify-agent-limit.mjs
 ```
 
 Script tự dựng server riêng ở cổng **8799** (relay **8798**), **không** đụng vào bản đang chạy thật, và **không** khởi động agent nào. Nó kiểm qua HTTP thật: mặc định `3` → đặt `7` (nguồn thành `setting`) → gửi `9999` bị **từ chối** → **khởi động lại tiến trình** → vẫn ra `7` → yêu cầu chưa đăng nhập bị **401**. Kết quả đã chạy trong vòng này: `PASS: limit is real, validated, and persists across restart`.
+
+## 35. Đồng bộ lịch sử trò chuyện (và vì sao màn hình không còn trắng)
+
+### 35.1 "Chưa có prompt nào" chỉ xuất hiện khi thật sự chưa có
+
+Trước đây màn hình kết luận "chưa có gì" chỉ vì **số dòng đang hiển thị bằng 0**. Điều đó đúng với một phiên mới, nhưng cũng đúng với một cuộc trò chuyện đang tải dở — nên một cuộc trò chuyện có hàng nghìn dòng vẫn hiện như mới tạo.
+
+Nay giao diện phân biệt năm trạng thái, mỗi trạng thái một câu chữ riêng:
+
+| Trạng thái | Người dùng thấy |
+| --- | --- |
+| Đang tải lịch sử | "Loading conversation…" kèm số dòng đã nhận trên tổng số (`12 of 3238 entries received.`) |
+| Phiên thật sự trống | "Start the conversation" / "This session has no prompts yet." |
+| Tải dở rồi đứng | "History did not finish loading" kèm nút **Retry** |
+| Mất kết nối | "The live transcript is unavailable" — lịch sử đã xác minh **vẫn được giữ** |
+| Đang chạy | "The agent is working" |
+
+Quy tắc bất di bất dịch: **không bao giờ** nói "chưa có prompt nào" khi việc tải chưa xong. Con số trên dòng tiến độ là số thật do máy chủ báo, không phải phần trăm ước lượng.
+
+### 35.2 Vì sao bản cũ đứng im mãi
+
+Bản cũ không có cơ chế nào coi một lần tải là **đã hỏng**. Khi relay đóng kết nối giữa chừng (xem 35.3), giao diện giữ nguyên trạng thái "đang tải" vĩnh viễn và không có cách nào thoát ra.
+
+Nay nếu quá **30 giây** không có thêm dữ liệu, giao diện báo "History did not finish loading" và cho **Retry**. Đây là hết hạn theo *tiến độ*, không phải theo *tổng thời gian*: một phiên 10 MB tải chậm vẫn được chờ bao lâu cũng được, miễn là mỗi đoạn vẫn về.
+
+Nút **Retry** chỉ xin lại liên kết cho **đúng cuộc trò chuyện đó** — không tạo tiến trình mới, không gửi prompt nào, không xoá bản nháp bạn đang gõ, và không xoá lịch sử đã hiển thị.
+
+### 35.3 Vì sao kết nối bị đứt giữa chừng
+
+Relay cũ đóng kết nối ngay khi bộ đệm gửi vượt 4 MiB. Một phiên lớn (phiên của chủ máy: 3238 dòng, ~10,2 MB) bị cắt giữa đường mỗi lần kết nối, điện thoại kết nối lại, lại bị cắt — lặp vô hạn. Nhật ký relay ghi rõ `closing backed-up peer: send buffer over ceiling`.
+
+Nay relay **tạm dừng** gửi cho một máy khách chậm thay vì cắt nó, và chỉ gửi tiếp khi máy đó đã đọc bớt. Kết nối chậm là chậm, không còn bị coi là chết. Chỉ máy khách **không bao giờ đọc** mới bị cắt (sau 16 MiB xếp hàng), vì lúc đó bộ nhớ của relay mới là thứ cần được bảo vệ.
+
+### 35.4 Một đoạn lịch sử chưa nhận đủ không phải là lịch sử
+
+Nếu đoạn tải về dở dang rồi kết nối đứt, giao diện **bỏ** phần đã nhận thay vì hiển thị nó. Một dòng đầu của một trăm dòng không phải là cuộc trò chuyện — hiện nó ra sẽ là nói dối. Lịch sử **đã xác minh từ trước đó** thì luôn được giữ.
+
+### 35.5 Kiểm chứng
+
+Toàn bộ 15 kịch bản (HIST-01…HIST-15) chạy trên trình duyệt thật:
+
+```bash
+npx playwright test tests/e2e/history-loading.spec.ts --project=chromium
+```
+
+## 36. Thông báo khi Handoff hoàn tất
+
+### 36.1 "Đã gửi" không phải là "đã xong"
+
+`/handoff` được dán vào terminal. Việc dán thành công **chỉ** chứng minh phím đã tới nơi — OMP có thể còn đang nén, có thể đã từ chối, hoặc chưa hề chạy lệnh. Vì vậy giao diện **không bao giờ** báo hoàn tất khi mới chỉ gửi xong.
+
+### 36.2 Bốn kết cục, bốn câu chữ
+
+| Kết cục | Câu chữ |
+| --- | --- |
+| Đã gửi, chưa xác minh | "Handoff delivered — OMP may still be generating; the transcript will show the compression when it commits." |
+| Nhật ký đã ghi việc nén | **✓ Handoff completed — context compacted successfully (journal entry `<id>`).** |
+| OMP tự từ chối | "Handoff refused — the agent declined it (nothing to hand off)." |
+| Gửi thất bại | Câu lỗi tương ứng, **không** phải thông báo thành công |
+
+Câu hoàn tất **chỉ** xuất hiện khi đọc được chính mục `compaction` mang `method: "handoff"` trong nhật ký phiên gốc — kèm luôn id để bạn tự đối chiếu. Thông báo màu xanh duy nhất là thông báo này.
+
+### 36.3 Hoàn tất muộn, sau khi bạn đã rời màn hình
+
+Việc nén có thể xong sau khi yêu cầu đã trả về. Máy chủ ghi lại một sự kiện `handoff-committed` ngay lúc đọc được bằng chứng trong nhật ký, nên giao diện **chờ và đối chiếu** sự kiện đó — có giới hạn, không phải vòng lặp — rồi mới báo hoàn tất. Nhờ vậy kết quả còn nguyên sau khi tải lại trang hoặc vào lại cuộc trò chuyện, và mỗi lần handoff chỉ có đúng **một** thông báo.
+
+Thông báo nằm trên cuộc trò chuyện, **không** che ô soạn thảo, và luôn có trong **Activity** (mục "Handoff completed").
+
+### 36.4 Không gửi lại, không tự chạy lại
+
+Mất kết nối giữa chừng **không** khiến lệnh `/handoff` được gửi lại. Không có thông báo nào tự tạo tiến trình mới hay khởi động lại OMP.
+
+### 36.5 Kiểm chứng
+
+```bash
+npx playwright test tests/e2e/handoff-completion.spec.ts --project=chromium
+```

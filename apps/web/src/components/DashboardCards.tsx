@@ -49,7 +49,14 @@ export function DashboardCards({ counts, onOpenAgents, onOpenFiles, onOpenActivi
         aria-label={`Agents: ${agents.total} total, ${agents.running} running. Open agents.`}
       >
         <span className="dashboard-value">{agents.total} Agents</span>
-        <span className="dashboard-sub">{agents.running} running</span>
+        {/* "N Agents" beside "0 running" reads as N concurrent agents, which is
+            not what this number is: it is every agent this conversation ever
+            spawned — subagents and workers, most of them finished. The sub-line
+            says which, so a big total with nothing running is not mistaken for a
+            dozen live processes. */}
+        <span className="dashboard-sub">
+          {agents.running === 0 ? "0 running · past and present" : `${agents.running} running`}
+        </span>
       </button>
       <button
         type="button"
