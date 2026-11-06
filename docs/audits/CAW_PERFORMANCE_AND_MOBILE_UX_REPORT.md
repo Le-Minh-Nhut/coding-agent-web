@@ -172,7 +172,24 @@ decides for that row: are *this row's* tool-call ids in it?
 `ConversationView.tsx`: a `WeakMap<TranscriptMessage, DisplayMessage>` keyed on the
 message object, whose identity the reducer already preserves for untouched messages
 (`transcript.ts:413`, `:495`). A message that changes identity gets a rebuilt row, so
-the cache cannot go stale. This is what makes C1's comparator *hit*.
+the cache cannot go stale.
+
+**The two changes are one fix, and the isolation run proves it.** The comparator
+compares rows with `previous.message !== next.message`. Without the cache, the row
+object is rebuilt on every update, so that identity test fails for every row and the
+comparator misses on all 4,075 — the comparator alone is worth nothing. Measured by
+disabling only the cache and rebuilding (comparator still present):
+
+| 4x throttle, 4075 rows, appends | script per row |
+| --- | --- |
+| cache off, comparator on | 6.69 ms |
+| cache on, comparator on (shipped) | 1.33 ms |
+
+This also explains an earlier `[INFERENCE]` in this round's working notes that the
+cache "gave no gain": that measurement was taken *before* the comparator existed, when
+the shallow compare was already failing on the rebuilt `represented` set, so nothing
+could have shown an improvement. Neither half is independently sufficient and neither
+is dead weight.
 
 ### C3. Tried, measured, reverted
 
@@ -217,8 +234,21 @@ for the retracted claim.
   still computed to `rgb(220, 38, 38)` at 320px. Now `button.header-stop`, and the
   breakpoint is 480px rather than 420 so the widest phone (430pt, iPhone Pro Max)
   gets the compact treatment too. Measured after, at all four widths: width 44,
-  `background-color: rgba(0, 0, 0, 0)`, `controlsOverlap: false`,
-  `undersizedControls: []`, no horizontal overflow, and the title still readable.
+  `controlsOverlap: false`, `undersizedControls: []`, no horizontal overflow, and the
+  title still readable at 375/390/430.
+
+  That first fix then failed a visual review for the opposite reason: with the fill
+  gone, a lone saturated glyph floated in an 80%-empty box and read as "a red chip,
+  not a control". The shipped control therefore carries an 18% danger tint across the
+  whole target (`color-mix(in oklab, var(--danger) 18%, transparent)`, measured
+  `stopAlpha` 0.18), so frame, fill and glyph read as one object. The gate asserts
+  translucency numerically — alpha greater than 0 and below 0.35 — rather than pinning
+  a colour string, because pinning the string is exactly what made it fail against
+  the fix.
+
+  Both attempts are recorded rather than only the winner: the first removed the fill
+  and left a red frame, the second removed the frame's saturation and left a floating
+  glyph, and only the third read as a deliberate control.
 
   A second self-inflicted bug is worth recording because it is the same class of
   mistake: my first visual spec asserted the pre-fix behaviour (it required the
@@ -507,6 +537,6 @@ Ranked by how much they matter.
    a change that *removes* something from the screen needs a test that proves the
    thing can come back.
 
-8. **`git` and `systemctl` output contain unrelated `FAIL:` lines** from a test that
+10. **`git` and `systemctl` output contain unrelated `FAIL:` lines** from a test that
    shells out to a guard script; they are pre-existing test-fixture noise, not
    failures of this round.
