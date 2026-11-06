@@ -2,9 +2,9 @@
 
 Round 57. Three commits on `main`: `54ef6e0` (the fix), `d254ad7` (the visual-review
 follow-up), `a2dd2e5` (the eight defects an independent audit found in `54ef6e0`),
-`c5deb7d` (report/guide corrections) and `dc5c0a6` (handoff reconciliation across a
-reload). Deployed to the live service and verified against the owner's own running
-sessions.
+`c5deb7d` (report/guide corrections), `dc5c0a6` (handoff reconciliation across a
+reload) and `24f1e53` (the CI fix below). Deployed to the live service and verified
+against the owner's own running sessions.
 
 ## A — Reported symptom
 
@@ -301,18 +301,43 @@ Back, draft preservation, and no duplicate WebSocket connections.
 
 | Item | Value |
 | --- | --- |
-| Git SHA | `dc5c0a6` (`main`), working tree clean |
-| Deployed revision | `dc5c0a6` — the service runs `node --import tsx apps/server/src/server.ts`, so the relay fix is live after a restart |
-| Served JS | `assets/index-BodkII7y.js` sha256 `b66fb89f00b47a4c89fda3380abf7dbe23e0a6766ecdfd6cfe27bcc9ed914ac9` |
-| Served CSS | `assets/index-vYzOAbXC.css` |
+| Git SHA | `24f1e53` (`main`), working tree clean |
+| Deployed revision | `24f1e53` — the service runs `node --import tsx apps/server/src/server.ts`, so the relay fix is live after a restart |
+| Served JS | `assets/index-DMZ5X4pG.js` |
+| Served CSS | built alongside the JS above |
 | Asset match | served `index.html` references exactly those two files; both byte-match `apps/web/dist` |
-| systemd | `coding-agent-web.service` active, MainPID `4121707` |
+| systemd | `coding-agent-web.service` active, MainPID `92072` |
 | Reconcile | `{"adopted":3,"external":0,"stopped":2,"unknown":1,"registered":2}` |
 | HTTPS | `GET /` → 200 over the Tailscale origin; `/api/agent-limit` → 401 unauthenticated (route mounted, not authenticated) |
 | **Preserved OMP pids** | `1204278`, `2080435`, `2082046` — **all alive and unchanged** across the restart |
 | tmux sessions | `$0`, `$1`, `$2` intact |
 | Relay drops since deploy | 0 (`backed-up peer` count) |
 | Rollback | previous revision `d00281a`-deployed tree; `apps/web/dist` is read from disk, so a web rollback is a rebuild |
+
+### CI, including a failure I caused
+
+| Run | Revision | Result |
+| --- | --- | --- |
+| 102 | `c5deb7d` | completed successfully |
+| 104 | `34d2c4f` | **failed** — see below |
+| 105 | `24f1e53` | completed successfully (final revision) |
+
+**Run 104 failed and the failure was real and mine.** It reported 227 unhandled
+rejections of `api.getConversationEvents is not a function`. My new mount-time
+handoff reconciliation is best-effort, and I left it unguarded, so every existing
+spec whose `api` mock lacks that method produced an unhandled rejection. The CI job
+treats that as failure even though every assertion passed.
+
+What makes this worth recording: **the same signal was already visible locally**
+and I misread it. A full local run printed `Errors 227` and I reported only the
+passing count, calling the lines "unrelated worker noise". They were the identical
+defect. The checks I run must be read, not just counted — which is why the numbers
+in this report are now quoted together with the error count, and why the final
+verification states **0 unhandled errors** rather than only a pass count.
+
+Fixed in `24f1e53`: the reconciliation is wrapped (a failed read is a read with no
+evidence, never a crash and never an invented completion), and the affected specs
+arm the stub so they exercise the real path with a real empty timeline.
 
 ### Live verification performed
 
@@ -355,6 +380,14 @@ Verified-not-done:
 - Browser notifications (the optional half of the handoff requirement) were
   **not** implemented: the in-app notification is the mandatory half and is done.
   No Service Worker was added.
+- **The in-flight handoff watch is bounded at ~90 s** (12 reads, 7.5 s apart), and
+  this machine's own journals record real handoff generations taking 197 s to 7216 s
+  (`apps/server/src/app.ts`). A commit that lands after the watch ends is therefore
+  not announced by the watch itself — but it is not lost either: the server records
+  `handoff-committed` when it reads the journal, the Activity timeline shows it, and
+  the mount-time reconciliation above reports it on the next open or reload. What
+  remains unverified is announcing a >90 s commit *without* the user leaving and
+  returning to the screen.
 ## L — Independent adversarial audit (round 57, second pass)
 
 A read-only audit of the first commit (`54ef6e0`) was run by a different agent
