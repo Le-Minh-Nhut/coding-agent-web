@@ -22,7 +22,19 @@
  * still reports the unclipped height — which is how the expander knows it is
  * needed at all.
  */
-import { useId, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+
+/**
+ * How long a routine `info` notice stays on screen.
+ *
+ * A Collab join is a transient fact, not a status: "Mobile Web Controller joined
+ * the collab session" is true for a moment and then is not news. It used to stay
+ * until the transport replaced it, which on a healthy long-lived link means forever
+ * — a permanent strip above the transcript reporting something that already
+ * happened. Warnings and errors are never auto-dismissed: those are the two levels
+ * that can still require action, so the reader decides when they go.
+ */
+const INFO_NOTICE_LINGER_MS = 6_000;
 
 export interface NoticeRowProps {
   notice: { level: "info" | "warning" | "error"; message: string };
@@ -33,7 +45,23 @@ export function NoticeRow({ notice }: NoticeRowProps) {
   const textRef = useRef<HTMLSpanElement | null>(null);
   const [expanded, setExpanded] = useState(false);
   const [clamped, setClamped] = useState(false);
+  const [expired, setExpired] = useState(false);
   const { level, message } = notice;
+
+  /**
+   * Retire a routine notice after it has been read.
+   *
+   * The row is removed from the DOM, not just hidden, so the transcript regains the
+   * space. Nothing is deleted from the authoritative record: a notice is transient
+   * transport state (`transcript.ts:610`) and the host's own journal is untouched,
+   * so this only shortens how long the app keeps announcing it. An expansion by the
+   * reader cancels the timer — the user is deliberately looking at it.
+   */
+  useEffect(() => {
+    if (level !== "info" || expanded) return;
+    const timer = setTimeout(() => setExpired(true), INFO_NOTICE_LINGER_MS);
+    return () => clearTimeout(timer);
+  }, [level, message, expanded]);
 
   useLayoutEffect(() => {
     const element = textRef.current;
@@ -59,6 +87,10 @@ export function NoticeRow({ notice }: NoticeRowProps) {
 
   // Two rendered lines for anything actionable, one for routine chatter.
   const clampClass = expanded ? "" : level === "info" ? " notice-text--1" : " notice-text--2";
+
+  // Routine chatter that has been read is gone from the layout entirely; keeping it
+  // mounted but transparent would still cost a row on every phone-width screen.
+  if (expired) return null;
 
   return (
     <div className={`notice-row notice-row--${level}`}>

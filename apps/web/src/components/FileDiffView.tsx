@@ -13,7 +13,8 @@
  *    in a file viewer is worse than a missing one, and the host does not give the
  *    other side's number for a context line.
  *  - the initial render is bounded (50 hunks / 400 lines) but never silently: the
- *    "Show all" control states exactly how much is still hidden.
+ *    "Show all" control states exactly how much is still hidden, and it counts the
+ *    tail of a hunk it cut as well as whole hunks it never mounted.
  */
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { STATUS_LETTER } from "../tool-activity.js";
@@ -51,16 +52,28 @@ export function FileDiffView({ file, onBack }: FileDiffViewProps): ReactNode {
   const hunkRefs = useRef(new Map<number, HTMLDivElement>());
 
   const totalLines = useMemo(() => hunks.reduce((sum, hunk) => sum + hunk.lines.length, 0), [hunks]);
+  /**
+   * The mounted prefix of the diff.
+   *
+   * The cap is on LINES, not on hunks, because OMP's gutter diffs routinely arrive
+   * as one hunk covering the whole file (a rewrite produces no `…` separator): a
+   * hunk-count bound mounted every line of it. Measured on a 2.15 MB / 60,000-line
+   * single-hunk patch: 5,618 ms to mount, 1,695 ms to re-render. Slicing the hunk
+   * that crosses the budget keeps the same bound for the same patches, and the tail
+   * it cuts is counted as hidden so "Show all" restores it verbatim.
+   */
   const { rendered, renderedLines } = useMemo(() => {
-    if (showAll) return { rendered: hunks.map((hunk, index) => ({ hunk, index })), renderedLines: totalLines };
-    const kept: Array<{ hunk: Hunk; index: number }> = [];
+    if (showAll) return { rendered: hunks.map((hunk, index) => ({ hunk, index, lines: hunk.lines })), renderedLines: totalLines };
+    const kept: Array<{ hunk: Hunk; index: number; lines: readonly DiffLine[] }> = [];
     let lines = 0;
     for (let index = 0; index < hunks.length; index++) {
       if (kept.length >= HUNK_LIMIT) break;
+      const room = LINE_LIMIT - lines;
+      if (room <= 0) break;
       const hunk = hunks[index]!;
-      kept.push({ hunk, index });
-      lines += hunk.lines.length;
-      if (lines >= LINE_LIMIT) break;
+      const slice = hunk.lines.length <= room ? hunk.lines : hunk.lines.slice(0, room);
+      kept.push({ hunk, index, lines: slice });
+      lines += slice.length;
     }
     return { rendered: kept, renderedLines: lines };
   }, [hunks, showAll, totalLines]);
@@ -93,6 +106,16 @@ export function FileDiffView({ file, onBack }: FileDiffViewProps): ReactNode {
 
   const hiddenHunks = hunks.length - rendered.length;
   const hiddenLines = totalLines - renderedLines;
+  /**
+   * What "Show all" will restore, in the units that are actually hidden.
+   *
+   * A single-hunk rewrite has zero hunks after the cut and thousands of lines, so a
+   * fixed "N more hunks, M more lines" sentence would lead with a meaningless zero.
+   */
+  const hiddenText = [
+    hiddenHunks > 0 ? `${hiddenHunks} more hunk${hiddenHunks === 1 ? "" : "s"}` : null,
+    hiddenLines > 0 ? `${hiddenLines} more line${hiddenLines === 1 ? "" : "s"}` : null,
+  ].filter((part): part is string => part !== null).join(", ");
 
   /**
    * Move to a hunk, revealing it when it is past the render bound.
@@ -103,7 +126,11 @@ export function FileDiffView({ file, onBack }: FileDiffViewProps): ReactNode {
    */
   const goToHunk = (next: number): void => {
     const clamped = Math.max(0, Math.min(hunks.length - 1, next));
-    if (clamped >= rendered.length) setShowAll(true);
+    // A hunk inside the bound can still be only partly mounted — the line budget
+    // may have cut its tail — and the same lie applies: navigating to it must
+    // reveal it rather than land on half of it.
+    const mounted = rendered[clamped];
+    if (mounted === undefined || mounted.lines.length < mounted.hunk.lines.length) setShowAll(true);
     setHunkIndex(clamped);
   };
 
@@ -153,7 +180,7 @@ export function FileDiffView({ file, onBack }: FileDiffViewProps): ReactNode {
         file.failed ? null : <p className="files-note" role="status">The host sent no diff for this file.</p>
       ) : (
         <div ref={scrollRef} className={`files-diff-scroll${wrap ? " files-diff-scroll--wrap" : ""}`}>
-          {rendered.map(({ hunk, index }) => (
+          {rendered.map(({ index, lines }) => (
             <div
               key={index}
               className="files-diff-hunk"
@@ -163,7 +190,7 @@ export function FileDiffView({ file, onBack }: FileDiffViewProps): ReactNode {
               }}
             >
               {(headers[index] ?? "") !== "" && <div className="tv-diff-row tv-diff-row--hunk files-diff-row">{headers[index]}</div>}
-              {hunk.lines.map((line, lineIndex) => {
+              {lines.map((line, lineIndex) => {
                 const tone = rowClass(line);
                 return (
                   <div key={lineIndex} className={`tv-diff-row files-diff-row${tone === "" ? "" : ` ${tone}`}`}>
@@ -179,9 +206,9 @@ export function FileDiffView({ file, onBack }: FileDiffViewProps): ReactNode {
               })}
             </div>
           ))}
-          {hiddenHunks > 0 && (
+          {hiddenLines > 0 && (
             <button type="button" className="files-toggle files-show-all" onClick={() => setShowAll(true)}>
-              {`Show all — ${hiddenHunks} more hunk${hiddenHunks === 1 ? "" : "s"}, ${hiddenLines} more line${hiddenLines === 1 ? "" : "s"} hidden`}
+              {`Show all — ${hiddenText} hidden`}
             </button>
           )}
         </div>

@@ -1715,6 +1715,45 @@ details[open] summary {
   white-space: nowrap;
 }
 
+/**
+ * The Stop control on a phone is an icon, not a banner.
+ *
+ * It was a full-height solid red `button.danger` — a large red block occupying the
+ * header beside the model name, which is what the owner's screenshot shows. The
+ * fix is the *presentation*, never the reachability: it stays outside the overflow
+ * menu, stays one tap, and keeps its 44x44 hit target (the global button minimum
+ * plus the rule above). It is tinted rather than filled, so it reads as the
+ * destructive control it is without becoming the loudest thing on the screen.
+ *
+ * The visible ✕ glyph is `aria-hidden` and the button carries the accessible name
+ * "Stop generating", so nothing is lost to a screen reader.
+ */
+@media (max-width: 420px) {
+  .header-stop {
+    background-color: transparent;
+    border-color: var(--danger);
+    color: var(--danger-text);
+    /* Square: the label is hidden at this width, so the extra horizontal padding
+       would only enlarge the target past the 44px minimum for no benefit. */
+    padding: 0;
+  }
+
+  /* The chips are bounded so the model label keeps a readable column. A chip is a
+     status, not an action, so it ellipsises before the title does. */
+  .header-chips {
+    max-width: 34vw;
+    overflow: hidden;
+  }
+
+  .mode-chip {
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+  }
+}
+
 .header-menu-button {
   min-height: 44px;
   min-width: 44px;

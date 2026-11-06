@@ -167,6 +167,42 @@ export const MessageRow = memo(function MessageRow({ message, represented }: {
       )}
     </div>
   );
+}, (previous, next) => {
+  /**
+   * Comparator, because `represented` cannot be compared by identity.
+   *
+   * `TranscriptList` rebuilds the set of tool-call ids that already have a result
+   * row on every render, so a shallow compare fails on it for *every* row — which
+   * made `memo` a no-op and had React walking all 4075 rows on each streamed frame.
+   * A V8 self-time profile of 30 appended tool rows into a 4075-entry history
+   * attributed 149ms to React's own reconciler (`react-dom`'s `ee`/`nc`/`Cu`/`gg`),
+   * which is what this comparator removes.
+   *
+   * `represented` only ever suppresses a tool-call block whose id is present, so
+   * the row's own rendering depends on exactly one bit of it: whether THIS row's
+   * tool-call ids are in the new set. Comparing that bit per id keeps the answer
+   * identical while dropping the mismatch on rows that cannot be affected.
+   */
+  if (previous.message !== next.message) return false;
+  if (previous.represented === next.represented) return true;
+  const rule = (message: DisplayMessage | TranscriptMessage): boolean => {
+    const ids = new Set<string>();
+    const blocks = "blocks" in message ? message.blocks : undefined;
+    if (blocks !== undefined) {
+      for (const block of blocks) if (block.type === "toolCall" && block.id !== undefined) ids.add(block.id);
+    }
+    if (message.role === "tool") {
+      const toolCallId = (message as DisplayMessage).toolCallId;
+      if (typeof toolCallId === "string") ids.add(toolCallId);
+    }
+    for (const id of ids) {
+      const before = previous.represented?.has(id) ?? false;
+      const after = next.represented?.has(id) ?? false;
+      if (before !== after) return false;
+    }
+    return true;
+  };
+  return rule(previous.message);
 });
 
 /**

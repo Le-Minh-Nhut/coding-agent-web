@@ -350,20 +350,42 @@ export interface EvidenceRow {
  * from a caller that genuinely knows the subject — see `UNSUPPORTED_RECHECK_REASONS`.
  */
 export function evidenceForIssue(rows: readonly EvidenceRow[], issue: AdvisorIssue): IssueEvidence[] {
+  return evidenceForIssueWith(rows, issue, rowWordsOf);
+}
+
+/**
+ * The same scan, with the row → words reduction supplied by the caller.
+ *
+ * `claimMatchesNote` normalizes the row it is handed, so a transcript with N notes
+ * and M rows normalized every row N times. Measured over 150 notes × 1,000 rows:
+ * 3,800 ms re-normalizing per pair against 15 ms when each row's words are built
+ * once. `advisorEvidence` is the caller that amortizes it; this stays a parameter
+ * so the public per-issue entry point keeps its own documented cost.
+ */
+function evidenceForIssueWith(
+  rows: readonly EvidenceRow[],
+  issue: AdvisorIssue,
+  wordsOf: (text: string) => ReadonlySet<string>,
+): IssueEvidence[] {
   const out: IssueEvidence[] = [];
   const noteWords = significantWords(issue.note);
   for (const row of rows) {
     if (row.role === "assistant" && typeof row.text === "string") {
-      if (claimsFix(row.text) && claimMatchesNote(row.text, noteWords)) {
+      if (claimsFix(row.text) && claimMatchesNote(wordsOf(row.text), noteWords)) {
         out.push({ kind: "fix-claim", summary: "The agent stated this issue was fixed.", source: "assistant" });
       }
       continue;
     }
-    if (row.role === "tool" && row.isError === true && typeof row.text === "string" && claimMatchesNote(row.text, noteWords)) {
+    if (row.role === "tool" && row.isError === true && typeof row.text === "string" && claimMatchesNote(wordsOf(row.text), noteWords)) {
       out.push({ kind: "still-failing", summary: "A later tool run failed while reproducing this issue.", source: "tool" });
     }
   }
   return out;
+}
+
+/** A row's words, reduced exactly as a note's are so the two sides are comparable. */
+function rowWordsOf(text: string): ReadonlySet<string> {
+  return new Set(issueIdentityInput(text).replace(/[^a-z0-9\s]/g, " ").split(/\s+/));
 }
 
 /** Words long enough to identify an issue; short ones match everything. */
@@ -437,10 +459,13 @@ function claimsFix(text: string): boolean {
  * as claimed-fixed. Requiring the majority of the note's own identifying words, at
  * least two, keeps the link about the same subject while still matching a
  * paraphrase that keeps the note's vocabulary.
+ *
+ * Takes the row's words already reduced (`rowWordsOf`) rather than the row text:
+ * the reduction is the expensive half, and the caller that scans one note against
+ * every row must do it once per row, not once per pair.
  */
-function claimMatchesNote(text: string, noteWords: ReadonlySet<string>): boolean {
+function claimMatchesNote(words: ReadonlySet<string>, noteWords: ReadonlySet<string>): boolean {
   if (noteWords.size === 0) return false;
-  const words = new Set(issueIdentityInput(text).replace(/[^a-z0-9\s]/g, " ").split(/\s+/));
   let shared = 0;
   for (const word of noteWords) if (words.has(word)) shared += 1;
   const needed = noteWords.size === 1 ? 1 : Math.ceil(noteWords.size / 2);
@@ -450,14 +475,32 @@ function claimMatchesNote(text: string, noteWords: ReadonlySet<string>): boolean
 /**
  * Evidence for every issue, ready for `advisorIssueViews`.
  *
- * One pass over the transcript, so a caller does not re-scan per issue.
+ * Rows are reduced to words once and only for the rows the scan can actually read
+ * (an assistant row, or a failed tool row), then every issue is matched against
+ * those. The row-projection cache is what makes "one pass over the transcript"
+ * true for the expensive half as well: without it the per-issue scan re-normalized
+ * every row, measured at 3,800 ms for 150 issues × 1,000 rows against 15 ms.
+ *
+ * The cache holds derived word sets, never the input, and it lives exactly as long
+ * as the returned closure — the same lifetime the closure already had.
+ * `ponytail: one Set per distinct row text, measured at ~1.7x the row text itself
+ * (12.7 MB for 7.65 MB). If a transcript ever makes that matter, key it on the row
+ * index and drop it once every issue has been asked once.
  */
 export function advisorEvidence(rows: readonly EvidenceRow[]): (issue: AdvisorIssue) => readonly IssueEvidence[] {
   const cache = new Map<string, readonly IssueEvidence[]>();
+  const words = new Map<string, ReadonlySet<string>>();
+  const wordsOf = (text: string): ReadonlySet<string> => {
+    const found = words.get(text);
+    if (found !== undefined) return found;
+    const computed = rowWordsOf(text);
+    words.set(text, computed);
+    return computed;
+  };
   return (issue) => {
     const found = cache.get(issue.id);
     if (found !== undefined) return found;
-    const computed = evidenceForIssue(rows, issue);
+    const computed = evidenceForIssueWith(rows, issue, wordsOf);
     cache.set(issue.id, computed);
     return computed;
   };

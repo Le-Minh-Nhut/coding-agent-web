@@ -18,7 +18,7 @@
  */
 import { useEffect, useMemo, useRef } from "react";
 import type { AgentView } from "../agent-model.js";
-import { agentTranscriptFromReply } from "../agent-transcript.js";
+import { advanceAgentTranscript, type AgentTranscriptCursor } from "../agent-transcript.js";
 import type { AgentActivity, TranscriptReply } from "../transcript.js";
 import { AgentChat } from "./AgentChat.js";
 import "../agents.css";
@@ -72,9 +72,23 @@ export function AgentDetail({
   transcriptRef.current = transcript;
   const loadingRef = useRef(loading);
   loadingRef.current = loading;
+  /**
+   * What has been decoded for this agent so far.
+   *
+   * A ref, not state: it is a cache of work already done, and putting it in state
+   * would rebuild the journal's rows on every poll instead of only on new bytes.
+   * Reset when the view switches agents, so one agent's bytes are never extended
+   * into another's.
+   */
+  const cursorRef = useRef<AgentTranscriptCursor | null>(null);
+  const cursorAgentRef = useRef(view.id);
+  if (cursorAgentRef.current !== view.id) {
+    cursorAgentRef.current = view.id;
+    cursorRef.current = null;
+  }
 
   /**
-   * The fetched bytes, decoded once per reply.
+   * The fetched bytes, decoded once per reply and only once per byte.
    *
    * Keyed on the two strings the parser actually reads, NOT on the `transcript`
    * object. The reducer rebuilds that object on every poll — including a poll that
@@ -83,20 +97,23 @@ export function AgentDetail({
    * journal). Keying on the text makes "same bytes, same rows" literal: a poll that
    * changed nothing is not re-parsed.
    *
-   * The rotation case is still correct. A reset (file truncated/rewound) makes the
-   * reducer *replace* `text` from `""` and re-append, so the text differs and the
-   * memo re-runs; and if a rotation ever produced byte-identical text, the rows
-   * would be identical too, so skipping the parse changes nothing.
+   * A poll that DID carry new bytes used to re-decode the whole journal anyway
+   * (measured: 34 ms for a 3.9 MB journal, and servable subagent journals reach
+   * 52 MB). `advanceAgentTranscript` decodes only the appended suffix against the
+   * previous cursor; the cursor is re-armed when the text no longer starts with the
+   * old one, which is the truncation/rewind case the reducer signals by replacing
+   * `text` from `""`.
    */
   const transcriptText = transcript?.text;
   const transcriptCarry = transcript?.carry;
   const parsed = useMemo(
     // `transcript` is read for the current bytes; the deps below are the only two
-    // fields the parser consumes, so a re-run always sees the matching object and a
-    // poll with no new bytes never re-parses.
-    () => (transcript === undefined ? null : agentTranscriptFromReply(transcript)),
+    // fields the parser consumes, so a re-run always sees the matching object.
+    () => (transcript === undefined ? { cursor: cursorRef.current, transcript: null } : advanceAgentTranscript(cursorRef.current, transcript)),
     [transcriptText, transcriptCarry],
   );
+  cursorRef.current = parsed.cursor;
+  const agentTranscript = parsed.transcript;
 
   /**
    * The task text, preferring the journal's own durable copy.
@@ -106,7 +123,7 @@ export function AgentDetail({
    * copy wins when both exist because it survives a reconnect, and the live-only
    * caveat below is then no longer true and must not be shown.
    */
-  const durableTask = parsed?.task ?? null;
+  const durableTask = agentTranscript?.task ?? null;
   const task = durableTask ?? activity?.task ?? "";
   const running = view.status === "running";
 
@@ -158,7 +175,7 @@ export function AgentDetail({
         <span>·</span>
         <span>{view.class}</span>
         <span>·</span>
-        <span>{parsed?.model === null || parsed?.model === undefined ? "model: not reported" : `model: ${parsed.model}`}</span>
+        <span>{agentTranscript?.model === null || agentTranscript?.model === undefined ? "model: not reported" : `model: ${agentTranscript.model}`}</span>
       </p>
 
       <section className="agent-section" aria-labelledby="agent-task-heading">
@@ -198,11 +215,11 @@ export function AgentDetail({
           <p role="alert" className="agent-absent">{transcriptError}</p>
         ) : transcript?.error ? (
           <p role="alert" className="agent-absent">{transcript.error}</p>
-        ) : parsed !== null && transcript !== undefined ? (
+        ) : agentTranscript !== null && transcript !== undefined ? (
           <AgentChat
-            rows={parsed.rows}
-            carry={transcript.carry ?? ""}
-            unreadableRecords={parsed.unreadableRecords}
+            rows={agentTranscript.rows}
+            carry={transcript?.carry ?? ""}
+            unreadableRecords={agentTranscript.unreadableRecords}
             hasRawText={transcript.text !== ""}
             rawText={transcript.text}
             emptyReason={transcript.text === "" ? "No transcript bytes received yet." : null}

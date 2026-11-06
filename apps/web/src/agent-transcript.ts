@@ -121,13 +121,63 @@ function modelChangeOf(record: unknown): string | null {
  * never becomes a row until it arrives whole.
  */
 export function agentTranscriptFromReply(reply: TranscriptReply): AgentTranscript {
-  const { entries, unreadableRecords } = parseNativeEntries(reply.text);
+  return advanceAgentTranscript(null, reply).transcript;
+}
+
+/**
+ * Everything one agent's journal has yielded so far, carried across polls.
+ *
+ * `text` is the exact byte string already decoded. The reducer keeps only whole
+ * lines in `text` (the trailing partial rides in `carry`), so a cursor's `text`
+ * always ends on a newline and the next reply's suffix begins on one.
+ */
+export interface AgentTranscriptCursor {
+  text: string;
+  rows: TranscriptMessage[];
+  unreadableRecords: number;
+  model: string | null;
+  sessionResolved: string | null;
+  task: string | null;
+  agentName: string | null;
+}
+
+/**
+ * Decode only the bytes that arrived since `cursor`, or all of them when it cannot
+ * be extended.
+ *
+ * A poll that carried new bytes used to re-decode the whole journal: measured at
+ * 34 ms for a 3.9 MB journal, and the documented ceiling for a servable subagent
+ * journal is 52 MB — paid again on every 1200 ms tick while the agent streams. The
+ * journal is append-only, so the decode and the row build both split at the cursor:
+ * `parseNativeEntries` and `displayMessage` are per-line, so the rows of a prefix
+ * concatenated with the rows of a suffix are the rows of the whole.
+ *
+ * The cursor is only extended when the new text really starts with the old
+ * (`startsWith`). A reset — the file truncated or rewound — replaces `text` from
+ * `""` in the reducer, so the check fails and the whole reply is decoded instead.
+ * An identical reply is returned unchanged rather than re-appended, which keeps the
+ * call safe to make from a render React may run twice.
+ */
+export function advanceAgentTranscript(
+  cursor: AgentTranscriptCursor | null,
+  reply: TranscriptReply,
+): { cursor: AgentTranscriptCursor; transcript: AgentTranscript } {
+  const complete = (reply.carry ?? "") === "";
+  if (cursor !== null && cursor.text === reply.text) {
+    return { cursor, transcript: transcriptOf(cursor, complete) };
+  }
+  const base: AgentTranscriptCursor =
+    cursor !== null && reply.text.startsWith(cursor.text)
+      ? cursor
+      : { text: "", rows: [], unreadableRecords: 0, model: null, sessionResolved: null, task: null, agentName: null };
+  const appended = reply.text.slice(base.text.length);
+  const { entries, unreadableRecords } = parseNativeEntries(appended);
+  let model = base.model;
+  let sessionResolved = base.sessionResolved;
+  let task = base.task;
+  let agentName = base.agentName;
   // A later record supersedes an earlier one: the journal is append-only, so the
   // last model_change is the model the session is on now.
-  let model: string | null = null;
-  let sessionResolved: string | null = null;
-  let task: string | null = null;
-  let agentName: string | null = null;
   for (const entry of entries) {
     const changed = modelChangeOf(entry);
     if (changed !== null) model = changed;
@@ -138,12 +188,25 @@ export function agentTranscriptFromReply(reply: TranscriptReply): AgentTranscrip
       if (init.agent !== null) agentName = init.agent;
     }
   }
-  return {
-    rows: nativeRows(entries),
-    model: model ?? sessionResolved,
+  const next: AgentTranscriptCursor = {
+    text: reply.text,
+    rows: entries.length === 0 ? base.rows : [...base.rows, ...nativeRows(entries)],
+    unreadableRecords: base.unreadableRecords + unreadableRecords,
+    model,
+    sessionResolved,
     task,
     agentName,
-    unreadableRecords,
-    complete: (reply.carry ?? "") === "",
+  };
+  return { cursor: next, transcript: transcriptOf(next, complete) };
+}
+
+function transcriptOf(cursor: AgentTranscriptCursor, complete: boolean): AgentTranscript {
+  return {
+    rows: cursor.rows,
+    model: cursor.model ?? cursor.sessionResolved,
+    task: cursor.task,
+    agentName: cursor.agentName,
+    unreadableRecords: cursor.unreadableRecords,
+    complete,
   };
 }
