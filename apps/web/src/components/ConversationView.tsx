@@ -2623,7 +2623,16 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
       {conversation !== null && handoffReason && !handoffConfirming && <p className="handoff-reason">Handoff unavailable: {handoffReason}</p>}
       {/* The reason is printed even when the control is not rendered (an external
           session): a missing action with no explanation reads as a bug. */}
-      {conversation !== null && stopSessionReason && !stopSessionConfirming && <p className="handoff-reason">Stop session unavailable: {stopSessionReason}</p>}
+      {/* R57: this used to print the internal reason verbatim on every screen —
+          "Stop session unavailable: No verified managed tmux session is recorded
+          for this conversation." — which put ops jargon on the loading and empty
+          states of a phone UI. The precise reason still exists, where it is
+          actionable: as the disabled control's `title` in the overflow menu. Here
+          the user gets one plain sentence, and only when there is something to do
+          about it. */}
+      {conversation !== null && conversation.id === conversationId && conversation.ownership !== "managed" && !stopSessionConfirming && (
+        <p className="handoff-reason">This session runs outside the app, so it can only be stopped from its own terminal.</p>
+      )}
       {stopSessionConfirming && (
         <div className="card handoff-confirm" role="group" aria-label="Stop OMP session">
           <strong>Stop OMP session</strong>

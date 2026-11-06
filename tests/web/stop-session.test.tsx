@@ -197,7 +197,10 @@ describe("stop generating vs stop OMP session", () => {
 
     openMenu(view);
     expect(view.queryByRole("button", { name: "Stop OMP session" })).toBeNull();
-    expect(view.getByText(/Stop session unavailable: This session is externally managed/)).toBeTruthy();
+    // R57: the internal reason is no longer printed as a paragraph on every screen
+    // (it was raw ops jargon on the loading and empty states). The user gets one
+    // plain sentence; the precise reason stays on the disabled control's title.
+    expect(view.getByText(/runs outside the app/)).toBeTruthy();
     expect(vi.mocked(api.stopConversation)).not.toHaveBeenCalled();
   });
 
@@ -208,7 +211,11 @@ describe("stop generating vs stop OMP session", () => {
     openMenu(view);
     const button = view.getByRole("button", { name: "Stop OMP session" }) as HTMLButtonElement;
     expect(button.disabled).toBe(true);
-    expect(view.getByText(/Stop session unavailable: No verified managed tmux session is recorded/)).toBeTruthy();
+    // R57: the technical wording now lives on the control it explains, not as a
+    // permanent paragraph. The claim is unchanged: the action is disabled and its
+    // reason is available.
+    expect(button.title).toMatch(/No verified managed tmux session is recorded/);
+    expect(view.queryByText(/No verified managed tmux session is recorded/)).toBeNull();
   });
 
   it("renders the server's precise refusal and keeps the transcript on screen", async () => {

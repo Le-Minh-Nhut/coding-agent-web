@@ -169,14 +169,16 @@ test("the transcript keeps a usable height under a hostile banner stack at 320x5
   await host.send({ t: "event", event: { type: "notice", level: "warning", message: "Host reports a starting worker.", source: "collab" } });
   await seedRefusedPrompt(page, host, LONG_PROMPT);
   await expect(page.locator(".recovery-summary")).toBeVisible();
-  // The reason paragraph ("Stop session unavailable: …") renders alongside, which is
-  // the other kind of permanent row a narrow screen has to budget for.
-  await expect(page.locator(".handoff-reason").first()).toBeVisible();
+  // R57: the internal "Stop session unavailable: …" paragraph is gone from this
+  // fixture — it only renders for an externally-managed session now, because
+  // printing it everywhere put ops jargon on the loading and empty screens. What
+  // this test measures is unchanged: the permanent rows a narrow screen must
+  // budget for, which here is the notice row above.
 
   const measured = await page.evaluate(() => {
     const scroll = document.querySelector(".messages-scroll") as HTMLElement;
     const summary = document.querySelector(".recovery-summary") as HTMLElement | null;
-    const stack = [...document.querySelectorAll(".banner, .notice-row, .recovery-summary, .handoff-reason, .approval-card")]
+    const stack = [...document.querySelectorAll(".banner, .notice-row, .recovery-summary, .approval-card")]
       .map((el) => Math.round(el.getBoundingClientRect().height));
     return {
       transcriptHeight: Math.round(scroll.getBoundingClientRect().height),
@@ -501,10 +503,14 @@ test("the header has no horizontal overflow at 320px and the dashboard row is bo
   await openSeededConversation(page);
   await host.send({ ...welcomeFrame(false), state: { ...welcomeFrame(false).state, model: { id: "vendor/a-very-long-model-identifier", name: "Long", provider: "p", contextWindow: 1 } } });
 
-  // The model is reported authoritatively by the welcome frame, so it is shown.
-  // The read raced the host frame's commit (it once saw "connecting"); retry until
-  // the welcome frame's status has been rendered, before measuring geometry.
-  await expect(page.locator(".header-status")).toContainText("vendor/a-very-long-model-identifier", { timeout: 15_000 });
+  // The model is reported authoritatively by the welcome frame. R57: the header
+  // shows its *last* path segment (a friendly name) and keeps the full identifier
+  // as the element's title/accessible name, because printing the whole
+  // `provider/scope/model` path was what overflowed this header at 320px. The
+  // authority is still asserted — on the attribute that carries it verbatim.
+  const modelEl = page.locator(".header-status-model");
+  await expect(modelEl).toHaveAttribute("title", "vendor/a-very-long-model-identifier", { timeout: 15_000 });
+  await expect(modelEl).toHaveText(/a-very-long-model-identifier/);
 
   const measured = await page.evaluate(() => {
     const header = document.querySelector(".app-header") as HTMLElement;
