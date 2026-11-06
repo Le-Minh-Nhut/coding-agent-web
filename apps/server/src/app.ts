@@ -1060,6 +1060,19 @@ export function buildApp(deps: AppDependencies): FastifyInstance<HttpServer> {
         if (evidence) {
           // The previous operation is provably over; its marker is retired
           // before the new one is taken.
+          //
+          // Its outcome is recorded here too. This read is the *only* place that
+          // operation's commit is ever observed when it landed after that
+          // request's own evidence budget (default 0): without this write, the
+          // timeline and the client reconciler never learn it finished, and the
+          // user is left being told "OMP may still be generating" about a
+          // compaction the journal has already recorded.
+          await deps.store.recordEvent(
+            conversationId,
+            "handoff-committed",
+            { entryId: evidence.entryId, sessionId: nativeSessionId },
+            new Date().toISOString(),
+          );
           await clearHandoffMarker(conversationId);
         } else {
           // No entry yet, but the pane may state a refusal that is attributable

@@ -174,6 +174,32 @@ describe("handoff route", () => {
     await app.close();
   });
 
+  it("F2: records the commit it reads to retire a previous operation's marker", async () => {
+    // Handoff A answers `delivered` (no evidence inside the budget, default 0) and
+    // commits a minute later. When B arrives, the marker check reads A's commit to
+    // prove A is over — and that read must be recorded, or A's completion exists in
+    // the journal and nowhere the timeline or the client can see it.
+    let call = 0;
+    const { app, headers, conversation, store } = await fixture({
+      evidence: async () => {
+        call += 1;
+        // First call (A's own evidence budget) sees nothing; every later call sees
+        // A's commit — which is what B's marker check reads.
+        return call === 1 ? null : { entryId: "e-A", timestamp: new Date().toISOString() };
+      },
+    });
+    const first = await post(app, conversation.id, headers);
+    expect(first.json().data.state).toBe("delivered");
+
+    // B arrives: its marker check reads A's commit and must record it.
+    await post(app, conversation.id, headers);
+    const events = await store.listEventsTail(conversation.id, Number.POSITIVE_INFINITY, 20);
+    const committed = events.filter((event) => event.type === "handoff-committed");
+    expect(committed.length, "A's commit is recorded when it is read").toBeGreaterThan(0);
+    expect(JSON.stringify(committed.at(-1)?.payload)).toContain("e-A");
+    await app.close();
+  });
+
   it("keeps refusing while an older compaction exists, using the real journal reader", async () => {
     // The reviewer's scenario, with the real reader instead of a stub: a genuine
     // compaction entry is present but predates the marker, so it is not evidence

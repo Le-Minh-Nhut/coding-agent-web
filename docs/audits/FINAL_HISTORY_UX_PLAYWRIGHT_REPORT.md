@@ -1,7 +1,8 @@
 # History recovery and mobile UX — Playwright report
 
-Round 57. Commit `54ef6e0` on `main`; deployed to the live service and verified
-against the owner's own running sessions.
+Round 57. Commits `54ef6e0` (the fix) and `d254ad7` (the visual-review follow-up) on
+`main`; deployed to the live service and verified against the owner's own running
+sessions.
 
 ## A — Reported symptom
 
@@ -175,6 +176,12 @@ Before the relay fix the same read could not complete at all over a real client.
 8. **Presentation honesty**: the header shows a friendly model name with the
    authoritative id kept as `title`/`aria-label`; a historical agent total no
    longer reads as concurrent load.
+9. **Ops jargon removed from the user's screen** (found by the visual review, not
+   by a test). The loading and empty states printed
+   "Stop session unavailable: No verified managed tmux session is recorded for this
+   conversation." The precise reason now lives on the disabled control's `title` in
+   the overflow menu; the screen carries one plain sentence, and only when the
+   condition is true.
 
 ## F — Playwright evidence
 
@@ -285,12 +292,12 @@ Back, draft preservation, and no duplicate WebSocket connections.
 
 | Item | Value |
 | --- | --- |
-| Git SHA | `54ef6e0` (`main`), working tree clean |
-| Deployed revision | `54ef6e0` — the service runs `node --import tsx apps/server/src/server.ts`, so the relay fix is live after a restart |
-| Served JS | `assets/index-BXOo9qb1.js` sha256 `af77bcd36a9e36c6f570319be26e5219320ba830945ec546477ae61c55f51e5b` |
+| Git SHA | `d254ad7` (`main`), working tree clean |
+| Deployed revision | `d254ad7` — the service runs `node --import tsx apps/server/src/server.ts`, so the relay fix is live after a restart |
+| Served JS | `assets/index-BCVyjs8g.js` sha256 `181dd4f28a1ec771a289ef4f96d821d7cf8ada3dbfa93fc52bcaab18d76baef9` |
 | Served CSS | `assets/index-CkGMPHlM.css` sha256 `0e7cc278e223f9ae8a3a05724d185b7f3806eeadacbf29ffcbb40aa1d20a92df` |
 | Asset match | served `index.html` references exactly those two files; both byte-match `apps/web/dist` |
-| systemd | `coding-agent-web.service` active, MainPID `4020587` |
+| systemd | `coding-agent-web.service` active, MainPID `4055034` |
 | Reconcile | `{"adopted":3,"external":0,"stopped":2,"unknown":1,"registered":2}` |
 | HTTPS | `GET /` → 200 over the Tailscale origin; `/api/agent-limit` → 401 unauthenticated (route mounted, not authenticated) |
 | **Preserved OMP pids** | `1204278`, `2080435`, `2082046` — **all alive and unchanged** across the restart |
@@ -326,9 +333,49 @@ Verified-not-done:
 - Performance was not benchmarked; the transcript still renders all rows (no
   virtualisation), which is unchanged from before and untested at pathological
   sizes.
+- The two live-run risks the audit raised (F9 heartbeat vs a saturated receive
+  window, F10 ceiling sizing) were **fixed** in response, with regressions; see
+  section L. What remains unverified is whether a *real* misbehaving host can ever
+  reach the 64 MiB ceiling at all — no such host exists here to test against.
 - The two conversation-identity discrepancies in section C are **not** fixed —
   they are recorded, and a follow-up is needed to decide whether
   `nativeSessionPath` should be populated when OMP adopts a session.
 - Browser notifications (the optional half of the handoff requirement) were
   **not** implemented: the in-app notification is the mandatory half and is done.
   No Service Worker was added.
+## L — Independent adversarial audit (round 57, second pass)
+
+A read-only audit of the first commit (`54ef6e0`) was run by a different agent
+before this round was called done. It re-read the diff, traced every caller of the
+changed functions, and measured the captured PNGs. Its verdict on the commit as
+shipped was **CONFIRMED_DEFECT**, and it was right.
+
+### Findings it confirmed, and what was done
+
+| # | Defect | Fix |
+| --- | --- | --- |
+| F1 | The handoff reconciler read the **newest 50** events, so on a busy stream the commit slid out of the window and the banner stayed "delivered" forever on evidence that existed. | Read **forward** from this operation's baseline (`after=<seq>`), which the API already supported. Regression buries the commit under 120 later events; **fails before, passes after**. |
+| F2 | The server read a previous operation's commit **only to retire its marker** and never recorded it, so a handoff that committed after its evidence budget was never reported to the timeline or the client. | The read now records `handoff-committed` for that operation. Regression added (`tests/server/handoff.test.ts`). |
+| F3 | The whole state block was gated on `messages.length === 0`, so a stall during a **resync over an existing transcript** rendered nothing at all — no state, no Retry. | A compact stall strip renders independent of the row count (`role="alert"`, with Retry), above the kept rows. |
+| F4 | The new "past and present" disclaimer was itself **clipped by the card's ellipsis** at 320/375/390px — the exact string added to stop a misleading count never reached the phone. | Shortened to "0 running · all-time", with a length assertion. |
+| F5 | `state-06-empty-centred.png` was **byte-identical** to the verified-empty shot, so it evidenced nothing. | Screenshot removed; the bounding-box assertion is the centring proof. |
+| F6 | Markdown **bullets were clipped at the viewport's left edge** on every phone width: the global reset zeroes padding and no `ul`/`ol` rule existed. | `.message-content ul/ol/li` rules added. |
+| F7 | `snapshotProgress` was called three times per render, and a host promising a nonsense total could print `0 of undefined`. | Hoisted to one `progressLine`, with a `total <= 0` guard. Regression added. |
+| F8 | Saved-history mode could never render an empty state and hard-asserted `ready` for a read that had not answered — the same class of unsupported claim this round exists to remove. | `sync` now derives from the saved read's real outcome (loading until it answers; `empty` when it answered with nothing), and a designed empty state renders. |
+
+### Findings it raised as risks (recorded, not dismissed)
+
+| # | Risk | Status |
+| --- | --- | --- |
+| F9 | The relay heartbeat terminates a peer that misses a pong, and a peer whose receive window is full **cannot process the ping** — so the liveness probe could have killed exactly the slow phone the pause protects. | **Fixed.** A paused peer is exempt from the liveness probe: its backlog is the evidence it is still owed data, and its own ceiling is the bound that applies. Regression added. |
+| F10 | The 16 MiB backlog ceiling was justified by a "~10.2 MB" maximum while this very round measured a larger session. | **Ceiling raised to 64 MiB and the comment corrected**, citing the measured 3915-entry / ~11.4 MB session and the guest's own 50 MB reasoning. A draining peer never approaches it. |
+
+### What the audit rejected
+
+It examined and **found no defect** in: frame loss after resume, frame reordering,
+ceiling accounting under a single tick, pause-timer leaks, `stop()` interaction,
+`markSnapshotStalled` rewriting a `ready` transcript, completed-snapshot locking,
+`bye` losing kept history, false-empty paths, divide-by-zero, reconnect-while-stalled,
+baseline-read correctness, interleaved handoffs, the `operationGeneration` guard,
+polling boundedness, `handoff-committed` evidence/payload, and the single-writer
+rule. Its own verdict line for those areas: **REJECTED_FINDING**.

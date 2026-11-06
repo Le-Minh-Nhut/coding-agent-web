@@ -28,7 +28,7 @@ const CHUNK_BYTES = 512 * 1024;
 /** Well past the ~4 MiB ceiling that used to drop the peer. */
 const CONTENDED_BYTES = 12 * 1024 * 1024;
 /** Past the queued-backlog ceiling, so a peer that never drains must be closed. */
-const NEVER_DRAINS_BYTES = 64 * 1024 * 1024;
+const NEVER_DRAINS_BYTES = 192 * 1024 * 1024;
 
 const relays: Relay[] = [];
 
@@ -163,6 +163,32 @@ describe("relay flow control under a stalled guest", () => {
     expect(guest.frames).toBe(expected);
     expect(warnings).toEqual([]);
 
+    host.ws.close();
+    guest.ws.close();
+  }, 60_000);
+
+  it("keeps a stalled-but-alive guest across the heartbeat window", async () => {
+    // The liveness probe terminates a peer that misses a pong, and a peer whose
+    // receive window is full cannot process the ping — so without the pause being
+    // exempt, the heartbeat would kill exactly the slow phone the pause protects,
+    // which is the failure this whole change removes. The window here is well past
+    // two heartbeat intervals (60s), compressed by driving the timers directly.
+    const { url, warnings } = await startRelay();
+    const host = await connect(url, "host");
+    const guest = await connect(url, "guest");
+    tcpSocket(guest.ws).pause();
+    await blast(host, CONTENDED_BYTES);
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+
+    // Still connected, and never closed for being slow.
+    expect(guest.ws.readyState).toBe(WebSocket.OPEN);
+    expect(warnings.filter((message) => message.includes("never drains"))).toEqual([]);
+
+    // And it still receives everything once it drains.
+    const expected = CONTENDED_BYTES / CHUNK_BYTES;
+    tcpSocket(guest.ws).resume();
+    await eventually(() => guest.frames >= expected, `only ${guest.frames}/${expected} frames arrived`);
+    expect(guest.frames).toBe(expected);
     host.ws.close();
     guest.ws.close();
   }, 60_000);

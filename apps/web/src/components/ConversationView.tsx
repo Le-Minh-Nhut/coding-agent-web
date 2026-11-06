@@ -683,7 +683,32 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
    * saved read's completion is what authorises an empty screen, so the live
    * snapshot's state must not leak in and claim the conversation is still loading.
    */
-  const sync: SyncStatus = isShowingSavedHistory ? (historyLoading ? "loading" : "ready") : transcript.sync;
+  const sync: SyncStatus = isShowingSavedHistory
+    ? // A saved read is a single fetch, so it is loading until it answers and
+      // authoritative afterwards — but only if it *has* answered. `historyError`
+      // means it did not, and claiming `ready` there would assert a transcript
+      // this read never produced.
+      historyLoading
+      ? "loading"
+      : historyError !== null || savedHistory === null
+        ? "loading"
+        : savedHistory.messages.length === 0
+          ? "empty"
+          : "ready"
+    : transcript.sync;
+
+  /**
+   * The progress line for a loading snapshot, computed once per render.
+   *
+   * `total` comes from the host's own `welcome`; when it promised nothing there is
+   * no denominator to divide by and no percentage is invented — the line simply
+   * says it is waiting.
+   */
+  const progressLine = ((): string => {
+    const progress = snapshotProgress(transcript);
+    if (progress === null || progress.total <= 0) return "Waiting for the session's history.";
+    return `${progress.received} of ${progress.total} entries received.`;
+  })();
 
   /**
    * Saved mode has exactly one transcript source (the journal). Prompts the host
@@ -1663,7 +1688,11 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     for (let attempt = 0; attempt < attempts; attempt += 1) {
       await new Promise((resolve) => setTimeout(resolve, 7_500));
       if (!viewActiveRef.current || operationGenerationRef.current !== operationGeneration || conversationIdRef.current !== conversationAtHandoff) return;
-      const result = await api.getConversationEvents(conversationAtHandoff, { limit: 50 });
+      // Read FORWARD from the baseline, not the newest page. A busy session writes
+      // many unrelated events (`agent.launched`, `agent.exited`, …) into this same
+      // stream, so a fixed newest-N window can push the commit out of view and the
+      // banner would stay "delivered" forever on evidence that exists.
+      const result = await api.getConversationEvents(conversationAtHandoff, { after: baselineSeq, limit: 200 });
       if (!result.ok) return;
       // Correlated by the store's own sequence number, not by a timestamp: the
       // phone's clock is not the server's, so a wall-clock comparison would be
@@ -1694,6 +1723,9 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     // to acknowledge this one. An unreadable baseline disables reconciliation
     // rather than defaulting to "match anything".
     const baseline = await api.getConversationEvents(conversationAtHandoff, { limit: 1 });
+    // Strictly read, never defaulted: an unreadable baseline becomes `null` (no
+    // reconciliation), because defaulting to 0 would make every historical commit
+    // a match — exactly the fabrication this correlation exists to prevent.
     const baselineSeq = baseline.ok ? (baseline.data.events.at(-1)?.seq ?? 0) : null;
     // The unsent draft is deliberately untouched by this action: it is not a send.
     const result = await api.requestHandoff(conversationAtHandoff, confirmDraftRisk).finally(() => { handoffInFlightRef.current = false; });
@@ -2858,6 +2890,16 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
             {olderHistoryLoading && <p role="status">Loading older history…</p>}
             {olderHistoryError && <p role="alert">{olderHistoryError}</p>}
             {!savedHistory.hasOlder && !savedHistory.skippedOversized && <p role="status">Beginning of history.</p>}
+            {/* F8: a saved read that returned no displayable rows used to render
+                only banners over an empty region — no designed state at all, in the
+                one mode whose whole point is showing what was recovered. It is a
+                verified-empty read (the journal answered), so it may say so. */}
+            {savedRows.length === 0 && !historyLoading && historyError === null && (
+              <div className="empty-state">
+                <p className="empty-state-title">Nothing to display in this transcript</p>
+                <p className="empty-state-sub">The session was read successfully and holds no displayable messages.</p>
+              </div>
+            )}
             <TranscriptList rows={savedRows} onOpenFile={openFileDiff} />
             {savedModeOptimistic.map((message) => <MessageRow key={message.id} message={message} />)}
           </>
@@ -2892,6 +2934,18 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
             session by message count alone. That single rule is what the reported
             bug violated: a 3238-entry conversation rendered as "No prompts yet"
             while its snapshot was still in flight. */}
+        {/* A stall must be visible even when rows are already on screen. A resync
+            over a populated conversation (reconnect, host restart) that then stops
+            moving would otherwise render nothing at all: the states below are gated
+            on an empty transcript, so this one is deliberately outside that gate.
+            It is a strip, not a takeover — verified rows stay readable beneath it. */}
+        {sync === "stalled" && messages.length > 0 && !linkUnavailable && (
+          <div className="sync-stall-strip" role="alert">
+            <span>History did not finish loading — showing the last verified transcript.</span>
+            <button type="button" onClick={retrySync}>Retry</button>
+          </div>
+        )}
+
         {messages.length === 0 && !streamingText && !linkUnavailable && (
           <div className="empty-transcript" data-sync={sync}>
             {sync === "loading" && (
@@ -2900,11 +2954,7 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
                   <span className="spinner" />
                 </div>
                 <p className="empty-state-title">Loading conversation…</p>
-                <p className="empty-state-sub">
-                  {snapshotProgress(transcript) === null
-                    ? "Waiting for the session's history."
-                    : `${snapshotProgress(transcript)!.received} of ${snapshotProgress(transcript)!.total} entries received.`}
-                </p>
+                <p className="empty-state-sub">{progressLine}</p>
               </div>
             )}
             {sync === "stalled" && (

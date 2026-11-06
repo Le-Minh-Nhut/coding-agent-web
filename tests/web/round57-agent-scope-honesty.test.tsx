@@ -29,7 +29,7 @@ describe("dashboard agent card scope", () => {
     renderCards({ total: 12, running: 0 });
     expect(screen.getByText("12 Agents")).toBeTruthy();
     // The sub-line must disclaim the total rather than implying twelve processes.
-    expect(screen.getByText(/past and present/)).toBeTruthy();
+    expect(screen.getByText(/all-time/)).toBeTruthy();
   });
 
   it("shows the running count plainly when work is in flight", () => {

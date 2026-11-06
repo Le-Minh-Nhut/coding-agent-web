@@ -44,10 +44,24 @@ type Event = { seq: number; type: string; ts: string; payload: unknown };
 async function mockEvents(page: Page, events: Event[] | (() => Event[])): Promise<void> {
   await page.route("**/api/conversations/*/events*", async (route) => {
     const body = typeof events === "function" ? events() : events;
+    // Honour the real cursors. A mock that ignores them cannot tell a forward read
+    // from a newest-N window, and would pass whether or not the bug is present.
+    const url = new URL(route.request().url());
+    const after = url.searchParams.get("after");
+    const before = url.searchParams.get("before");
+    const limit = Number(url.searchParams.get("limit") ?? "100");
+    let page_ = body;
+    if (after !== null) {
+      // Forward: ascending, strictly greater than the cursor, oldest `limit`.
+      page_ = body.filter((event) => event.seq > Number(after)).slice(0, limit);
+    } else {
+      // Backward (the default): the newest `limit`, ascending.
+      page_ = body.filter((event) => before === null || event.seq < Number(before)).slice(-limit);
+    }
     await route.fulfill({
       status: 200,
       contentType: "application/json",
-      body: JSON.stringify({ ok: true, data: { events: body, nextAfter: null, nextBefore: null } }),
+      body: JSON.stringify({ ok: true, data: { events: page_, nextAfter: null, nextBefore: null } }),
     });
   });
 }
@@ -117,6 +131,41 @@ test("an earlier handoff's commit cannot acknowledge a new one", async ({ page }
   await expect(banner).toContainText(/Handoff delivered/i);
   await expect(banner, "an old commit must not be reported as this operation's success").not.toContainText(/Handoff completed/i);
   await expect(page.locator(".banner.success")).toHaveCount(0);
+});
+
+test("a commit beyond a window of unrelated events is still found", async ({ page }) => {
+  // F1: the reconciler used to read the newest N events, so a busy stream could
+  // push the commit out of view and the banner would stay "delivered" forever on
+  // evidence that exists. It now reads FORWARD from this operation's baseline.
+  await mockHandoff(page, handoffResponse("delivered"));
+  let pasted = false;
+  await mockEvents(page, () => {
+    const noiseBefore = Array.from({ length: 120 }, (_, i) => ({ seq: 10 + i, type: "agent.launched", ts: "2026-01-01T00:00:00Z", payload: {} }));
+    // The commit is BURIED, not newest: a session that keeps working after the
+    // compaction writes more unrelated events, so a newest-N window slides past
+    // the commit while a forward read from the baseline still contains it. That
+    // ordering is the whole point — with the commit as the newest event, even the
+    // broken window would find it and the test would prove nothing.
+    const noiseAfter = Array.from({ length: 120 }, (_, i) => ({ seq: 200 + i, type: "agent.exited", ts: "2026-01-01T00:02:00Z", payload: {} }));
+    return [
+      { seq: 5, type: "handoff-start", ts: "2026-01-01T00:00:00Z", payload: {} },
+      ...noiseBefore,
+      ...(pasted
+        ? [
+            { seq: 130, type: "handoff-committed", ts: "2026-01-01T00:01:00Z", payload: { entryId: "comp-buried" } },
+            ...noiseAfter,
+          ]
+        : []),
+    ];
+  });
+  page.on("request", (request) => {
+    if (request.method() === "POST" && request.url().includes("/handoff")) pasted = true;
+  });
+  await openHandoffPanel(page);
+
+  const banner = page.locator(".banner").filter({ hasText: /Handoff completed|Handoff delivered/i });
+  await expect(banner).toContainText(/Handoff completed/i, { timeout: 20_000 });
+  await expect(banner).toContainText("comp-buried");
 });
 
 test("a committed result is reported immediately, without waiting", async ({ page }) => {

@@ -139,7 +139,8 @@ test("the empty state is centred in the transcript and clear of the composer", a
   const topGap = stateBox!.y - scrollBox!.y;
   const bottomGap = scrollBox!.y + scrollBox!.height - (stateBox!.y + stateBox!.height);
   expect(Math.abs(topGap - bottomGap), `not centred (top ${Math.round(topGap)}, bottom ${Math.round(bottomGap)})`).toBeLessThan(60);
-  await page.screenshot({ path: join(SCREENS_DIR, "state-06-empty-centred.png") });
+  // Deliberately no screenshot here: the assertion above is the proof, and a
+  // capture of this state would be byte-identical to the verified-empty one.
 });
 
 test("a long prompt does not take over the screen", async ({ page }) => {

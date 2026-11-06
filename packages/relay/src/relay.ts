@@ -79,11 +79,16 @@ export const MAX_FRAME_BYTES = 8 * 1024 * 1024;
  *
  * This is measured on the *queued* side, not on `bufferedAmount`: while a peer
  * is paused nothing is handed to `ws`, so `bufferedAmount` stays flat and cannot
- * police the backlog. 16 MiB fits the largest real snapshot (the owner's is
- * ~10.2 MB / 3238 entries) with room for the live frames that follow it, while
- * still bounding what one stuck guest can pin in relay memory.
+ * police the backlog.
+ *
+ * The bound must not close a peer that is genuinely draining, so it is sized well
+ * above any snapshot a real session produces — the guest itself reasons about a
+ * 50 MB session (`packages/guest/src/lib/client.ts`), and the owner's largest
+ * measured session is 3915 entries / ~11.4 MB. 64 MiB is the last resort for a
+ * peer that never reads *at all*; a slow reader oscillates between the pause and
+ * resume thresholds and never approaches it, because its queue drains as it goes.
  */
-const MAX_QUEUED_BYTES = 16 * 1024 * 1024;
+const MAX_QUEUED_BYTES = 64 * 1024 * 1024;
 
 /**
  * Flow-control thresholds, in bytes buffered by the peer's socket.
@@ -251,6 +256,8 @@ function createFlowControl(deps: {
 }): {
   send(target: WebSocket, frame: Buffer): void;
   forget(target: WebSocket): void;
+  /** True while this peer is paused and owes a backlog. */
+  isPaused(target: WebSocket): boolean;
 } {
   interface Paused {
     queue: Buffer[];
@@ -315,6 +322,7 @@ function createFlowControl(deps: {
       clearInterval(entry.timer);
       entry.queue.length = 0;
     },
+    isPaused: (target) => paused.has(target),
   };
 }
 
@@ -386,6 +394,18 @@ export function createRelay(options: RelayOptions = {}): Relay {
     close: (target, code, reason) => target.close(code, reason),
     logger,
   });
+
+  /**
+   * A peer we are deliberately withholding data from is not a dead peer.
+   *
+   * The heartbeat below terminates a socket that misses a pong, and a socket whose
+   * receive window is full cannot process the ping — so the liveness probe would
+   * kill exactly the slow phone the pause exists to protect, which is the failure
+   * mode this whole change removes. While a peer is paused its backlog is the
+   * evidence it is still owed data; it is judged by whether it drains, not by
+   * whether it can answer on a channel that is already blocked.
+   */
+  const isFlowing = (socket: WebSocket): boolean => flow.isPaused(socket);
 
   /** Data frame to a peer, subject to that peer's flow control. */
   const deliver = (target: WebSocket, frame: Buffer): void => {
@@ -638,6 +658,13 @@ export function createRelay(options: RelayOptions = {}): Relay {
   function startHeartbeat(): void {
     heartbeat = setInterval(() => {
       for (const [socket, state] of liveness) {
+        // A paused peer's channel is saturated by definition: it has not read what
+        // we already sent, so a missed pong says nothing about whether it is alive.
+        // Its own backlog ceiling is the bound that applies to it instead.
+        if (isFlowing(socket)) {
+          state.alive = true;
+          continue;
+        }
         if (!state.alive) {
           socket.terminate();
           liveness.delete(socket);

@@ -812,6 +812,25 @@ textarea::placeholder {
   overflow-wrap: anywhere;
 }
 
+/* The global reset zeroes padding, which left list markers at x=0: they were
+   drawn outside the transcript's gutter and clipped by the viewport edge on every
+   phone width. Markers belong inside the content box. */
+.message-content ul,
+.message-content ol {
+  padding-left: 1.4em;
+  margin: 0.4em 0;
+}
+.message-content li {
+  margin: 0.15em 0;
+}
+/* Nested lists keep their own indent rather than collapsing into the parent. */
+.message-content ul ul,
+.message-content ul ol,
+.message-content ol ul,
+.message-content ol ol {
+  margin: 0;
+}
+
 .message-content pre,
 .message-content pre code,
 .markdown-code-block pre,
@@ -1173,6 +1192,32 @@ details[open] summary {
   gap: 10px;
   text-align: center;
 }
+/* A stall announced over an existing transcript: compact, above the rows it
+   qualifies, and never a full-screen takeover. */
+.sync-stall-strip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 0 0 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-control);
+  background: #211b10;
+  color: var(--text-secondary);
+  font-size: 0.82rem;
+}
+.sync-stall-strip button {
+  flex: none;
+  min-height: 30px;
+  padding: 0 12px;
+  border-radius: var(--radius-control);
+  border: 1px solid var(--border-strong);
+  background: var(--surface-secondary);
+  color: var(--text-primary);
+  font-size: 0.82rem;
+}
+
 .empty-state-icon {
   width: 44px;
   height: 44px;

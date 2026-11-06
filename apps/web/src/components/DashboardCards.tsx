@@ -54,8 +54,11 @@ export function DashboardCards({ counts, onOpenAgents, onOpenFiles, onOpenActivi
             spawned — subagents and workers, most of them finished. The sub-line
             says which, so a big total with nothing running is not mistaken for a
             dozen live processes. */}
+        {/* Short enough to survive the card's ellipsis at 320px: the earlier
+            wording ("past and present") was itself the part that got clipped, so
+            the disclaimer never reached the phone it was written for. */}
         <span className="dashboard-sub">
-          {agents.running === 0 ? "0 running · past and present" : `${agents.running} running`}
+          {agents.running === 0 ? "0 running · all-time" : `${agents.running} running`}
         </span>
       </button>
       <button
