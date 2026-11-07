@@ -43,69 +43,13 @@ import {
   budget,
   describeEnvironment,
   type EnvironmentDescription,
+  BUDGET_MS,
+  PERF_BUDGET_TABLE,
+  type BudgetPolicy,
+  TAIL_ALLOWANCE_PX,
 } from "./perf-scroll-harness.js";
 
 const LARGE = 4075;
-const BUDGET_MS = 200;
-const TAIL_ALLOWANCE_PX = 120;
-
-export interface BudgetPolicy {
-  id: string;
-  name: string;
-  budgetMs: number;
-  blocking: boolean;
-  category: "A_CORRECTNESS" | "B_PERFORMANCE";
-  harnessDelay: "absent" | "excluded";
-  justification: string;
-}
-
-export const PERF_BUDGET_TABLE: Record<string, BudgetPolicy> = {
-  "PERF-SCROLL-BLANK": {
-    id: "PERF-SCROLL-BLANK",
-    name: "Scroll blank-frame maximum run duration",
-    budgetMs: 150,
-    blocking: true,
-    category: "B_PERFORMANCE",
-    harnessDelay: "absent",
-    justification: "Core black-transcript symptom; prolonged blank viewports violate primary UX contract. Gesture occurs after full snapshot load; harness warm-up is absent.",
-  },
-  "PERF-SCROLL-FRAME-GAP": {
-    id: "PERF-SCROLL-FRAME-GAP",
-    name: "Scroll frame gap p95",
-    budgetMs: 100,
-    blocking: true,
-    category: "B_PERFORMANCE",
-    harnessDelay: "absent",
-    justification: "Maintains minimum gesture responsiveness during fast flicks across large history. Gesture occurs after full snapshot load; harness warm-up is absent.",
-  },
-  "PERF-DIFF-ROUNDTRIP": {
-    id: "PERF-DIFF-ROUNDTRIP",
-    name: "Diff to transcript round trip",
-    budgetMs: 200,
-    blocking: true,
-    category: "B_PERFORMANCE",
-    harnessDelay: "absent",
-    justification: "Returning from files/diff to conversation must settle <=200ms. Restored to pre-change BUDGET_MS ceiling; blocking assertion.",
-  },
-  "PERF-STREAM-TASK": {
-    id: "PERF-STREAM-TASK",
-    name: "Longest task during stream into 4075 entries",
-    budgetMs: 200,
-    blocking: true,
-    category: "B_PERFORMANCE",
-    harnessDelay: "absent",
-    justification: "Longest task during stream into 4075 entries must not exceed 200ms. Restored to pre-change BUDGET_MS ceiling; blocking assertion.",
-  },
-  "PERF-LOAD-FIRST-CONTENT": {
-    id: "PERF-LOAD-FIRST-CONTENT",
-    name: "12 MB snapshot first content render",
-    budgetMs: 200,
-    blocking: true,
-    category: "B_PERFORMANCE",
-    harnessDelay: "excluded",
-    justification: "12 MB snapshot first content must appear within the 200ms budget. The instrument explicitly separates fixture.ts:518-521 200ms mock WebSocket warm-up delay from the pure chunk-delivery and rendering pipeline. Measured-without-warmup applies to this budget.",
-  },
-};
 
 
 function report(id: string, payload: Record<string, unknown>, env?: EnvironmentDescription): void {
@@ -916,18 +860,154 @@ test("PERF-LOAD-01: a ~12 MB snapshot loads with first content, TTI, heap and DO
   const warmupStart = await page.evaluate(() => performance.now());
   await host.send(welcomeFor(entries.length));
   const warmupElapsed = Math.round((await page.evaluate(() => performance.now())) - warmupStart);
+  // Install in-page bisection probes
+  await page.evaluate(() => {
+    interface CawPerf {
+      decryptStartMarks: number[];
+      decryptEndMarks: number[];
+      decryptTotalMs: number;
+      decryptCount: number;
+      parseStartMarks: number[];
+      parseEndMarks: number[];
+      parseTotalMs: number;
+      parseCount: number;
+      firstCommitMs: number;
+      cardCountAtCommit: number;
+      wsArrivals: number[];
+    }
+    const win = window as unknown as { __cawPerf: CawPerf };
+    const perf: CawPerf = {
+      decryptStartMarks: [],
+      decryptEndMarks: [],
+      decryptTotalMs: 0,
+      decryptCount: 0,
+      parseStartMarks: [],
+      parseEndMarks: [],
+      parseTotalMs: 0,
+      parseCount: 0,
+      firstCommitMs: -1,
+      cardCountAtCommit: 0,
+      wsArrivals: [],
+    };
+    win.__cawPerf = perf;
+
+    // Intercept crypto.subtle.decrypt
+    const subtle = crypto.subtle;
+    const origDecrypt = subtle.decrypt.bind(subtle);
+    subtle.decrypt = async function (...args: Parameters<typeof origDecrypt>) {
+      const t0 = performance.now();
+      performance.mark(`decrypt-start-${perf.decryptCount}`);
+      try {
+        return await origDecrypt(...args);
+      } finally {
+        const t1 = performance.now();
+        performance.mark(`decrypt-end-${perf.decryptCount}`);
+        performance.measure(`decrypt-${perf.decryptCount}`, `decrypt-start-${perf.decryptCount}`, `decrypt-end-${perf.decryptCount}`);
+        perf.decryptTotalMs += (t1 - t0);
+        perf.decryptCount++;
+      }
+    };
+
+    // Intercept JSON.parse
+    const origParse = JSON.parse;
+    JSON.parse = function (text: string, reviver?: (this: unknown, key: string, value: unknown) => unknown) {
+      const isChunk = typeof text === "string" && text.length > 500 && (text.includes('"snapshot-chunk"') || text.includes('"entries"'));
+      if (isChunk) {
+        const t0 = performance.now();
+        performance.mark(`json-parse-start-${perf.parseCount}`);
+        try {
+          return origParse.call(this, text, reviver);
+        } finally {
+          const t1 = performance.now();
+          performance.mark(`json-parse-end-${perf.parseCount}`);
+          performance.measure(`json-parse-${perf.parseCount}`, `json-parse-start-${perf.parseCount}`, `json-parse-end-${perf.parseCount}`);
+          perf.parseTotalMs += (t1 - t0);
+          perf.parseCount++;
+        }
+      }
+      return origParse.call(this, text, reviver);
+    };
+
+    // MutationObserver to catch React commit of message cards
+    const mo = new MutationObserver(() => {
+      const cards = document.querySelectorAll(".messages-scroll .message-card");
+      if (cards.length > 0 && perf.firstCommitMs < 0) {
+        perf.firstCommitMs = performance.now();
+        perf.cardCountAtCommit = cards.length;
+        performance.mark("react-commit-window");
+      }
+    });
+    mo.observe(document.body, { childList: true, subtree: true });
+  });
 
   // Stage 2: Pure chunk delivery and first content render pipeline
   const tti = startRowWait(page, sentinel(entries.length - 1), 300_000);
   const started = await page.evaluate(() => performance.now());
-  for (const frame of frames) await host.send({ ...frame });
+  const nodeSendStart = performance.now();
+  const nodeFrameTimes: number[] = [];
+  for (let i = 0; i < frames.length; i++) {
+    const f0 = performance.now();
+    await host.send({ ...frames[i] });
+    nodeFrameTimes.push(performance.now() - f0);
+  }
+  const nodeSendTotal = performance.now() - nodeSendStart;
   const firstContentMs = Math.round(await tti);
   const totalMs = Math.round((await page.evaluate(() => performance.now())) - started);
+  const inPageTimings = await page.evaluate(() => {
+    interface CawPerf {
+      decryptStartMarks: number[];
+      decryptEndMarks: number[];
+      decryptTotalMs: number;
+      decryptCount: number;
+      parseStartMarks: number[];
+      parseEndMarks: number[];
+      parseTotalMs: number;
+      parseCount: number;
+      firstCommitMs: number;
+      cardCountAtCommit: number;
+      wsArrivals: number[];
+    }
+    const win = window as unknown as { __cawPerf: CawPerf };
+    const marks = performance.getEntriesByType("mark").map((m) => ({ name: m.name, startTime: m.startTime }));
+    const measures = performance.getEntriesByType("measure").map((m) => ({ name: m.name, duration: m.duration, startTime: m.startTime }));
+    return {
+      ...win.__cawPerf,
+      marks,
+      measures,
+      perfNow: performance.now(),
+    };
+  });
+  // Stage breakdown analysis
+  const marks = inPageTimings.marks;
+  const measures = inPageTimings.measures;
+  const decrypt0Start = marks.find(m => m.name === "decrypt-start-0")?.startTime ?? started;
+  const decrypt39End = marks.find(m => m.name === "decrypt-end-39")?.startTime ?? started;
+  const parse39End = marks.find(m => m.name === "json-parse-end-39")?.startTime ?? decrypt39End;
+  const reactCommit = inPageTimings.firstCommitMs;
+  const finalPainted = started + firstContentMs;
+
+  const harnessSendLoopMs = Math.round(parse39End - started - inPageTimings.decryptTotalMs - inPageTimings.parseTotalMs);
+  const clientDecryptMs = Math.round(inPageTimings.decryptTotalMs);
+  const clientParseMs = Math.round(inPageTimings.parseTotalMs);
+  const reducerReplayMs = Math.round(reactCommit - parse39End);
+  const layoutPaintMs = Math.round(finalPainted - reactCommit);
+  const firstContentClientMs = clientDecryptMs + clientParseMs + reducerReplayMs + layoutPaintMs;
+
+  const stageBreakdown = {
+    harnessSendLoopMs,
+    clientDecryptMs,
+    clientParseMs,
+    reducerReplayMs,
+    layoutPaintMs,
+    firstContentClientMs,
+    firstContentMs,
+  };
+
   const firstContentWithWarmupMs = firstContentMs >= 0 ? firstContentMs + warmupElapsed : -1;
   const totalWithWarmupMs = totalMs + warmupElapsed;
   const peak = await page.evaluate(() => {
     const w = window as unknown as { __peak?: number; __sampler?: number };
-    if (w.__sampler !== undefined) clearInterval(w.__sampler);
+    clearInterval(w.__sampler);
     return Math.round(((w.__peak ?? 0) / 1048576) * 10) / 10;
   });
   const nodes = await readNodes();
@@ -940,8 +1020,15 @@ test("PERF-LOAD-01: a ~12 MB snapshot loads with first content, TTI, heap and DO
     fixtureBytes: bytes,
     entryCount: entries.length,
     firstContentMs,
+    firstContentClientMs,
     firstContentWithWarmupMs,
     harnessWarmupMs: warmupElapsed,
+    harnessSendLoopMs,
+    clientDecryptMs,
+    clientParseMs,
+    reducerReplayMs,
+    layoutPaintMs,
+    stageBreakdown,
     completedMs: totalMs,
     totalWithWarmupMs,
     ttiMs: totalMs,
@@ -966,11 +1053,84 @@ test("PERF-LOAD-01: a ~12 MB snapshot loads with first content, TTI, heap and DO
   await waitForRow(page, sentinel(Math.round((entries.length - 1) / 2)));
   expect(state.entries, "the snapshot must still report every entry it rendered").toBe(entries.length);
   expect(state.domElements, "a 12 MB snapshot must not put its whole history in one document").toBeLessThan(20_000);
+  expect(firstContentClientMs, "pure client pipeline (decrypt + parse + reducer + render + layout + paint) must stay <= 200ms").toBeLessThanOrEqual(200);
+  budget({
+    id: "PERF-LOAD-12MB-CLIENT",
+    measuredMs: firstContentClientMs,
+    budgetMs: PERF_BUDGET_TABLE["PERF-LOAD-12MB-CLIENT"].budgetMs,
+    blocking: PERF_BUDGET_TABLE["PERF-LOAD-12MB-CLIENT"].blocking,
+    env,
+    sampler: "layout",
+    extra: {
+      firstContentMs,
+      harnessSendLoopMs,
+      clientDecryptMs,
+      clientParseMs,
+      reducerReplayMs,
+      layoutPaintMs,
+    },
+  });
   budget({
     id: "PERF-LOAD-FIRST-CONTENT",
     measuredMs: firstContentMs,
     budgetMs: PERF_BUDGET_TABLE["PERF-LOAD-FIRST-CONTENT"].budgetMs,
     blocking: PERF_BUDGET_TABLE["PERF-LOAD-FIRST-CONTENT"].blocking,
+    env,
+    sampler: "layout",
+    extra: {
+      firstContentClientMs,
+      firstContentWithWarmupMs,
+      harnessWarmupMs: warmupElapsed,
+      harnessWarmupFile: "tests/e2e/fixture.ts:518-521",
+      harnessSendLoopMs,
+      clientDecryptMs,
+      clientParseMs,
+      reducerReplayMs,
+      layoutPaintMs,
+    },
+  });
+});
+
+test("PERF-LOAD-02: normal 4075-entry conversation loads first content within the 200ms budget", async ({ page, browserName }) => {
+  test.setTimeout(900_000);
+  test.skip(browserName !== "chromium", "PERF-LOAD gates run on Chromium with CDP enabled");
+  const host = await openWithHost(page);
+  const entries = buildTranscriptEntries({ count: LARGE, seed: 101 });
+  const frames = buildSnapshotFrames(entries, { chunkCount: 24 });
+  const bytes = approximateBytes(frames);
+
+  // Stage 1: Deliver welcome frame, absorbing fixture.ts:518-521 200ms mock WebSocket warm-up
+  const warmupStart = await page.evaluate(() => performance.now());
+  await host.send(welcomeFor(entries.length));
+  const warmupElapsed = Math.round((await page.evaluate(() => performance.now())) - warmupStart);
+
+  // Stage 2: Deliver frames and measure first content
+  const tti = startRowWait(page, sentinel(entries.length - 1), 60_000);
+  const started = await page.evaluate(() => performance.now());
+  for (const frame of frames) await host.send({ ...frame });
+  const firstContentMs = Math.round(await tti);
+  const totalMs = Math.round((await page.evaluate(() => performance.now())) - started);
+  const firstContentWithWarmupMs = firstContentMs >= 0 ? firstContentMs + warmupElapsed : -1;
+
+  const state = await scrollState(page);
+  const env = await describeEnvironment(page, { fixtureName: "plain-4075", entryCount: entries.length, snapshotSizeBytes: bytes });
+  report("PERF-LOAD-02", {
+    fixtureBytes: bytes,
+    entryCount: entries.length,
+    firstContentMs,
+    firstContentWithWarmupMs,
+    harnessWarmupMs: warmupElapsed,
+    completedMs: totalMs,
+    domElements: state.domElements,
+    rows: state.rows,
+  }, env);
+
+  expect(state.entries, "the snapshot must report every entry rendered").toBe(entries.length);
+  budget({
+    id: "PERF-LOAD-NORMAL-FIRST-CONTENT",
+    measuredMs: firstContentMs,
+    budgetMs: PERF_BUDGET_TABLE["PERF-LOAD-NORMAL-FIRST-CONTENT"].budgetMs,
+    blocking: PERF_BUDGET_TABLE["PERF-LOAD-NORMAL-FIRST-CONTENT"].blocking,
     env,
     sampler: "layout",
     extra: {

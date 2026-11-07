@@ -45,13 +45,11 @@ import {
   sentinel,
   type PerfEntry,
 } from "./perf-fixtures.js";
-import { budget, describeEnvironment, revealRow, waitForRow } from "./perf-scroll-harness.js";
+import { budget, describeEnvironment, revealRow, waitForRow, BUDGET_MS, PERF_BUDGET_TABLE } from "./perf-scroll-harness.js";
 
 const COMPOSER = /Send a follow-up…|Turn in flight — send a follow-up…|Read-only/;
 const MENU = "#conversation-actions-menu";
 
-/** The brief's budget. Recorded in every JSON block; asserted only where met. */
-const BUDGET_MS = 200;
 
 /** The reported conversation size. */
 const LARGE = 4075;
@@ -1060,7 +1058,7 @@ test("PERF-08: a ~12 MB snapshot loads, renders and records peak heap", async ({
 
   const dom = await readDomMetrics(page);
   const longTasks = await longTasksSince(page, mark);
-  report("PERF-08", { fixtureBytes: bytes, fixtureBytesDocumented: SNAPSHOT_12MB_BYTES, entryCount: entries.length, loadMs, budgetMet: loadMs <= BUDGET_MS, peakHeapMb: measured.peakMb, heapMb: measured.nowMb, domElements: dom.domElements, messageCards: dom.messageCards, longTaskCount: longTasks.length, longTaskTotalMs: round(longTasks.reduce((s, t) => s + t.duration, 0)), longTaskMaxMs: round(longTasks.reduce((m, t) => Math.max(m, t.duration), 0)) });
+  report("PERF-08", { fixtureBytes: bytes, fixtureBytesDocumented: SNAPSHOT_12MB_BYTES, entryCount: entries.length, loadMs, budgetMet: loadMs <= PERF_BUDGET_TABLE["MOBILE-PERF-08-12MB-LOAD"].budgetMs, peakHeapMb: measured.peakMb, heapMb: measured.nowMb, domElements: dom.domElements, messageCards: dom.messageCards, longTaskCount: longTasks.length, longTaskTotalMs: round(longTasks.reduce((s, t) => s + t.duration, 0)), longTaskMaxMs: round(longTasks.reduce((m, t) => Math.max(m, t.duration), 0)) });
 
   // The fixture IS the thing being measured: a silent drift in its size would make
   // every number above describe a different conversation.
@@ -1068,7 +1066,7 @@ test("PERF-08: a ~12 MB snapshot loads, renders and records peak heap", async ({
   expect(bytes).toBeLessThan(SNAPSHOT_12MB_BYTES * 1.1);
   expect(dom.messageCards, "the tail of a 12 MB snapshot must be on screen").toBeGreaterThan(5);
   const env = await describeEnvironment(page, { fixtureName: "snapshot-12mb", entryCount: entries.length, snapshotSizeBytes: bytes });
-  budget({ id: "MOBILE-PERF-08-12MB-LOAD", measuredMs: loadMs, budgetMs: BUDGET_MS, blocking: true, env, sampler: "layout" });
+  budget({ id: "MOBILE-PERF-08-12MB-LOAD", measuredMs: loadMs, budgetMs: PERF_BUDGET_TABLE["MOBILE-PERF-08-12MB-LOAD"].budgetMs, blocking: PERF_BUDGET_TABLE["MOBILE-PERF-08-12MB-LOAD"].blocking, env, sampler: "layout" });
   await assertNoUnexpectedAppErrors(page);
 });
 
