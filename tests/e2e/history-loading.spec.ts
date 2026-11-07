@@ -275,7 +275,12 @@ test("HIST-13: a compaction summary is preserved, not silently dropped", async (
 
   // Compaction must not make the conversation look empty, and must not vanish.
   await expect(page.getByText(EMPTY_COPY)).toBeHidden();
-  expect((await transcriptTexts(page)).length).toBeGreaterThan(0);
+  // Settle first, matching the async frame arrival rule in HIST-04/08/15: reading the
+  // DOM synchronously right after send() can land before the virtual window mounts.
+  await expect.poll(() => transcriptTexts(page).then((rows) => rows.length)).toBe(2);
+  const texts = await transcriptTexts(page);
+  expect(texts.some((text) => text.includes("Earlier context was compacted here"))).toBe(true);
+  expect(texts.some((text) => text.includes("after compaction"))).toBe(true);
 });
 
 test("HIST-14: a large, slow snapshot progresses without being failed on total duration", async ({ page }) => {
