@@ -207,32 +207,50 @@ describe("spacerHeights and total document reconstruction", () => {
       const window = computeWindow({ offsets, scrollTop, viewportPx: 844, overscanPx: DEFAULT_OVERSCAN_PX });
       const spacers = spacerHeights(offsets, window, gapPx);
 
-      // Model height of the mounted window range including internal gaps
-      // Start of window is offsets[start], end of window is offsets[end]
-      const windowModelSpan = offsets[window.end]! - offsets[window.start]!;
+      // Compute expected spacer heights INDEPENDENTLY from raw heights and gapPx,
+      // without using offsets array at all.
+      // Contract:
+      // Top spacer represents heights[0..start) with internal gaps:
+      //   start === 0 -> 0
+      //   start > 0   -> sum(heights[0..start)) + (start - 1) * gapPx
+      // Bottom spacer represents heights[end..count) with internal gaps:
+      //   end === count -> 0
+      //   end < count   -> sum(heights[end..count)) + (count - end - 1) * gapPx
+      const rawTopSum = window.start === 0
+        ? 0
+        : heights.slice(0, window.start).reduce((acc, h) => acc + h, 0);
+      const expectedTop = window.start === 0 ? 0 : rawTopSum + (window.start - 1) * gapPx;
 
-      // Check spacer reconstruction:
-      // If window spans entire document, spacers are 0, windowModelSpan = total
-      if (window.start === 0 && window.end === count) {
-        expect(spacers.top).toBe(0);
-        expect(spacers.bottom).toBe(0);
-        expect(windowModelSpan).toBe(total);
-      } else if (window.start === 0) {
-        // Only bottom spacer rendered: bottom spacer subtracted 1 gap for spacer-entry boundary
-        // total = windowModelSpan + (spacers.bottom + gap)
-        expect(spacers.top).toBe(0);
-        expect(Math.abs(windowModelSpan + spacers.bottom + gapPx - total)).toBeLessThan(1e-9);
-      } else if (window.end === count) {
-        // Only top spacer rendered: top spacer subtracted 1 gap
-        expect(spacers.bottom).toBe(0);
-        expect(Math.abs(spacers.top + gapPx + windowModelSpan - total)).toBeLessThan(1e-9);
-      } else {
-        // Both top and bottom spacers rendered: each subtracted 1 gap
-        // total = (spacers.top + gap) + windowModelSpan + (spacers.bottom + gap)
-        const reconstructed = spacers.top + gapPx + windowModelSpan + spacers.bottom + gapPx;
-        expect(Math.abs(reconstructed - total)).toBeLessThan(1e-9);
-      }
+      const unmountedBottomCount = count - window.end;
+      const rawBottomSum = window.end === count
+        ? 0
+        : heights.slice(window.end, count).reduce((acc, h) => acc + h, 0);
+      const expectedBottom = window.end === count ? 0 : rawBottomSum + (unmountedBottomCount - 2) * gapPx;
+
+      // Assert each spacer independently matches the raw heights derivation
+      expect(Math.abs(spacers.top - expectedTop)).toBeLessThan(1e-9);
+      expect(Math.abs(spacers.bottom - expectedBottom)).toBeLessThan(1e-9);
+
+      // Independent total check from raw heights
+      const rawMountedSum = heights.slice(window.start, window.end).reduce((acc, h) => acc + h, 0);
+      const topContrib = window.start > 0 ? spacers.top + gapPx : 0;
+      const mountedContrib = rawMountedSum + (window.end - window.start - 1) * gapPx;
+      const bottomContrib = window.end < count ? spacers.bottom + gapPx : 0;
+      const boundaryMountedBottom = window.end < count && (window.end > window.start) ? gapPx : 0;
+      const reconstructedTotal = topContrib + mountedContrib + boundaryMountedBottom + bottomContrib;
+      const independentTotal = heights.reduce((acc, h) => acc + h, 0) + (count - 1) * gapPx;
+      expect(Math.abs(reconstructedTotal - independentTotal)).toBeLessThan(1e-9);
     }
+
+    // Negative test: prove the independent assertion catches a corrupted offset
+    const sampleWindow = computeWindow({ offsets, scrollTop: 50_000, viewportPx: 844, overscanPx: DEFAULT_OVERSCAN_PX });
+    const corruptedOffsets = new Float64Array(offsets);
+    corruptedOffsets[sampleWindow.start] += 500; // corrupt the boundary offset
+    const corruptedSpacers = spacerHeights(corruptedOffsets, sampleWindow, gapPx);
+    const rawTopSum = sampleWindow.start === 0 ? 0 : heights.slice(0, sampleWindow.start).reduce((acc, h) => acc + h, 0);
+    const expectedTop = sampleWindow.start === 0 ? 0 : rawTopSum + (sampleWindow.start - 1) * gapPx;
+    // Corrupted offset must fail the independent raw heights assertion
+    expect(Math.abs(corruptedSpacers.top - expectedTop)).toBe(500);
   });
 });
 

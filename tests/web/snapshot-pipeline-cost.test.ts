@@ -16,14 +16,19 @@ import {
 import type { DisplayMessage } from "../../apps/web/src/components/MessageRow.js";
 
 /**
- * Phase 5 pipeline stage measurement.
+ * Phase 5 pipeline stage measurement — NODE-ONLY PURE PIPELINE BENCHMARK.
  *
- * Measures initial snapshot load latency stage by stage:
- *   1. JSON parse of snapshot frames
- *   2. Transcript reducer / state accumulation (reduceHostFrame)
- *   3. Derived view model (summaries, groupings, pairings)
- *   4. Virtualized window (heights, offsets, computeWindow)
- *   5. First-paint window slice (cost if derived model only processed visible window)
+ * CRITICAL SCOPE NOTE:
+ * This benchmark measures ONLY the isolated JavaScript computation stages in Node.js
+ * (JSON parse, reducer accumulation, derived view model, virtualization offsets).
+ * It runs without browser layout, style recalculation, React reconciler, or GPU paint.
+ *
+ * The authoritative browser-side user-facing latency metric of record is PERF-LOAD-01
+ * (tests/e2e/perf-scroll-gates.spec.ts), which exercises the full end-to-end rendering
+ * path in Chromium and WebKit.
+ *
+ * Each test asserts the exact byte size of its fixture so changes to fixture generators
+ * cannot silently alter the benchmark's basis.
  */
 
 interface StageStats {
@@ -43,9 +48,10 @@ function calculateStats(samples: number[], notes: string): StageStats {
   return { median, p95, max, n, notes };
 }
 
-function formatTable(title: string, stats: Record<string, StageStats>): string {
+function formatTable(title: string, stats: Record<string, StageStats>, bytes: number): string {
   const lines = [
-    `\n### ${title}`,
+    `\n### ${title} — ${bytes.toLocaleString()} bytes`,
+    `> Note: Node-only benchmark (no React/DOM/CSS/layout/paint). Browser-side metric of record is PERF-LOAD-01.`,
     `| stage | median | p95 | max | n | notes |`,
     `| --- | --- | --- | --- | --- | --- |`,
   ];
@@ -181,19 +187,23 @@ function measurePipeline(entries: readonly PerfEntry[], chunkCount = 40, runs = 
   return { entriesCount: entries.length, totalBytes, framesCount: frames.length, stats };
 }
 
-describe("Initial snapshot load pipeline instrumentation (Phase 5)", () => {
-  it("measures 4,075 entries (the owner's real size)", () => {
+describe("Initial snapshot load pipeline instrumentation (Phase 5 - Node-only benchmark)", () => {
+  it("measures 4,075 entries (plain-text baseline, Node-only)", () => {
     const entries = buildTranscriptEntries({ count: 4075 });
     const { stats, totalBytes, framesCount } = measurePipeline(entries, 40, 7);
-    const table = formatTable(`4,075 entries (${(totalBytes / (1024 * 1024)).toFixed(2)} MB, ${framesCount} chunks)`, stats);
+    const table = formatTable(`4,075 entries (${(totalBytes / (1024 * 1024)).toFixed(2)} MB, ${framesCount} chunks)`, stats, totalBytes);
     console.log(table);
+
+    // Assert fixture size stability
+    expect(totalBytes).toBeGreaterThan(1_000_000);
+    expect(totalBytes).toBeLessThan(1_200_000);
 
     expect(stats["Total pure pipeline"].median).toBeLessThan(100);
     expect(stats["1. JSON parse of frames"].median).toBeLessThan(50);
     expect(stats["2. Reducer accumulation"].median).toBeLessThan(50);
   });
 
-  it("measures 4,075 entries with heavy tools/diffs (worst-case payload)", () => {
+  it("measures 4,075 entries with heavy tools/diffs (worst-case payload, Node-only)", () => {
     const entries = buildTranscriptEntries({
       count: 4075,
       toolEvery: 6,
@@ -204,26 +214,38 @@ describe("Initial snapshot load pipeline instrumentation (Phase 5)", () => {
       longPromptWords: 40,
     });
     const { stats, totalBytes, framesCount } = measurePipeline(entries, 40, 7);
-    const table = formatTable(`4,075 heavy entries (${(totalBytes / (1024 * 1024)).toFixed(2)} MB, ${framesCount} chunks)`, stats);
+    const table = formatTable(`4,075 heavy entries (${(totalBytes / (1024 * 1024)).toFixed(2)} MB, ${framesCount} chunks)`, stats, totalBytes);
     console.log(table);
+
+    // Assert fixture size stability
+    expect(totalBytes).toBeGreaterThan(34_000_000);
+    expect(totalBytes).toBeLessThan(38_000_000);
 
     expect(stats["Total pure pipeline"].median).toBeLessThan(350);
   });
 
-  it("measures 12 MB snapshot (SNAPSHOT_12MB preset)", () => {
+  it("measures 12 MB snapshot (SNAPSHOT_12MB preset, Node-only)", () => {
     const entries = buildTranscriptEntries(SNAPSHOT_12MB);
     const { stats, totalBytes, framesCount } = measurePipeline(entries, 40, 7);
-    const table = formatTable(`12 MB snapshot (${(totalBytes / (1024 * 1024)).toFixed(2)} MB, ${framesCount} chunks, ${entries.length} entries)`, stats);
+    const table = formatTable(`12 MB snapshot (${(totalBytes / (1024 * 1024)).toFixed(2)} MB, ${framesCount} chunks, ${entries.length} entries)`, stats, totalBytes);
     console.log(table);
+
+    // Assert fixture size stability
+    expect(totalBytes).toBeGreaterThan(11_500_000);
+    expect(totalBytes).toBeLessThan(13_500_000);
 
     expect(stats["Total pure pipeline"].median).toBeLessThan(200);
   });
 
-  it("measures 8,000 entries (2x reported size)", () => {
+  it("measures 8,000 entries (2x reported size, Node-only)", () => {
     const entries = buildTranscriptEntries({ count: 8000 });
     const { stats, totalBytes, framesCount } = measurePipeline(entries, 40, 7);
-    const table = formatTable(`8,000 entries (${(totalBytes / (1024 * 1024)).toFixed(2)} MB, ${framesCount} chunks)`, stats);
+    const table = formatTable(`8,000 entries (${(totalBytes / (1024 * 1024)).toFixed(2)} MB, ${framesCount} chunks)`, stats, totalBytes);
     console.log(table);
+
+    // Assert fixture size stability
+    expect(totalBytes).toBeGreaterThan(1_900_000);
+    expect(totalBytes).toBeLessThan(2_300_000);
 
     expect(stats["Total pure pipeline"].median).toBeLessThan(150);
   });
