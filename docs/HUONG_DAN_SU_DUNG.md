@@ -317,6 +317,23 @@ omp --version
 
 `curl` tới `/api/auth/me` trả `401` nếu chưa đăng nhập là dấu hiệu API đang phản hồi, không phải lỗi service. Xem thêm [truy cập iPhone](operations/iphone-access.md), [khôi phục](operations/recovery.md), [triển khai](operations/deployment.md) và [các vấn đề môi trường](operations/environment-quirks.md).
 
+### Quy trình phát hành và cập nhật web client (deploy-web)
+
+Giao diện web của CAW sử dụng cấu trúc release có phiên bản trong `apps/web/.deploy/`, độc lập với thư mục build tạm thời:
+
+1. **Build không còn ghi vào thư mục đang phục vụ:** Lệnh `pnpm --filter @caw/web build` chỉ biên dịch vào `apps/web/.deploy/staging/` rồi chuyển thành `apps/web/.deploy/releases/<id>/`. Không có gì được phục vụ cho tới khi publish. Trước đây build thường ghi thẳng vào `apps/web/dist` — đó là lý do một lần build dev có thể đổi giao diện trên iPhone ngay lập tức.
+2. **Các lệnh phát hành chính:**
+   - `node scripts/deploy-web.mjs build`: biên dịch bản phát hành mới vào thư mục staging và chuyển vào releases (mặc định id là `<commit>[-dirty]`).
+   - `node scripts/deploy-web.mjs publish`: chuyển con trỏ `current` sang bản phát hành mới một cách nguyên tử (`rename(2)` symlink). Có thể kiểm tra sức khoẻ với `--health-url URL` và `--health-timeout-ms N`.
+   - `node scripts/deploy-web.mjs status`: hiển thị release hiện tại (`current`), bản trước (`previous`), cùng danh sách các bản có sẵn và staging.
+   - `node scripts/deploy-web.mjs rollback`: hoàn tác về bản phát hành trước đó.
+   - `node scripts/deploy-web.mjs prune --keep N`: dọn dẹp các bản phát hành cũ, giữ lại `N` bản gần nhất (mặc định keep 2; không bao giờ xoá bản đang trỏ bởi `current` hay `previous`).
+3. **Không cần restart service sau khi publish:** Server đọc con trỏ `current` theo từng request (`apps/server/src/static-roots.ts`), nên giao diện mới có hiệu lực ngay ở request tiếp theo mà không cần khởi động lại tiến trình. Riêng guest viewer vẫn nằm ở `packages/guest/dist` (không dùng con trỏ release) nên cần restart backend nếu cập nhật viewer.
+4. **Rollback tức thì:** `node scripts/deploy-web.mjs rollback` chỉ tráo đổi symlink nguyên tử giữa `current` và `previous`, không build lại và không cần restart server.
+5. **Tab trình duyệt đang mở:** Khi đã publish bản mới, một tab Safari/iPhone đang mở vẫn tải được các asset cũ mang hash (`/assets/*`) từ release `previous` (server chỉ fallback đúng 1 bước và chỉ với đường dẫn `assets/`). Một lần điều hướng mới hoặc tải lại trang thì luôn nhận HTML và asset của release hiện tại (`current`).
+6. **Cảnh báo cấu hình systemd:** Không thêm `CAW_WEB_RELEASE_ROOT` vào mục `Environment=` của unit systemd khi nó đang nằm trong `UnsetEnvironment=` — giá trị unset sẽ thắng và release mới không bao giờ có hiệu lực.
+7. **Dọn dẹp an toàn:** Không tự xoá `apps/web/.deploy/releases/` bằng tay; dùng `node scripts/deploy-web.mjs prune --keep N` để tránh vô tình xoá release đang được phục vụ bởi `current` hoặc `previous`.
+
 ## 13. FAQ
 
 ### Vì sao Resume xong lại thành Tracked?
