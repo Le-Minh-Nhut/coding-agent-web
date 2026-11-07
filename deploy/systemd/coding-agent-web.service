@@ -9,7 +9,11 @@ WorkingDirectory=@REPO_ROOT@
 Environment=CAW_CONFIG=@CONFIG_PATH@
 Environment=CAW_STATE_DIR=@STATE_DIR@
 # UnsetEnvironment runs after Environment; never list CAW_CONFIG or CAW_STATE_DIR here.
-UnsetEnvironment=CAW_HOST CAW_PORT CAW_LOG_LEVEL CAW_WEB_DIST_DIR CAW_GUEST_DIST_DIR CAW_PUBLIC_ORIGIN CAW_OMP_BINARY_PATH CAW_RELAY_PORT CAW_MAX_ACTIVE_AGENTS CAW_AUTH_TOKEN_TTL_HOURS CAW_ALLOWED_ROOTS CAW_RELAY_ALLOWED_ORIGINS CAW_TRUST_TAILSCALE_ORIGIN CAW_INSECURE_COOKIES
+# CAW_WEB_RELEASE_ROOT is stripped like CAW_WEB_DIST_DIR: production selects the
+# release layout in caw.config.json, not from a stray shell variable. (If you ever
+# pin it with Environment= here, remove it from this list in the same edit — an
+# unset after an environment line silently wins.)
+UnsetEnvironment=CAW_HOST CAW_PORT CAW_LOG_LEVEL CAW_WEB_DIST_DIR CAW_WEB_RELEASE_ROOT CAW_GUEST_DIST_DIR CAW_PUBLIC_ORIGIN CAW_OMP_BINARY_PATH CAW_RELAY_PORT CAW_MAX_ACTIVE_AGENTS CAW_AUTH_TOKEN_TTL_HOURS CAW_ALLOWED_ROOTS CAW_RELAY_ALLOWED_ORIGINS CAW_TRUST_TAILSCALE_ORIGIN CAW_INSECURE_COOKIES
 Environment=PATH=@PATH_VALUE@
 ExecStart=node --import tsx @REPO_ROOT@/apps/server/src/server.ts
 # Not `pnpm start`: the app must BE the main process. systemd signals only MAINPID

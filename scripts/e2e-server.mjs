@@ -9,7 +9,7 @@
  */
 import { spawn, spawnSync } from "node:child_process";
 import { randomBytes, scryptSync } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readlinkSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { constants as osConstants, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -31,7 +31,20 @@ const SERVER_ENTRY = join(repoRoot, "apps", "server", "src", "server.ts");
 const WEB_DIST = process.env.CAW_WEB_DIST_DIR
   ? resolve(repoRoot, process.env.CAW_WEB_DIST_DIR)
   : join(repoRoot, "apps", "web", "dist");
-const WEB_INDEX = join(WEB_DIST, "index.html");
+// The server resolves the served directory from the release pointer next to the
+// build dir (apps/server/src/static-roots.ts), so the precondition must check the
+// same thing: a published release, else the literal build directory.
+const WEB_RELEASE_ROOT = process.env.CAW_WEB_RELEASE_ROOT
+  ? resolve(repoRoot, process.env.CAW_WEB_RELEASE_ROOT)
+  : join(dirname(WEB_DIST), ".deploy");
+function servedIndex() {
+  try {
+    return join(WEB_RELEASE_ROOT, readlinkSync(join(WEB_RELEASE_ROOT, "current")), "index.html");
+  } catch {
+    return join(WEB_DIST, "index.html");
+  }
+}
+const WEB_INDEX = servedIndex();
 
 function refuse(message) {
   process.stderr.write(`\n[e2e-server] cannot start: ${message}\n\n`);

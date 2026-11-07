@@ -58,12 +58,68 @@ Benchmark validity: zero-agent state must be positively established; an unreacha
 ```bash
 git pull
 pnpm install
-node scripts/build-guest.mjs
-pnpm --filter @caw/web build
-systemctl --user restart coding-agent-web
+node scripts/build-guest.mjs          # guest viewer is a plain dist dir, no release step
+pnpm --filter @caw/web build          # writes a release to .deploy/staging, serves nothing
+node scripts/deploy-web.mjs publish   # atomic pointer swap; no restart needed
 ```
 
-Do not update/restart while actively using app or agents. Only one server may bind port 8791.
+Only the guest viewer needs the backend restarted, because it is served from
+`packages/guest/dist` with no release pointer. A web publish takes effect on the
+next request: the server resolves `current` per request
+(`apps/server/src/static-roots.ts`), so a restart is neither needed nor useful.
+
+## Web releases and rollback
+
+The product UI is served from a versioned release layout, never from the
+directory a build writes into:
+
+```
+apps/web/.deploy/
+  releases/<id>/          immutable; index.html + assets/ + manifest.json
+  current   -> releases/<id>   the release being served
+  previous  -> releases/<id>   what `current` replaced
+  staging/                     in-progress builds; safe to delete
+```
+
+`pnpm --filter @caw/web build` builds into `staging/` and stops there. Nothing
+is served until `node scripts/deploy-web.mjs publish` moves the pointer, so a
+developer build can no longer replace the assets a connected phone is using.
+That is the whole point: safety is structural, not a matter of remembering
+`--outDir /tmp`.
+
+```bash
+node scripts/deploy-web.mjs build [id]                   # default id: <commit>[-dirty]
+node scripts/deploy-web.mjs publish [id] [--health-url URL] [--health-timeout-ms N]
+node scripts/deploy-web.mjs rollback
+node scripts/deploy-web.mjs status
+node scripts/deploy-web.mjs prune --keep 2
+```
+
+Both atomic steps are `rename(2)` on the same filesystem: a release appears under
+`releases/` only by renaming a complete, manifest-verified staging directory, and
+`current` is only replaced by renaming a symlink that was read back first. A
+reader therefore sees the old release or the new one — never a missing pointer,
+a half-written release, or a body assembled from two releases. `publish` verifies
+the manifest (every file's sha256 and size, no unlisted file, every asset
+`index.html` names) and refuses a release that fails.
+
+`--health-url` makes publish a transaction: if the URL does not answer 2xx/3xx
+within the timeout, the pointer is swapped back. Rollback is itself reversible,
+because it swaps `current` and `previous` rather than overwriting one.
+
+An already-open tab keeps the HTML it was served and asks for that release's
+hashed assets after a publish. Those are served from `previous`, exactly one hop
+back and only under `assets/`; an HTML or SPA request is never answered from
+`previous`, so a reload cannot silently render an older index.
+
+Configuration: `webReleaseRoot` (or `CAW_WEB_RELEASE_ROOT`) defaults to the
+`.deploy` directory beside `webDistDir` — `apps/web/.deploy` for the standard
+layout. Do not add `CAW_WEB_RELEASE_ROOT` to the unit's `Environment=` while it
+is listed in `UnsetEnvironment=`: an unset silently wins, and the release would
+never take effect.
+
+Do not update/restart while actively using app or agents. Only one server may
+bind port 8791.
 
 ## Uninstall
 
@@ -83,7 +139,10 @@ Keep app bound to loopback. Configure Serve separately to proxy **only** `127.0.
 
 After reboot, check `systemctl --user is-enabled coding-agent-web` and `./deploy/status.sh`. If it is enabled but not running, inspect journal before starting; verify private tmux socket and reconcile status rather than killing or recreating agents. Never manually start a second server while the service owns port 8791.
 
-To roll back application code, check out the prior known-good revision, reinstall dependencies/build assets, then restart the service. Restore a config backup only after reviewing it; installer backup uses timestamped `.bak` suffix.
+To roll back the web client, `node scripts/deploy-web.mjs rollback` — no restart,
+no rebuild, and `previous` is verified before the pointer moves. To roll back the
+server or guest viewer, check out the prior known-good revision, reinstall
+dependencies/build assets, then restart the service. Restore a config backup only after reviewing it; installer backup uses timestamped `.bak` suffix.
 
 ## Troubleshooting
 

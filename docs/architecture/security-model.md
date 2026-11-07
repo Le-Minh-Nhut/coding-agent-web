@@ -2,7 +2,7 @@
 
 ## Scope and current implementation state
 
-This model describes checked-in implementation, distinguishing component code from complete product path. `apps/server/src/server.ts` wires metadata, authentication, OMP adapters, supervisor, Fastify API, static web hosting (`apps/web/dist` and `packages/guest/dist`), and private relay attachment, running `supervisor.reconcile()` at startup. The API provides session listing, link minting (`POST /api/conversations/:id/link`), attach instructions (`GET /api/conversations/:id/attach`), and runtime status (`GET /api/runtime`). Prompts flow directly over the guest room WebSocket; there is no prompt HTTP route.
+This model describes checked-in implementation, distinguishing component code from complete product path. `apps/server/src/server.ts` wires metadata, authentication, OMP adapters, supervisor, Fastify API, static web hosting (the published web release under `apps/web/.deploy/`, else `apps/web/dist`, plus `packages/guest/dist`), and private relay attachment, running `supervisor.reconcile()` at startup. The API provides session listing, link minting (`POST /api/conversations/:id/link`), attach instructions (`GET /api/conversations/:id/attach`), and runtime status (`GET /api/runtime`). Prompts flow directly over the guest room WebSocket; there is no prompt HTTP route.
 
 The trust model assumes a single owner and an Ubuntu laptop. It does not claim protection from root, a same-UID process, a compromised OMP binary/provider, or a user who deliberately grants a control link to someone else. The agent is intentionally powerful: OMP tools execute as the owner and there is no OS sandbox in this repository.
 
