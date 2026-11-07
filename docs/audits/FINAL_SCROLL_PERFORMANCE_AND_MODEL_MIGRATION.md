@@ -13,13 +13,22 @@
 
 §H.1 carries the full gate table, including the red rows, and §J the ranked limitation list.
 
-Round 58. Base at round start `b0114e3`; the round's three code/doc commits are
-`b1ef86c` (windowed transcript), `ab2a7bb` (tool activity + premium chrome) and
-`8d3d2cc` (docs), pushed as `b0114e3..8d3d2cc` and **deployed** — §I.1 carries the
-observed deploy record, §H.1 the observed gate results. §I.0 is not deployment evidence
-but an operational hazard the round hit three times; §I.3 proves the bundle the origin now
-serves is `d29ffe6`'s output, and §I.4 records the approval-overlay defect that review
-found *after* the release report was written and that `d29ffe6` fixes.
+Round 58. Base at round start `b0114e3`; the round produced five code/doc commits —
+`b1ef86c` (windowed transcript), `ab2a7bb` (tool activity + premium chrome), `8d3d2cc`
+(docs: the round's initial report), `b6ace88` (chore: drop the composer ref the deleted
+adoption path left behind) and `d29ffe6` (fix: `↓ Latest` no longer floats over an
+approval). The **deployed build's inputs** are `b1ef86c` + `ab2a7bb` + `b6ace88` +
+`d29ffe6`, i.e. everything in `b0114e3..d29ffe6` that can reach the bundle; that range was
+pushed and **deployed**, and §I.3 proves the served bundle is that tree's output
+byte-identically. Also in the range but not bundle inputs: `a1cd120` (`playwright.config.ts`,
+`.github/workflows/ci.yml` — gate/CI harness) and docs-only `d0e1bd5`, `f788ab8`,
+`9e36a35`. Commits after `d29ffe6` — `99fae06`, `744a954`, `3dc56e9`, `a11be28`,
+`eec2b04`, `1ef1a62`, `3c1d901`, `b36a027`, `a3d5da7` — are **docs-only** (`git diff
+--name-only d29ffe6 HEAD` returns this report and nothing else) and do not change the
+bundle. §I.1 carries the observed deploy record, §H.1 the observed gate results. §I.0 is
+not deployment evidence but an operational hazard the round hit three times; §I.4 records
+the approval-overlay defect that review found *after* the release report was written and
+that `d29ffe6` fixes.
 
 Every number below names the file it came from or the command that produced it. Where
 a number is a *range*, the range is the spread of separate runs, not a rounded claim.
