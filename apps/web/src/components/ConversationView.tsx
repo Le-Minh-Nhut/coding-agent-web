@@ -397,14 +397,6 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
   /** And for the restart offered beside a stopped session. */
   const restartInFlightRef = useRef(false);
   const sendVersionRef = useRef(0);
-  /**
-   * The send generation the in-flight `input` event belongs to.
-   *
-   * `adoptElementValue` must not resurrect a draft that a send has already cleared: the
-   * element still holds the pre-send text until React re-renders it, and a late `input`
-   * arriving in that gap would otherwise copy the cleared text back into the draft.
-   */
-  const sendVersionAtInputRef = useRef(0);
   const sendIdRef = useRef(0);
   const operationGenerationRef = useRef(0);
   const viewActiveRef = useRef(true);
