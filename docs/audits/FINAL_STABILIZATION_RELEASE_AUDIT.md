@@ -100,7 +100,7 @@
 - **Browser asset compatibility**:
   - Open browser tabs requesting hashed assets (`/assets/*`) missing in `current` fall back one hop to `previous`.
   - Non-asset requests and HTML navigation (`index.html`) **never** fall back to `previous`, preventing stale client state.
-
+- **Legacy dist coexistence**: The legacy directory `apps/web/dist` still exists on this machine with the pre-change bundle and is no longer served. The server resolves `current` per request and only falls back to the literal dist dir when no release pointer exists (`apps/server/src/static-roots.ts`). It was deliberately left in place as an untouched rollback artifact. On a fresh checkout it does not exist at all, and CI asserts it must not (`test ! -e apps/web/dist`).
 ---
 
 ## D. Scroll Architecture
@@ -240,15 +240,30 @@ Routing updated per owner ruling (lifting the 2026-10-30/11-06 ban on Gemini).
 
 ---
 
-## I. Deployment Status
+## I. Release and Provenance
 
-- **Repository HEAD SHA**: `f58e53e` (prior to this audit document commit).
-- **Release ID**: `PENDING — see deploy worker`
-- **Asset hashes**: `PENDING — see deploy worker`
-- **Service status**: Active (PID 92072 untouched, zero interruptions).
-- **OMP pane preservation**: 3/3 panes verified running throughout stabilization.
-- **Rollback availability**: Confirmed operational via `scripts/deploy-web.mjs rollback` (atomic symlink swap).
-
+- **Repository HEAD / final SHA**: `f58e53ee06157e56fbed20fa1a3bd947bf1bece6` (`f58e53e`); `origin/main` identical; push `9703298..f58e53e main -> main`.
+- **Release id**: `f58e53ee0615`
+- **`current` target**: `releases/f58e53ee0615`
+- **Served assets** (from the release directory):
+  | file | sha256 | note |
+  |---|---|---|
+  | `index.html` | `c95dfb767daf731d67ff487a7beaf125b42358d4f6f9ade02e3ecb94783218d8` | new |
+  | `assets/index-CnMw8vDo.js` | `93ab8e5455db1fbb81d3fcf5a6cef46b8ef170106749639bfcff3934c3387459` | new |
+  | `assets/index-e2muy0ow.css` | `ca7c06d554a6731ae852924c2aa8aba9060fb6fdd909839509eab27d131fccc5` | unchanged from previous bundle |
+- **Provenance proof**: A fresh `vite build` of HEAD into a scratch directory produced output **identical** to the published release (three hashes above match the release directory byte-for-byte).
+- **Service runtime**: `coding-agent-web` user unit, `active`/`running`. MainPID **92072 → 2508064**; `ExecMainStartTimestamp` `Fri 2026-11-06 15:39:16 +07` → `Sat 2026-11-07 22:02:31 +07`; `NRestarts 0`. Listening ports `127.0.0.1:8791` and `:8792` owned by 2508064. **One restart, deliberate**, because the previous process predated the per-request release resolver (`apps/server/src/static-roots.ts`); the restart loaded the new resolution code.
+- **Loopback probe**: `HTTP/1.1 200 OK` on `/`, body sha256 `c95dfb76…` (= new release). `/api/auth/me` → **401** (app identity confirmed).
+- **Public probe (Tailscale Serve)**: `HTTP/2 200`, body sha256 `c95dfb76…` — **identical to loopback and to the release**. `tailscale serve status` proxies strictly `http://127.0.0.1:8791`.
+- **OMP agent preservation (key invariant)**: Pane inventory **identical** before and after; snapshot sha256 `bb2fc30987a2a45bce703a49365bbf874d5d7afad2c8fe21a5322afbcab1371d` on both sides:
+  | session | pane | pane_pid | pane_dead | start time |
+  |---|---|---|---|---|
+  | `$0` | `%0` | 1204278 | 0 | Thu Nov 5 03:07:26 2026 |
+  | `$1` | `%1` | 2080435 | 0 | Thu Nov 5 11:48:26 2026 |
+  | `$2` | `%2` | 2082046 | 0 | Thu Nov 5 11:51:15 2026 |
+  No pane died, no PID changed, no start time moved, nothing was signalled or attached.
+- **Rollback**: **UNVERIFIED in production.** This was the first publish under `.deploy`, so there is no `previous` pointer yet and the drill could not be exercised in production. The mechanism is verified by `tests/deploy/web-release-isolation.test.ts` (12-point sequence including rollback), and a subsequent publish will create the first `previous` pointer.
+- **Legacy dist status**: `apps/web/dist` remains on disk untouched as a fallback artifact, bypassed by `current`.
 ---
 
 ## J. Final Verdict
@@ -257,6 +272,6 @@ Routing updated per owner ruling (lifting the 2026-10-30/11-06 ban on Gemini).
 
 **Justification**:
 1. **Core stabilization delivered**: The build-to-production deployment hazard is fully resolved with atomic directory swaps and request-level symlink resolution. The scroller race condition (`↓ Latest` unreliability) is fixed with a unified, single-writer `ScrollController` passing 96/96 repeated runs on target specs.
-2. **Known pre-existing limitation**: `SCROLL-05` exhibits an intermittent layout timing drift under extreme streaming loads in Chromium (failed 1 of 2 full sweeps). Baseline comparison proves this flake existed identically prior to this round; its frequency and severity have been measurably reduced.
-3. **WebKit sweep blocked**: WebKit was halted following Chromium sweep 2 and remains **BLOCKED** from final sweep verification. The 22 recorded WebKit failures are classified as 11 headless browser capability discrepancies, 9 pre-existing baseline failures, and 2 resolved race conditions.
-4. **Safety & continuity**: Production service PID 92072 and all 3 background OMP sessions remained continuously healthy throughout all testing and auditing.
+2. **Known pre-existing limitation**: `SCROLL-05` exhibits an intermittent layout timing drift under extreme streaming loads: it is **pre-existing, materially reduced, not eliminated.** Baseline `d29ffe6` fails it too (`--repeat-each=10` produced drifts up to `-1353px`, and its two full Chromium sweeps were red at `214 expected / 2 unexpected / 3 skipped` and `215 / 1 / 3`). Current HEAD: 10-repeat drifts `0, -1325, -1028, 0, …, -1132, -1188, -946, 0` and sweeps `221/0/0/0` then `220/1/0/0`.
+3. **WebKit sweep blocked**: WebKit was halted following Chromium sweep 2 and remains **BLOCKED** from final sweep verification. The 22 recorded WebKit failures are classified as 11 headless browser capability discrepancies (CDP mouse-wheel/touch emulation), 9 pre-existing baseline failures, and 2 resolved harness/timing defects: `TAIL_ALLOWANCE_PX` `ReferenceError` in `perf-scroll-gates` (instrument defect, resolved in `14bfcb9`) and `HIST-13`'s unpolled DOM read in `history-loading` (test premise race settled offline, green 3/3 isolated and 15/15 for file; resolved in `ca8f745`).
+4. **Safety & continuity**: Deliberate service restart (PID 92072 → 2508064) loaded the per-request static root resolver without dropping any of the 3 background OMP agent sessions (PIDs 1204278, 2080435, 2082046).
