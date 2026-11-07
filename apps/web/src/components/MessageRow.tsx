@@ -619,13 +619,13 @@ export const TranscriptList = memo(function TranscriptList({
   }, [scrollElement]);
 
   /**
-   * Feed the controller: every scroll, every resize, and every input that can only come
-   * from a reader.
+   * Feed the controller: every scroll and every resize.
    *
-   * The controller decides the tail; this effect only tells it what happened. Input
-   * events are corroboration, never the sole signal — the e2e specs set `scrollTop` from
-   * script and dispatch a bare `scroll` event, so a machine that required a wheel or a
-   * touch would never see that reader leave the tail.
+   * The controller decides the tail; this effect only tells it what happened, and what
+   * happened is a fact of the element's own geometry. No input listener is registered,
+   * deliberately: the gestures that must be recognised include a scripted offset
+   * assignment with a dispatched `scroll` event (how the e2e specs park a reader), which
+   * produces no wheel, touch or key event at all.
    */
   useEffect(() => {
     const element = scrollElement?.current ?? null;
@@ -646,22 +646,11 @@ export const TranscriptList = memo(function TranscriptList({
       // see a document already grown under a stationary reader.
       frame = requestAnimationFrame(() => { frame = 0; });
     };
-    const input = (): void => controller.noteInput();
     element.addEventListener("scroll", observe, { passive: true });
-    element.addEventListener("wheel", input, { passive: true });
-    element.addEventListener("touchstart", input, { passive: true });
-    element.addEventListener("touchmove", input, { passive: true });
-    element.addEventListener("keydown", input);
-    element.addEventListener("pointerdown", input, { passive: true });
     const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(observe);
     observer?.observe(element);
     return () => {
       element.removeEventListener("scroll", observe);
-      element.removeEventListener("wheel", input);
-      element.removeEventListener("touchstart", input);
-      element.removeEventListener("touchmove", input);
-      element.removeEventListener("keydown", input);
-      element.removeEventListener("pointerdown", input);
       observer?.disconnect();
       if (frame !== 0) cancelAnimationFrame(frame);
       controller.detach();
