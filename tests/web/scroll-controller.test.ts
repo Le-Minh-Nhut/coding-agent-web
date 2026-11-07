@@ -172,6 +172,21 @@ describe("invariant 4: new messages never move a reader in history", () => {
     expect(el.scrollTop).toBe(2800);
     expect(controller.state().mode).toBe("READING_HISTORY");
   });
+
+  it("streaming growth at the tail does not move a reader reading history", () => {
+    const { el, controller } = mount(5000, 800);
+    el.scrollTop = 1200;
+    controller.sync();
+    expect(controller.state().mode).toBe("READING_HISTORY");
+
+    // Document grows at the tail due to streaming text
+    el.setHeight(6000);
+    controller.pin();
+    expect(el.scrollTop).toBe(1200);
+    controller.sync();
+    expect(el.scrollTop).toBe(1200);
+    expect(controller.state().mode).toBe("READING_HISTORY");
+  });
 });
 
 describe("clamps are a fact of the write, not a reconstruction", () => {

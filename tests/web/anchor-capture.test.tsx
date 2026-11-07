@@ -76,4 +76,37 @@ describe("anchor capture counting", () => {
       expect(count, "Each correction must invoke captureAnchor exactly once").toBe(1);
     }
   });
+
+  it("does not yank scrollTop when assistant streams while reader is parked away from tail", async () => {
+    const { ref, element } = makeScroller();
+    Object.defineProperty(element, "scrollHeight", { value: 100_000, configurable: true });
+    element.scrollTop = 70_000;
+
+    const rows: DisplayMessage[] = Array.from({ length: 2000 }, (_, i) => ({
+      id: `m-${i}`,
+      role: i === 1999 ? "assistant" : "user",
+      text: `message content ${i}`,
+    }));
+    const controller = new ScrollController();
+    const { rerender } = render(<TranscriptList rows={rows} scrollElement={ref} controller={controller} />);
+
+    // Follow tail at bottom (70,000)
+    controller.sync();
+    expect(controller.currentMode).toBe("FOLLOWING_TAIL");
+
+    // Reader parks 3000px away from tail at 67,000
+    element.scrollTop = 67_000;
+    element.dispatchEvent(new Event("scroll"));
+
+    // Allow rAF
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    // A streaming update arrives for the tail message (row 1999)
+    const updatedRows = [...rows];
+    updatedRows[1999] = { id: "m-1999", role: "assistant", text: "streaming more text at tail..." };
+    rerender(<TranscriptList rows={updatedRows} scrollElement={ref} controller={controller} />);
+
+    // Position must be held, not yanked by missing-anchor correction
+    expect(element.scrollTop).toBe(67_000);
+  });
 });

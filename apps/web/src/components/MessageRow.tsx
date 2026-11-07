@@ -428,7 +428,7 @@ export const TranscriptList = memo(function TranscriptList({
    * this, a 120-step programmatic scroll was reverted to the anchor on every commit
    * and never progressed at all.
    */
-  const anchorRef = useRef<{ key: string; offset: number; scrollTop: number } | null>(null);
+  const anchorRef = useRef<{ key: string; offset: number; scrollTop: number; modelOffset: number } | null>(null);
   const [jump, setJump] = useState<{ identity: string; token: number } | null>(null);
   /** Bumped when a focus event pins a row, so the window recomputes with that pin. */
   const [focusVersion, setFocusVersion] = useState(0);
@@ -608,7 +608,6 @@ export const TranscriptList = memo(function TranscriptList({
           ? previous
           : { top: element.scrollTop, height: element.clientHeight }
       ));
-      captureAnchorRef.current?.();
     };
     const schedule = (): void => {
       if (frame !== 0) return;
@@ -727,17 +726,23 @@ export const TranscriptList = memo(function TranscriptList({
       }
     }
     const top = element.getBoundingClientRect().top;
-    let best: { key: string; offset: number; scrollTop: number } | null = null;
-    /** The last mounted entry above the viewport — the fallback anchor. */
-    let closest: { key: string; offset: number; scrollTop: number } | null = null;
+    let best: { key: string; offset: number; scrollTop: number; modelOffset: number } | null = null;
+    /** The mounted entry closest to the viewport top — the fallback anchor. */
+    let closest: { key: string; offset: number; scrollTop: number; modelOffset: number } | null = null;
+    let closestDist = Infinity;
     for (const [key, node] of elementsRef.current) {
       const box = node.getBoundingClientRect();
-      if (box.bottom < top) {
-        closest = { key, offset: box.top - top, scrollTop: element.scrollTop };
-        continue;
+      const index = indexOfKey.get(key);
+      const mOffset = index !== undefined ? (offsets[index] ?? 0) : 0;
+      if (box.top <= top && box.bottom >= top) {
+        best = { key, offset: box.top - top, scrollTop: element.scrollTop, modelOffset: mOffset };
+        break;
       }
-      best = { key, offset: box.top - top, scrollTop: element.scrollTop };
-      break;
+      const dist = Math.abs(box.top - top);
+      if (dist < closestDist) {
+        closestDist = dist;
+        closest = { key, offset: box.top - top, scrollTop: element.scrollTop, modelOffset: mOffset };
+      }
     }
     /**
      * Always anchor to *something* mounted.
@@ -835,8 +840,10 @@ export const TranscriptList = memo(function TranscriptList({
            * The `Show more` case this branch was written for has `ΔS = 0` (the reader did
            * not scroll; the document grew), so that behaviour is unchanged.
            */
-          const scrolledSinceCapture = element.scrollTop - anchor.scrollTop;
-          controller.keepTarget(Math.max(0, modelOffset - anchor.offset + scrolledSinceCapture));
+          const growth = modelOffset - anchor.modelOffset;
+          if (Math.abs(growth) >= 0.5) {
+            controller.keepTarget(Math.max(0, element.scrollTop + growth));
+          }
           // Re-capture from the DOM so the next commit has a mounted anchor again.
           captureAnchorRef.current?.(false);
           recordCorrectionMetrics();
@@ -880,7 +887,9 @@ export const TranscriptList = memo(function TranscriptList({
       // *next* commit read its own previous correction as "somebody else moved the
       // viewport" and re-apply the same delta — how the newest row ended up 8,000px away
       // from a view that believed it was following the tail.
-      anchorRef.current = { key: anchor.key, offset: actual - applied, scrollTop: element.scrollTop };
+      const index = indexOfKey.get(anchor.key);
+      const mOffset = index !== undefined ? (offsets[index] ?? 0) : 0;
+      anchorRef.current = { key: anchor.key, offset: actual - applied, scrollTop: element.scrollTop, modelOffset: mOffset };
     }
     /**
      * Re-capture unconditionally, sub-pixel deltas included (W4).
