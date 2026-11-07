@@ -240,7 +240,8 @@ Routing updated per owner ruling (lifting the 2026-10-30/11-06 ban on Gemini).
 
 ## I. Release and Provenance
 
-- **Repository HEAD / final SHA**: `f58e53ee06157e56fbed20fa1a3bd947bf1bece6` (`f58e53e`); `origin/main` identical; push `9703298..f58e53e main -> main`.
+- **Release SHA**: `f58e53ee06157e56fbed20fa1a3bd947bf1bece6` (`f58e53e`) — the tree the deployed bundle was built from. Release push `9703298..f58e53e main -> main`.
+- **`origin/main` now**: `e0ab192` — reached by two docs-only commits after the release (`f58e53e..e0ab192`), which touch only this report (deployment fill-in and `SCROLL-05` honesty correction) and change no bundle input.
 - **Release id**: `f58e53ee0615`
 - **`current` target**: `releases/f58e53ee0615`
 - **Served assets** (from the release directory):
@@ -249,7 +250,7 @@ Routing updated per owner ruling (lifting the 2026-10-30/11-06 ban on Gemini).
   | `index.html` | `c95dfb767daf731d67ff487a7beaf125b42358d4f6f9ade02e3ecb94783218d8` | new |
   | `assets/index-CnMw8vDo.js` | `93ab8e5455db1fbb81d3fcf5a6cef46b8ef170106749639bfcff3934c3387459` | new |
   | `assets/index-e2muy0ow.css` | `ca7c06d554a6731ae852924c2aa8aba9060fb6fdd909839509eab27d131fccc5` | unchanged from previous bundle |
-- **Provenance proof**: A fresh `vite build` of HEAD into a scratch directory produced output **identical** to the published release (three hashes above match the release directory byte-for-byte).
+- **Provenance proof**: A fresh `vite build` of the release tree `f58e53e` into a scratch directory produced output **identical** to the published release (three hashes above match the release directory byte-for-byte).
 - **Service runtime**: `coding-agent-web` user unit, `active`/`running`. MainPID **92072 → 2508064**; `ExecMainStartTimestamp` `Fri 2026-11-06 15:39:16 +07` → `Sat 2026-11-07 22:02:31 +07`; `NRestarts 0`. Listening ports `127.0.0.1:8791` and `:8792` owned by 2508064. **One restart, deliberate**, because the previous process predated the per-request release resolver (`apps/server/src/static-roots.ts`); the restart loaded the new resolution code.
 - **Loopback probe**: `HTTP/1.1 200 OK` on `/`, body sha256 `c95dfb76…` (= new release). `/api/auth/me` → **401** (app identity confirmed).
 - **Public probe (Tailscale Serve)**: `HTTP/2 200`, body sha256 `c95dfb76…` — **identical to loopback and to the release**. `tailscale serve status` proxies strictly `http://127.0.0.1:8791`.
