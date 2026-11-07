@@ -1,5 +1,18 @@
 # Final report — black-screen scroll, windowed transcript, tool activity, model migration
 
+**Status: shipped and deployed, with one known defect and two owner decisions outstanding.**
+
+| item | state |
+| --- | --- |
+| shipped bundle | `index-hVfEUPqx.js` `02660079191e8615ea455b8e67b096023507c888b4539569f5b06fd5778a035b`, `index-e2muy0ow.css` `ca7c06d55…` — proven byte-identical to a rebuild of `d29ffe6` (§I.3) |
+| black-screen scrolling | **fixed** — DOM 313,916 → 214/544 elements, frame gap max 793/2,112 ms → 34/76 ms (§D.3) |
+| input integrity | **fixed** — 500/500 burst, previously 493–497 of 500 (§D.8) |
+| known defect | **`Latest` affordance can fail to appear** after a fast upward flick that races an incoming chunk. Two specs red on the shipped build, unmodified and unskipped: `mobile.spec.ts` and `regression.spec.ts`, both asserting `getByRole('button', { name: /Latest/ })` is visible. Six measured fix attempts failed; §H.1 records each rejection. Next step is a tail-ownership refactor (TranscriptList owns the decision), not another predicate. |
+| owner decisions outstanding | (1) model routing: repo `.omp` and user config route `task`/`smol`/all 16 overrides to `gpt-6-luna`/Gemini while `docs/operations/subagent-model-policy.md` says every lane is DeepSeek; (2) authenticated walk of a populated conversation in the deployed app — no session cookie on this machine |
+| what is NOT claimed | physical iPhone (§J.6 BLOCKED), CI per-step logs (conclusion read, steps unverified), post-fix WebKit blank-frame count |
+
+§H.1 carries the full gate table, including the red rows, and §J the ranked limitation list.
+
 Round 58. Base at round start `b0114e3`; the round's three code/doc commits are
 `b1ef86c` (windowed transcript), `ab2a7bb` (tool activity + premium chrome) and
 `8d3d2cc` (docs), pushed as `b0114e3..8d3d2cc` and **deployed** — §I.1 carries the
