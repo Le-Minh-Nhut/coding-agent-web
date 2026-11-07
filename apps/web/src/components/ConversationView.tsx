@@ -56,6 +56,7 @@ export { MessageRow, TranscriptList } from "./MessageRow.js";
 export type { DisplayMessage } from "./MessageRow.js";
 import { MessageRow, TranscriptList, type DisplayMessage, type TranscriptListApi } from "./MessageRow.js";
 import { buildSearchIndex, searchTranscript } from "../transcript-window.js";
+import { ScrollController, type ScrollState } from "../scroll-controller.js";
 import { SubagentActivityRow } from "./ToolActivity.js";
 interface PendingPrompt {
   text: string;
@@ -78,7 +79,6 @@ interface PendingPrompt {
 }
 
 
-const TAIL_THRESHOLD_PX = 80;
 const MAX_TRANSCRIPT_REQUESTS = 64;
 const TRANSCRIPT_REQUEST_TIMEOUT_MS = 15_000;
 const TRANSCRIPT_POLL_MS = 1200;
@@ -163,7 +163,6 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
   const [sendError, setSendError] = useState<string | null>(null);
   const [optimisticMessages, setOptimisticMessages] = useState<DisplayMessage[]>([]);
   const [inputText, setInputText] = useState(draft);
-  const [isDetached, setIsDetached] = useState(false);
   const [attachInfo, setAttachInfo] = useState<AttachInstructions | null>(null);
   const [linkUnavailable, setLinkUnavailable] = useState(false);
   const [interceptedCommand, setInterceptedCommand] = useState<SlashCommand | null>(null);
@@ -363,7 +362,6 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
   const inputValueRef = useRef(draft);
   const messagesScrollRef = useRef<HTMLDivElement | null>(null);
   const messagesContentRef = useRef<HTMLDivElement | null>(null);
-  const followTailRef = useRef(true);
   const renderTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingStreamFrameRef = useRef<Extract<HostFrame, { t: "event" }> | null>(null);
   const composingRef = useRef(false);
@@ -595,7 +593,6 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     // Same class of leak: every other atom that is scoped to one conversation and
     // renders without a guard of its own.
     setInterceptedCommand(null);
-    setIsDetached(false);
     setOptimisticMessages([]);
     setTranscriptErrors({});
     // The terminal pane being watched belongs to the conversation that requested
@@ -1098,287 +1095,39 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
   }, [isShowingSavedHistory]);
 
   /**
-   * The offset we last left the scroller at, by our own action or the reader's.
+   * The transcript controller: the only object that writes this scroller's `scrollTop`,
+   * and the owner of the tail state machine.
    *
-   * Needed because `updateTailLock` cannot tell from distance alone who moved. A
-   * windowed list's `scrollHeight` grows *while the reader sits still*: entries below
-   * the fold are estimated, then measured, and the estimate for 2,000 unmeasured rows
-   * is not the 156px their content turns out to need. Measured with the round-50
-   * fixture: pinning the tail to 182,884 against a 183,566px document, then the
-   * document growing to 312,170, left `distanceFromBottom` at 128,525 — so the "is the
-   * reader near the bottom" test read false and the list detached itself from the
-   * tail it was supposed to be following. The conversation opened on entries
-   * 1168-1182 of 2,000, i.e. the middle of nowhere, and "↓ Latest" was needed to find
-   * what the agent had just said. Chunking was not the cause: one 2,000-entry chunk
-   * reproduced it identically.
+   * This view used to decide "is the reader at the tail" from geometry — distance,
+   * document growth, an offset baseline — and six measured attempts to make that
+   * inference agree with every gate failed, each on a different gate. The reason is
+   * structural: nothing in the geometry says WHO moved the offset, and a browser clamp
+   * is indistinguishable from a reader's flick by the time a scroll event is delivered.
+   * The controller therefore records authorship at the moment of every write (see
+   * `scroll-controller.ts`), and this view only consumes the state it publishes.
    */
+  const scrollController = useRef<ScrollController | null>(null);
+  if (scrollController.current === null) scrollController.current = new ScrollController();
+  const controller = scrollController.current;
+  const [tailState, setTailState] = useState<ScrollState>(() => controller.state());
+  useEffect(() => controller.subscribe(setTailState), [controller]);
   /**
-   * The last observation of the scroller, including whether it was at the tail then.
-   *
-   * `nearTail` is the part that matters: growth can only excuse a detached-looking
-   * distance if the reader was *already* at the tail when the document grew. Without it,
-   * a reader walking DOWN through history while rows are still being measured looked
-   * like "document grew, offset did not move up" and got yanked back to the newest
-   * message on every step — measured as a `waitForRow` walk that could never reach the
-   * row it was looking for, on a heavy 4,075-entry transcript.
-   */
-  const lastScrollRef = useRef({ top: 0, height: 0, viewport: 0, nearTail: true, distance: 0 });
-
-  const updateTailLock = useCallback(() => {
-    const element = messagesScrollRef.current;
-    if (!element) return;
-    const top = element.scrollTop;
-    const height = element.scrollHeight;
-    const viewport = element.clientHeight;
-    const distance = height - viewport - top;
-    const last = lastScrollRef.current;
-    // A document that grew underneath a followed tail is not a reader who left it.
-    // The discriminator is not direction but authorship: when the reader moves, the
-    // OFFSET changes; when this list measures a row below the fold, the offset does not
-    // and only `scrollHeight` moves. So growth explains a detached-looking distance only
-    // while `scrollTop` is unchanged. Direction alone is not enough — a slow drag
-    // downward inside a long history also leaves the tail — and a baseline that is not
-    // yet known (`last.height === 0`, the first event of a session) is not growth.
-    /**
-     * Who moved the offset: the reader, or this component?
-     *
-     * Every `scrollTop` write in this component is one of five: the tail pin, the anchor
-     * restore, the scroll-anchor for restored history, the reveal, and the post-commit
-     * pin. The browser writes the rest — a flick, a drag, a keyboard scroll — and it also
-     * writes one more that is nobody's: when the document SHRINKS it clamps `scrollTop`
-     * to the new maximum, which is indistinguishable from an upward scroll by direction
-     * alone.
-     *
-     * An earlier version tried to enumerate the layout events that "explain" a distance
-     * (growth, viewport shrink, `wasAtPin`, `pinnedByTarget`), and each added excuse let a
-     * different gate fail: without growth excused, the tail was lost during the load;
-     * with a stale pin-target comparison, every late measurement of a TALL row read as
-     * somebody else's scroll and the view froze 177px short of the bottom at 150, 400,
-     * 900 and 2000ms — measured, then fixed by asking whether the offset is where the pin
-     * would have put it under the NEW geometry (`pinnedByTarget`).
-     *
-     * So the rule is stated once, in terms of authorship:
-     *
-     *  - the reader moved UP: only a clamp can do that, and a clamp is bounded by the
-     *    document's own change, so an upward move larger than that is the reader's;
-     *  - the reader moved DOWN: always theirs (this component never scrolls away from the
-     *    tail), and it ends the lock unless they stopped at the bottom;
-     *  - the offset did not move at all while the geometry did: the container moved under
-     *    a stationary reader, so the lock stands.
-     */
-    /**
-     * The reader's movement is DISTANCE TO THE BOTTOM, not `scrollTop`.
-     *
-     * The first version compared offsets, and that cannot work on this scroller: when the
-     * document grows, the browser's own scroll anchoring moves `scrollTop` to preserve the
-     * distance from the bottom, and this component's tail pin moves it on purpose. Both
-     * look like a large downward scroll. Measured during a chunked load of tall rows: one
-     * event showed `top` jumping 183,186 -> 311,222 while `dist` stayed at exactly 266 —
-     * no reader can move 128,000px in one event, and treating it as one dropped the lock.
-     *
-     * `dist` is immune to all of it, because every offset write above is the same write in
-     * distance terms: a pin sets it to ~0, a growth with a stationary reader leaves it
-     * unchanged, and a shrink moves the offset WITH the content. The only way it can grow
-     * is a reader scrolling up, or the viewport itself shrinking (a subagent row opening
-     * above the scroller removes ~45px of `clientHeight`, W25) — and a clamp on a shrinking
-     * document can only reduce it.
-     */
-    /**
-     * Keep the tail, or let go of it?
-     *
-     * One condition, because the long list of "explanations" before it each failed a
-     * gate in turn. Every `scrollTop` write this component makes moves the view toward
-     * the bottom; the browser writes the rest — and it also makes two kinds of write of
-     * its own that cannot be told apart from the reader's: scroll anchoring moves the
-     * offset as the document grows, and it CLAMPS the offset as the document shrinks.
-     * Today's measured evidence, on a 40-chunk load of 2,000 tall rows: an event where
-     * `top` jumped 183,186 -> 311,222 while the distance from the bottom stayed at 266;
-     * then a shrink that clamped 142px; then a 35px loss of distance across a 20px
-     * growth.
-     *
-     * So the discriminator is not direction, and it is not a per-event allowance: it is
-     * whether the DOCUMENT CHANGED SIZE. While it did, no scroll event can be attributed
-     * to the reader — the container moved, and the tail stays. On a document that is not
-     * changing size, a scroll away from the bottom is the reader's, and the lock is
-     * released. That is self-correcting: a reader who flicks up during a measurement is
-     * one quiet event away from being released, and a load that is still measuring never
-     * loses the newest row.
-     */
-    const geometryChanged = (last.height > 0 && Math.abs(height - last.height) > 0.5)
-      || (last.viewport > 0 && Math.abs(viewport - last.viewport) > 0.5);
-    const awayFromBottom = distance > TAIL_THRESHOLD_PX;
-    if (awayFromBottom && !geometryChanged) followTailRef.current = false;
-    else if (!awayFromBottom) followTailRef.current = true;
-    // While the tail is held, the newest row is in view — by definition of the lock.
-    if (followTailRef.current && awayFromBottom) {
-      element.scrollTop = Math.max(0, height - viewport);
-    }
-    const nearTail = followTailRef.current;
-    setIsDetached((previous) => previous === !nearTail ? previous : !nearTail);
-    lastScrollRef.current = { top: element.scrollTop, height, viewport, nearTail, distance: height - viewport - element.scrollTop };
-  }, []);
-
-  useLayoutEffect(() => {
-    const element = messagesScrollRef.current;
-    if (element && followTailRef.current) {
-      element.scrollTop = Math.max(0, element.scrollHeight - element.clientHeight);
-      // The pin is the baseline the next scroll event is judged against. Without this
-      // the first event of a load is compared to `{top: 0, height: 0}` and a document
-      // that grew from the pin to the event looks like an unexplained jump.
-      lastScrollRef.current = { top: element.scrollTop, height: element.scrollHeight, viewport: element.clientHeight, nearTail: true, distance: element.scrollHeight - element.clientHeight - element.scrollTop };
-    }
-  }, [messages, streamingText]);
-  /**
-   * Enforce the tail invariant after every commit, instead of trusting a notification.
-   *
-   * Following the tail is a statement about the DOCUMENT, so it must hold whenever the
-   * document changes — not only when a scroll event or `ResizeObserver` record happens to
-   * arrive. Measured on WebKit (the owner's engine), heavy 4,075-entry fixture,
-   * scroll-to-bottom: the write landed at `scrollTop 404,873` while `scrollHeight` was
-   * 420,637, i.e. 15,764px of content appeared AFTER the write with no scroll event and no
-   * observer record; the view then stayed 15,764px short of the bottom permanently
-   * (identical at +50/150/400/1000ms). Chromium always delivered one of those
-   * notifications, so the defect never showed there. Instrumenting this made it appear in
-   * 9 of 10 runs, which is the "observer" heuristic in `N-Heisenberg` terms: the effect was
-   * right and the event simply never came.
-   *
-   * `lastScrollRef` is the evidence of who moved: a PIN never changes the distance to the
-   * bottom, so a distance that grew while `scrollTop` did not move is content arriving
-   * under a stationary, tail-following view — exactly the case that must re-pin. A reader's
-   * own scroll changes `scrollTop`, so it is left alone, and `updateTailLock` decides the
-   * lock as before.
+   * New content or a streaming delta: ask the controller to hold the tail. It decides —
+   * a reader who left the tail is never pulled back.
    */
   useLayoutEffect(() => {
-    const element = messagesScrollRef.current;
-    if (element === null) return;
-    /**
-     * Adopt the bottom whenever the view is AT it.
-     *
-     * The lock is released the moment the reader leaves the bottom (correctly), but
-     * nothing re-acquires it when a programmatic write puts the view back — WebKit can
-     * coalesce that write's scroll event away, so `updateTailLock` never runs and the
-     * transcript stays detached from its own newest row: measured, the final
-     * `scrollTop = scrollHeight` landed at 713,347 against a `scrollHeight` of 733,608 and
-     * stayed there. "Is the view at the bottom" needs no event to answer, and a reader who
-     * genuinely left the bottom is further away than `TAIL_THRESHOLD_PX`, so this cannot
-     * pull anyone back — it is the same rule `updateTailLock` applies, evaluated from the
-     * geometry instead of from a notification.
-     */
-    if (!followTailRef.current) {
-      const distanceNow = element.scrollHeight - element.clientHeight - element.scrollTop;
-      if (distanceNow > TAIL_THRESHOLD_PX) return;
-      followTailRef.current = true;
-      setIsDetached(false);
-      lastScrollRef.current = { top: element.scrollTop, height: element.scrollHeight, viewport: element.clientHeight, nearTail: true, distance: distanceNow };
-      return;
-    }
-    const height = element.scrollHeight;
-    const viewport = element.clientHeight;
-    const top = element.scrollTop;
-    const last = lastScrollRef.current;
-    const distance = height - viewport - top;
-    if (distance <= 0.5) return;
-    // The offset did not move and the document grew: content landed under the reader.
-    const offsetStill = Math.abs(top - last.top) < 0.5;
-    const documentGrew = last.height > 0 && height > last.height + 0.5;
-    /**
-     * A clamped write is the case this exists for.
-     *
-     * WebKit accepted `scrollTop = scrollHeight` and put the view at 713,367 instead of the
-     * requested 739,870 — it clamped against a maximum it had not finished recomputing —
-     * and then the document SHRANK to 734,916 as late measurements landed. The offset never
-     * moved again, so `offsetStill` is false on every later commit and a rule that required
-     * it to be true could never correct the position: measured, the view sat 19,579px from
-     * the bottom permanently. So the condition is the one that actually describes the
-     * obligation — the lock is held, and the view is not at the bottom.
-     *
-     * This cannot trap a reader: leaving the bottom is what clears `followTailRef`, and a
-     * reader's own scroll reaches `updateTailLock` (a quiet document, distance grew) before
-     * the next commit. A reader who scrolls up DURING a measurement is re-pinned for that
-     * one commit and released by the event that follows, which is the same one-frame
-     * behaviour this component already had for a measured row.
-     */
-    if (!documentGrew && !offsetStill && distance > TAIL_THRESHOLD_PX) {
-      // Neither our pin nor a growth explains this offset; the lock would be a lie.
-      return;
-    }
-    element.scrollTop = Math.max(0, height - viewport);
-    lastScrollRef.current = { top: element.scrollTop, height, viewport, nearTail: true, distance: height - viewport - element.scrollTop };
-  });
-
+    controller.pin();
+  }, [controller, messages, streamingText]);
+  /**
+   * Older history was prepended above the reader: the controller restores the offset,
+   * treating the movement as positional rather than as editor of the tail state.
+   */
   useLayoutEffect(() => {
     const anchor = historyScrollAnchorRef.current;
-    const element = messagesScrollRef.current;
-    if (!anchor || !element) return;
-    element.scrollTop = anchor.top + element.scrollHeight - anchor.height;
-    lastScrollRef.current = { top: element.scrollTop, height: element.scrollHeight, viewport: element.clientHeight, nearTail: followTailRef.current, distance: element.scrollHeight - element.clientHeight - element.scrollTop };
+    if (anchor === null) return;
+    controller.restoreAfterPrepend(anchor);
     historyScrollAnchorRef.current = null;
-  }, [savedHistory]);
-
-  useEffect(() => {
-    const element = messagesScrollRef.current;
-    const content = messagesContentRef.current;
-    if (!element || !content) return;
-    element.addEventListener("scroll", updateTailLock, { passive: true });
-    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(() => {
-      /**
-       * Keep the newest row in view when the content RESIZES — but never overrule the
-       * reader.
-       *
-       * This used to pin unconditionally whenever `followTailRef.current` was true, and
-       * that flag can be stale for exactly one frame: a measurement (this observer)
-       * lands in the same frame as the reader's scroll, pins `scrollTop` back to the
-       * bottom, and the scroll event that would have cleared the flag then fires with
-       * the *restored* offset, reading as "still at the tail". The result is a scroller
-       * whose `scrollTop` writes appear to be ignored — measured: a walk requesting
-       * offset 0 held 511,980 for ten consecutive frames. The same race would yank a
-       * reader back to the bottom whenever a row was measured while they were scrolling
-       * up, which is precisely what this component promises never to do.
-       *
-       * So the pin now requires what `updateTailLock` requires: the view was at the tail
-       * last time we looked, and the offset has not moved since. A reader's own movement
-       * is left alone, and the pending scroll event decides the lock state.
-       */
-      if (!followTailRef.current) return;
-      const height = element.scrollHeight;
-      const viewport = element.clientHeight;
-      const top = element.scrollTop;
-      /**
-       * No "already close enough" early return.
-       *
-       * It skipped the correction whenever the view was within the tail threshold, which
-       * left the LAST measurement of a load uncorrected: measured at 18px from the bottom
-       * after a 2,000-row tall-row load, which is close enough to paint the newest row and
-       * far enough for the jump-to-latest affordance to appear. While the lock is held the
-       * observer's job is to be at the bottom exactly — a 0.5px residue is not worth a
-       * write, an 18px one is.
-       */
-      if (height - viewport - top <= 0.5) return;
-      // Pinned means pinned: hold the newest row. This observer fires on CONTENT resize,
-      // which is the document moving under the reader, not the reader moving — and the
-      // scroll event it raises immediately afterwards decides whether the lock survives.
-      element.scrollTop = Math.max(0, height - viewport);
-      lastScrollRef.current = { top: element.scrollTop, height, viewport, nearTail: true, distance: height - viewport - element.scrollTop };
-    });
-    observer?.observe(element);
-    /**
-     * Observe the element whose size IS the document.
-     *
-     * This used to observe `content` — `.messages-content` — which is `flex: 1 1 auto`
-     * with `min-height: 0`, so its box is fixed by the flex layout and NEVER resizes: the
-     * element that actually grows is `.transcript-entries` inside it. That is why the
-     * observer above only ever fired during the initial layout (measured: 4 events for a
-     * 40-chunk load, all with `top: 0`), and why the final measurement of a load was never
-     * followed by a pin — the view settled 177px from the bottom with the jump-to-latest
-     * affordance showing.
-     */
-    const growth = content.firstElementChild instanceof HTMLElement ? content.firstElementChild : content;
-    observer?.observe(growth);
-    return () => {
-      element.removeEventListener("scroll", updateTailLock);
-      observer?.disconnect();
-    };
-  }, [updateTailLock]);
+  }, [controller, savedHistory]);
 
   useEffect(() => () => {
     if (renderTimerRef.current !== null) clearTimeout(renderTimerRef.current);
@@ -1410,12 +1159,7 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
   }, [draft]);
 
   const goToLatest = (): void => {
-    const element = messagesScrollRef.current;
-    if (!element) return;
-    followTailRef.current = true;
-    element.scrollTop = Math.max(0, element.scrollHeight - element.clientHeight);
-    lastScrollRef.current = { top: element.scrollTop, height: element.scrollHeight, viewport: element.clientHeight, nearTail: true, distance: element.scrollHeight - element.clientHeight - element.scrollTop };
-    setIsDetached(false);
+    controller.returnToTail();
   };
 
 
@@ -1423,8 +1167,7 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
     transcriptRef.current = createTranscriptState();
     setTranscript(transcriptRef.current);
     setConversation(null);
-    lastScrollRef.current = { top: 0, height: 0, viewport: 0, nearTail: true, distance: 0 };
-    followTailRef.current = true;
+    controller.reset();
     setEffectiveModel(null);
     setLinkUnavailable(false);
     setViewAccessOffer(null);
@@ -3478,7 +3221,7 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
               rows={savedRows}
               onOpenFile={openFileDiff}
               scrollElement={messagesScrollRef}
-              stickToBottomRef={followTailRef}
+              controller={controller}
               apiRef={transcriptApiRef}
             />
             {savedModeOptimistic.map((message) => <MessageRow key={message.id} message={message} />)}
@@ -3614,7 +3357,7 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
             rows={messages}
             onOpenFile={openFileDiff}
             scrollElement={messagesScrollRef}
-            stickToBottomRef={followTailRef}
+            controller={controller}
             pinnedIdentities={pinnedTranscriptIdentities}
             apiRef={transcriptApiRef}
           />
@@ -3691,7 +3434,7 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
           `bottom: safe+84px` / `z-index: 15` — at 320px it covered the second option
           and stole the tap. Removing the affordance leaves nothing unreachable: the
           card sits at the tail and the reader can scroll to it. */}
-      {!linkUnavailable && !transcript.readOnly && isDetached && commandSuggestions.length === 0 && !interceptedCommand && activeUiRequest === null && (
+      {!linkUnavailable && !transcript.readOnly && tailState.canReturnToTail && commandSuggestions.length === 0 && !interceptedCommand && activeUiRequest === null && (
         <div className="latest-row">
           <button type="button" className="latest-button" onClick={goToLatest}>↓ Latest</button>
         </div>

@@ -26,6 +26,7 @@ import {
   type EntryWindow,
 } from "../transcript-window.js";
 import { isRecord } from "../guest-tools.js";
+import { ScrollController } from "../scroll-controller.js";
 import type { TranscriptBlock, TranscriptMessage, ToolResultLike } from "../transcript.js";
 
 export interface DisplayMessage {
@@ -266,8 +267,17 @@ export interface TranscriptListProps {
    * jump landed on, the row holding the focus ring, a row whose disclosure is open.
    */
   pinnedIdentities?: ReadonlySet<string>;
-  /** Whether the view should stay pinned to the newest message. */
-  stickToBottomRef?: RefObject<boolean>;
+  /**
+   * The one object allowed to write this list's `scrollTop`, and the owner of the tail
+   * state machine. Supplied by the screen that also renders the transcript so it can
+   * publish `↓ Latest`; the list never decides the tail on its own.
+   *
+   * Omitted by callers that have no tail obligation (a read-only history screen, the
+   * component tests): a private controller is still created so that EVERY write in this
+   * file goes through the same machine — there is no second code path that assigns
+   * `scrollTop` — it simply has no subscriber.
+   */
+  controller?: ScrollController;
   /** Receives the imperative handle, so the owner can reveal a search hit. */
   apiRef?: MutableRefObject<TranscriptListApi | null>;
   /** Overscan, in px. Defaults to `DEFAULT_OVERSCAN_PX`; overridden only by a benchmark. */
@@ -317,10 +327,18 @@ export const TranscriptList = memo(function TranscriptList({
   onOpenFile,
   scrollElement,
   pinnedIdentities: pinnedIdentitiesProp,
-  stickToBottomRef,
+  controller: controllerProp,
   apiRef,
   overscanPx = DEFAULT_OVERSCAN_PX,
 }: TranscriptListProps) {
+  /**
+   * The controller for this list. The private instance exists so every `scrollTop` write
+   * in this file routes through one machine even when nobody is listening; it is created
+   * lazily because a new instance per render would reset the mode.
+   */
+  const ownControllerRef = useRef<ScrollController | null>(null);
+  if (ownControllerRef.current === null) ownControllerRef.current = new ScrollController();
+  const controller = controllerProp ?? ownControllerRef.current;
   const entries = useMemo(() => groupActivity(rows), [rows]);
   const pairedArgs = useMemo(() => pairToolArguments(rows), [rows]);
   /**
@@ -601,6 +619,56 @@ export const TranscriptList = memo(function TranscriptList({
   }, [scrollElement]);
 
   /**
+   * Feed the controller: every scroll, every resize, and every input that can only come
+   * from a reader.
+   *
+   * The controller decides the tail; this effect only tells it what happened. Input
+   * events are corroboration, never the sole signal — the e2e specs set `scrollTop` from
+   * script and dispatch a bare `scroll` event, so a machine that required a wheel or a
+   * touch would never see that reader leave the tail.
+   */
+  useEffect(() => {
+    const element = scrollElement?.current ?? null;
+    if (element === null) return;
+    /**
+     * Attach here rather than in a layout effect: on the first commit the scroller's ref
+     * is still null — refs attach to a host element only after its subtree's layout
+     * effects have run — so a layout effect would silently never attach, and the machine
+     * would classify every movement against a surface it does not have.
+     */
+    controller.attach(element);
+    let frame = 0;
+    const observe = (): void => {
+      controller.sync();
+      if (frame !== 0) return;
+      // One classification per frame: the scroll event and the observer record for the
+      // same layout change must not be judged twice, since the second judgement would
+      // see a document already grown under a stationary reader.
+      frame = requestAnimationFrame(() => { frame = 0; });
+    };
+    const input = (): void => controller.noteInput();
+    element.addEventListener("scroll", observe, { passive: true });
+    element.addEventListener("wheel", input, { passive: true });
+    element.addEventListener("touchstart", input, { passive: true });
+    element.addEventListener("touchmove", input, { passive: true });
+    element.addEventListener("keydown", input);
+    element.addEventListener("pointerdown", input, { passive: true });
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(observe);
+    observer?.observe(element);
+    return () => {
+      element.removeEventListener("scroll", observe);
+      element.removeEventListener("wheel", input);
+      element.removeEventListener("touchstart", input);
+      element.removeEventListener("touchmove", input);
+      element.removeEventListener("keydown", input);
+      element.removeEventListener("pointerdown", input);
+      observer?.disconnect();
+      if (frame !== 0) cancelAnimationFrame(frame);
+      controller.detach();
+    };
+  }, [scrollElement, controller]);
+
+  /**
    * Record which entry is crossing the top of the viewport, and by how much.
    *
    * This is the anchor every later correction is measured against: after a
@@ -697,14 +765,14 @@ export const TranscriptList = memo(function TranscriptList({
   useLayoutEffect(() => {
     const element = scrollElement?.current ?? null;
     if (element === null || !windowed) return;
-    if (stickToBottomRef?.current === true) {
+    if (controller.follows) {
       // Following the tail means the *bottom* is the anchor. When an estimate becomes
       // a measurement the document grows or shrinks under the reader, and without
       // re-pinning the newest message drifts out of view — measured at 7,529 px after
       // the 4,075-entry snapshot settled, which is what made the newest row
       // unreachable by a "scroll to bottom". The view re-pins on `messages`, which do
       // not change here; this is the same rule applied to the height model.
-      element.scrollTop = Math.max(0, element.scrollHeight - element.clientHeight);
+      controller.sync();
       anchorRef.current = null;
       return;
     }
@@ -752,9 +820,7 @@ export const TranscriptList = memo(function TranscriptList({
            * not scroll; the document grew), so that behaviour is unchanged.
            */
           const scrolledSinceCapture = element.scrollTop - anchor.scrollTop;
-          const target = modelOffset - anchor.offset + scrolledSinceCapture;
-          const moved = target - element.scrollTop;
-          if (Math.abs(moved) >= 0.5) element.scrollTop = Math.max(0, target);
+          controller.keepTarget(Math.max(0, modelOffset - anchor.offset + scrolledSinceCapture));
           // Re-capture from the DOM so the next commit has a mounted anchor again.
           captureAnchorRef.current?.(false);
           return;
@@ -790,9 +856,7 @@ export const TranscriptList = memo(function TranscriptList({
       // Apply, then re-base from the movement the browser ACTUALLY made. A fractional
       // `scrollTop` is snapped to a layout unit, so `actual - delta` is not where the
       // row ends up; measuring the applied movement is.
-      const beforeWrite = element.scrollTop;
-      element.scrollTop = beforeWrite + delta;
-      const applied = element.scrollTop - beforeWrite;
+      const applied = controller.nudge(delta);
       // The correction is a movement this component made, so the anchor must carry the
       // post-correction geometry. Leaving the pre-correction values there makes the
       // *next* commit read its own previous correction as "somebody else moved the
@@ -839,7 +903,7 @@ export const TranscriptList = memo(function TranscriptList({
      * geometry at all: `delta` is 0, nothing is written, and the effect terminates after
      * one pass. Measured: `PERF-STREAM-02` 6/6 clean with these dependencies in place.
      */
-  }, [scrollElement, windowed, stickToBottomRef, measureVersion, visible.start, visible.end, entries, offsets, indexOfKey]);
+  }, [scrollElement, windowed, controller, measureVersion, visible.start, visible.end, entries, offsets, indexOfKey]);
 
   /** One observer for every mounted entry: a measured height is cached by identity. */
   useEffect(() => {
@@ -906,7 +970,7 @@ export const TranscriptList = memo(function TranscriptList({
     // just under the fold. A reveal that mounts the row and puts it off-screen is a
     // reveal only in the DOM sense.
     const target = Math.max(0, (offsets[index] ?? 0) - ELEMENT_TOP_INSET_PX);
-    element.scrollTop = target;
+    controller.reveal(target);
     // The window is derived from `viewport`, which is updated by the scroll event —
     // and a programmatic `scrollTop` assignment does not reliably produce one before
     // this commit compounds. Setting it here as well means the mount and the scroll
@@ -922,7 +986,7 @@ export const TranscriptList = memo(function TranscriptList({
     // stale one would pull the view back to where the search started.
     anchorRef.current = null;
     setJump(null);
-  }, [jump, scrollElement, indexOfKey, offsets]);
+  }, [jump, scrollElement, controller, indexOfKey, offsets]);
 
   const renderEntry = (entry: (typeof entries)[number], index: number): React.ReactNode => {
     const key = keys[index];
