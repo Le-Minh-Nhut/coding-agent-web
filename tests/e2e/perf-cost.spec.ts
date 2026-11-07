@@ -9,6 +9,7 @@ import {
   requireAppServer,
   type MockCollabHost,
 } from "./fixture.js";
+import { describeEnvironment } from "./perf-scroll-harness.js";
 
 /**
  * The round's decision instrument: browser-side cost only.
@@ -177,7 +178,8 @@ test("PERF-COST: browser-side load and streaming cost at 4075 entries", async ({
       : null,
   }));
 
-  console.log(`PERF_COST_LOAD ${JSON.stringify({ ...load, loadTask, ...dom })}`);
+  const env = await describeEnvironment(page, { fixtureName: "cost-4075", entryCount: LARGE });
+  console.log(`PERF_JSON ${JSON.stringify({ id: "PERF_COST_LOAD", env, sampler: "compositor", ...load, loadTask, ...dom })}`);
 
   // A burst: frames sent with no per-frame wait, so the client is the bottleneck.
   const UPDATES = 30;
@@ -192,7 +194,7 @@ test("PERF-COST: browser-side load and streaming cost at 4075 entries", async ({
   });
   const after = await metrics(cdp);
   const stream = diff(before, after);
-  console.log(`PERF_COST_STREAM ${JSON.stringify({ ...stream, streamTask, perUpdate: {
+  console.log(`PERF_JSON ${JSON.stringify({ id: "PERF_COST_STREAM", env, sampler: "compositor", ...stream, streamTask, perUpdate: {
     script: Math.round((stream.ScriptDuration / UPDATES) * 100) / 100,
     style: Math.round((stream.RecalcStyleDuration / UPDATES) * 100) / 100,
     layout: Math.round((stream.LayoutDuration / UPDATES) * 100) / 100,
@@ -252,7 +254,8 @@ test("PERF-COST-THROTTLED: updates vs appends into a full history, 4x CPU", asyn
   });
   const afterUpdates = await metrics(cdp);
   const updates = diff(beforeUpdates, afterUpdates);
-  console.log(`PERF_THROTTLED_UPDATES ${JSON.stringify({ ...updates, longestTask: updateTask, perUpdate: {
+  const envThrottled = await describeEnvironment(page, { fixtureName: "cost-4075-throttled", entryCount: LARGE, cpuThrottleRate: 4 });
+  console.log(`PERF_JSON ${JSON.stringify({ id: "PERF_THROTTLED_UPDATES", env: envThrottled, sampler: "compositor", ...updates, longestTask: updateTask, perUpdate: {
     script: Math.round((updates.ScriptDuration / UPDATES) * 100) / 100,
     layout: Math.round((updates.LayoutDuration / UPDATES) * 100) / 100,
     task: Math.round((updates.TaskDuration / UPDATES) * 100) / 100,
@@ -271,7 +274,7 @@ test("PERF-COST-THROTTLED: updates vs appends into a full history, 4x CPU", asyn
   });
   const afterAppends = await metrics(cdp);
   const appends = diff(beforeAppends, afterAppends);
-  console.log(`PERF_THROTTLED_APPENDS ${JSON.stringify({ ...appends, longestTask: appendTask, perAppend: {
+  console.log(`PERF_JSON ${JSON.stringify({ id: "PERF_THROTTLED_APPENDS", env: envThrottled, sampler: "compositor", ...appends, longestTask: appendTask, perAppend: {
     script: Math.round((appends.ScriptDuration / APPENDS) * 100) / 100,
     layout: Math.round((appends.LayoutDuration / APPENDS) * 100) / 100,
     task: Math.round((appends.TaskDuration / APPENDS) * 100) / 100,
@@ -285,5 +288,5 @@ test("PERF-COST-THROTTLED: updates vs appends into a full history, 4x CPU", asyn
     spacers: document.querySelectorAll(".transcript-spacer").length,
     heapMb: Math.round(((performance as unknown as { memory: { usedJSHeapSize: number } }).memory.usedJSHeapSize / 1048576) * 10) / 10,
   }));
-  console.log(`PERF_THROTTLED_DOM ${JSON.stringify(dom)}`);
+  console.log(`PERF_JSON ${JSON.stringify({ id: "PERF_THROTTLED_DOM", env: envThrottled, ...dom })}`);
 });

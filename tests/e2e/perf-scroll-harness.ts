@@ -25,7 +25,7 @@
  * composited capture, but slower per sample, which is why the sample counts differ
  * between browsers and are reported rather than compared.
  */
-import { expect, type CDPSession, type Page } from "@playwright/test";
+import { expect, test, type CDPSession, type Page } from "@playwright/test";
 import { decodePng } from "./png.js";
 import { buildSnapshotFrames, sentinel, type PerfEntry } from "./perf-fixtures.js";
 import { harnessFixture, installMockCollabHost, openSeededConversation, type MockCollabHost } from "./fixture.js";
@@ -863,4 +863,146 @@ export function percentiles(samples: number[]): Percentiles {
   return { p50: round2(at(0.5)), p95: round2(at(0.95)), max: round2(sorted[sorted.length - 1] ?? 0) };
 }
 
+
+export interface EnvironmentDescription {
+  browser: string;
+  browserVersion: string;
+  channel: string;
+  cpuThrottleRate: number | null;
+  viewport: { width: number; height: number } | null;
+  fixtureName: string;
+  entryCount: number;
+  snapshotSizeBytes: number;
+  hardwareConcurrency: number | null;
+  deviceMemory: number | null;
+  warmColdState: "warm" | "cold";
+  repetitionCount: number;
+  userAgent: string;
+}
+
+export interface DescribeEnvironmentOptions {
+  cpuThrottleRate?: number | null;
+  fixtureName?: string;
+  entryCount?: number;
+  snapshotSizeBytes?: number;
+  warmColdState?: "warm" | "cold";
+  repetitionCount?: number;
+}
+
+export async function describeEnvironment(
+  page: Page,
+  options?: DescribeEnvironmentOptions,
+): Promise<EnvironmentDescription> {
+  const browser = page.context().browser();
+  const browserType = browser?.browserType().name() ?? (isChromium(page) ? "chromium" : "webkit");
+  const browserVersion = browser?.version() ?? "unknown";
+  const channel = process.env.CAW_E2E_CHANNEL ?? (isChromium(page) ? "chrome" : "bundled");
+  const viewport = page.viewportSize();
+
+  let hardwareConcurrency: number | null = null;
+  let deviceMemory: number | null = null;
+  let userAgent = "unknown";
+
+  try {
+    const nav = await page.evaluate(() => {
+      interface NavWithMemory { deviceMemory?: number }
+      const navMem = navigator as NavWithMemory;
+      return {
+        concurrency: typeof navigator.hardwareConcurrency === "number" ? navigator.hardwareConcurrency : null,
+        memory: typeof navMem.deviceMemory === "number" ? navMem.deviceMemory : null,
+        ua: navigator.userAgent ?? "unknown",
+      };
+    });
+    hardwareConcurrency = nav.concurrency;
+    deviceMemory = nav.memory;
+    userAgent = nav.ua;
+  } catch {
+    // page context unreadable / closing
+  }
+
+  return {
+    browser: browserType,
+    browserVersion,
+    channel,
+    cpuThrottleRate: options?.cpuThrottleRate !== undefined ? options.cpuThrottleRate : (isChromium(page) ? 1 : null),
+    viewport,
+    fixtureName: options?.fixtureName ?? "default",
+    entryCount: options?.entryCount ?? 0,
+    snapshotSizeBytes: options?.snapshotSizeBytes ?? 0,
+    hardwareConcurrency,
+    deviceMemory,
+    warmColdState: options?.warmColdState ?? "warm",
+    repetitionCount: options?.repetitionCount ?? 1,
+    userAgent,
+  };
+}
+
+export interface BudgetOptions {
+  id: string;
+  measuredMs: number;
+  budgetMs: number;
+  blocking: boolean;
+  samples?: number[];
+  failures?: number;
+  env: EnvironmentDescription;
+  sampler?: "screencast" | "screenshot" | "trace" | "compositor" | "layout";
+  extra?: Record<string, unknown>;
+}
+
+export interface BudgetResult {
+  id: string;
+  measuredMs: number;
+  budgetMs: number;
+  verdict: "MET" | "OVER_BUDGET";
+  samples: number[];
+  p50: number;
+  p95: number;
+  max: number;
+  failures: number;
+  env: EnvironmentDescription;
+  sampler?: "screencast" | "screenshot" | "trace" | "compositor" | "layout";
+  [key: string]: unknown;
+}
+
+export function budget(options: BudgetOptions): BudgetResult {
+  const { id, measuredMs, budgetMs, blocking, env, sampler, extra } = options;
+  const samples = options.samples && options.samples.length > 0 ? options.samples : [measuredMs];
+  const p = percentiles(samples);
+  const verdict: "MET" | "OVER_BUDGET" = measuredMs <= budgetMs ? "MET" : "OVER_BUDGET";
+  const failures = options.failures !== undefined ? options.failures : (measuredMs > budgetMs ? 1 : 0);
+
+  const result: BudgetResult = {
+    id,
+    measuredMs: round2(measuredMs),
+    budgetMs,
+    verdict,
+    samples: samples.map(round2),
+    p50: p.p50,
+    p95: p.p95,
+    max: p.max,
+    failures,
+    env,
+    ...(sampler ? { sampler } : {}),
+    ...(extra ?? {}),
+  };
+
+  console.log(`PERF_JSON ${JSON.stringify(result)}`);
+
+  if (verdict === "OVER_BUDGET") {
+    if (blocking) {
+      expect(measuredMs, `${id} ${measuredMs}ms exceeds blocking budget of ${budgetMs}ms`).toBeLessThanOrEqual(budgetMs);
+    } else {
+      try {
+        test.info().annotations.push({
+          type: "performance",
+          description: `${id} ${measuredMs}ms exceeds advisory budget of ${budgetMs}ms (verdict: OVER_BUDGET)`,
+        });
+      } catch {
+        /* test.info() might not be active if called outside test runner */
+      }
+    }
+  }
+
+  return result;
+}
 export { round2, sentinel };

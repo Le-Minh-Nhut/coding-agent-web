@@ -23,7 +23,7 @@
 import { expect, test, type Page } from "@playwright/test";
 import { requireAppServer } from "./fixture.js";
 import { buildTranscriptEntries, sentinel } from "./perf-fixtures.js";
-import { COMPOSER, openWithHost, scrollToBottom, sendSnapshot, waitForRow } from "./perf-scroll-harness.js";
+import { COMPOSER, describeEnvironment, openWithHost, scrollToBottom, sendSnapshot, waitForRow } from "./perf-scroll-harness.js";
 
 test.beforeEach(async ({ request }) => {
   await requireAppServer(request);
@@ -132,8 +132,11 @@ test("PERF-INPUT-01: 500 characters during a stream arrive exactly once, in orde
   await streaming.stop();
 
   const firstMismatch = [...TYPED_500].findIndex((char, index) => value[index] !== char);
+  const env = await describeEnvironment(page, { fixtureName: "burst-500", entryCount: 500 });
   console.log(`PERF_JSON ${JSON.stringify({
     id: "PERF-INPUT-01",
+    env,
+    sampler: "layout",
     expected: TYPED_500.length,
     typeof: "burst (delay 0)",
     finalLength: value.length,
@@ -202,8 +205,11 @@ test("PERF-STREAM-02: burst typing while streaming and scrolling produces no pag
   // necessarily on the keystroke that started it.
   await page.waitForTimeout(300);
 
+  const env = await describeEnvironment(page, { fixtureName: "stream-scroll-2000", entryCount: 2000 });
   console.log(`PERF_JSON ${JSON.stringify({
     id: "PERF-STREAM-02",
+    env,
+    sampler: "layout",
     pageErrors: errors,
     streamingDuringRun,
     verdict: errors.length === 0 ? "PASS" : "FAIL",
@@ -273,8 +279,11 @@ test("PERF-INPUT-02: paste, selection replace, held Backspace and IME compositio
   const afterComposition = await composer.inputValue();
 
   const tally = await readTally(page);
+  const env = await describeEnvironment(page, { fixtureName: "input-ops-300", entryCount: 300 });
   console.log(`PERF_JSON ${JSON.stringify({
     id: "PERF-INPUT-02",
+    env,
+    sampler: "layout",
     paste: { expected: pasted.length, got: afterPaste.length, exact: afterPaste === pasted },
     selectionReplace: { expected: pasted.length - 1000 + 1, got: afterReplace.length, replacedAtStart: afterReplace.slice(0, 100) === pasted.slice(0, 100) },
     heldBackspace: { before: beforeBackspace, after: afterBackspace.length, removed: beforeBackspace - afterBackspace.length },

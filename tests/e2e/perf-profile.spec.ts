@@ -21,7 +21,7 @@
 import { expect, test, type CDPSession, type Page } from "@playwright/test";
 import { requireAppServer } from "./fixture.js";
 import { buildTranscriptEntries, sentinel } from "./perf-fixtures.js";
-import { HEAVY_TRANSCRIPT, openWithHost, programmaticScroll, scrollState, scrollToBottom, sendSnapshot, setCpuThrottle, touchFlick, waitForRow } from "./perf-scroll-harness.js";
+import { HEAVY_TRANSCRIPT, describeEnvironment, openWithHost, programmaticScroll, scrollState, scrollToBottom, sendSnapshot, setCpuThrottle, touchFlick, waitForRow } from "./perf-scroll-harness.js";
 import { summariseTrace, withTrace, type TraceSummary } from "./perf-trace.js";
 
 test.beforeEach(async ({ request }) => {
@@ -110,8 +110,16 @@ async function runCase(page: Page, options: ProfileCase): Promise<void> {
   const after = await scrollState(page);
   const summary: TraceSummary = summariseTrace();
 
+  const env = await describeEnvironment(page, {
+    fixtureName: `profile-${options.id}`,
+    entryCount: options.entries,
+    cpuThrottleRate: options.throttle ?? 1,
+  });
+
   console.log(`PERF_JSON ${JSON.stringify({
     id: options.id,
+    env,
+    sampler: "trace",
     entries: options.entries,
     heavy: options.heavy,
     throttle: options.throttle ?? 1,
