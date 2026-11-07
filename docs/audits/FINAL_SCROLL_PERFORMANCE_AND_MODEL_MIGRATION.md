@@ -921,22 +921,32 @@ provider credits and was out of scope. Recorded as an inference, not a result.
 ## H. Testing
 
 Verdict vocabulary is PASS / FAIL / BLOCKED / UNVERIFIED only. Every number below is an
-**observed release-sweep or CI value**, reported to me by the director; nothing is rounded
-into a different claim and nothing unfilled is written as a pass. The remaining negative
-verdicts are physical-device work — CI is read: run **121 on `99fae06` = `success`**, a tree
-whose build inputs are identical to the deployed `d29ffe6`; run **120 on `d29ffe6` itself**
-was `cancelled` 20 s in by a doc-only push, so no verdict exists for that exact SHA and it is
-not called green (§I.2). Step detail is unavailable for every run.
+**observed release-sweep or CI value**; nothing is rounded into a different claim and nothing
+unfilled is written as a pass. **The gate rows were re-measured on `744a954` against a scratch
+build of the tree that is actually deployed**, not copied forward: the previous sweep ran on
+`8d3d2cc`, two commits below the served bundle, so carrying those numbers forward would have
+left the shipped code unswept. The scratch dist was built with
+`npx vite build --outDir /tmp/caw-final-dist` and served through
+`CAW_WEB_DIST_DIR=/tmp/caw-final-dist` — `apps/web/dist` was hashed before and after and did
+not change (`index-hVfEUPqx.js` `02660079…8a035b`), so production was not touched. Local runs
+used `CAW_E2E_CHANNEL=chrome` because this shell has `CI=1`, which would otherwise select
+Playwright's bundled chromium (not installed here). One `--project`, `--workers=1`,
+`--retries=0`, `--trace=off` per invocation; stats read from the JSON reporter. The remaining
+negative verdicts are physical-device work — CI is read: run **121 on `99fae06` = `success`**,
+a tree whose build inputs are identical to the deployed `d29ffe6`; run **120 on `d29ffe6`
+itself** was `cancelled` 20 s in by a doc-only push, so no verdict exists for that exact SHA
+and it is not called green (§I.2). Step detail is unavailable for every run.
 
 ### H.1 The gate table
 
 | Gate | Verdict | Observed | Command |
 | --- | --- | --- | --- |
-| `pnpm -r typecheck` | **PASS** | exit 0, all 8 projects | `pnpm -r typecheck` |
-| Full vitest (`tests/web`, `server`, `adapter`, `runtime`, `relay`, `protocol`, `guest`, `compat`, `deploy`, `scripts`) | **PASS** | **200 files passed / 2 skipped (202)**; **1852 tests passed / 8 skipped (1860)**; 29.74 s | `HOME=/home/heheboiz npx vitest run` |
-| Chromium E2E, full suite, serial — sweep 1 | **PASS** | expected **210**, unexpected **0**, skipped **3**, flaky **0**; **507 s** | `npx playwright test --project=chromium --workers=1 --retries=0 --trace=off --reporter=json` |
-| Chromium E2E, full suite, serial — sweep 2 | **PASS** | expected **210**, unexpected **0**, skipped **3**, flaky **0**; **509 s** | same |
-| WebKit perf + a11y + scroll | **PASS** | expected **26**, unexpected **0**, skipped **1**, flaky **0**; **190 s** | `npx playwright test tests/e2e/perf-scroll-gates.spec.ts tests/e2e/perf-scroll.spec.ts tests/e2e/perf-a11y.spec.ts --project=webkit --workers=1 --retries=0 --trace=off` |
+| `pnpm -r typecheck` | **PASS** | exit 0, all 8 projects; 8.39 s | `pnpm -r typecheck` |
+| Full vitest (`tests/web`, `server`, `adapter`, `runtime`, `relay`, `protocol`, `guest`, `compat`, `deploy`, `scripts`) | **PASS** | **200 files passed / 2 skipped (202)**; **1852 tests passed / 8 skipped (1860)**; 29.82 s | `npx vitest run` |
+| Chromium E2E, full suite, serial — sweep 1 | **FAIL** | expected **215**, unexpected **1**, skipped **3**, flaky **0**; **523 s**. The single failure is `mobile.spec.ts` :: *long conversation scrolls internally and detached reading stays put* — `expect(locator).toBeVisible()` on `getByRole('button', { name: /Latest/ })` received **element(s) not found** (7 s timeout). Triage: **pre-existing load-sensitive tail-lock flake, not `d29ffe6`** — see the row below | `CAW_E2E_CHANNEL=chrome CAW_WEB_DIST_DIR=/tmp/caw-final-dist npx playwright test --project=chromium --workers=1 --retries=0 --trace=off --reporter=json` |
+| Chromium E2E, full suite, serial — sweep 2 (back-to-back, clean) | **PASS** | expected **216**, unexpected **0**, skipped **3**, flaky **0**; **515 s** | same |
+| Chromium E2E, full suite, serial — sweep 3 (back-to-back, clean) | **PASS** | expected **216**, unexpected **0**, skipped **3**, flaky **0**; **514 s** | same |
+| WebKit perf + a11y + scroll | **PASS** | expected **26**, unexpected **0**, skipped **1**, flaky **0**; **188 s** | `CAW_E2E_CHANNEL=chrome CAW_WEB_DIST_DIR=/tmp/caw-final-dist npx playwright test tests/e2e/perf-scroll.spec.ts tests/e2e/perf-scroll-gates.spec.ts tests/e2e/perf-a11y.spec.ts --project=webkit --workers=1 --retries=0 --trace=off` |
 | `PERF-SCROLL-01..09` | **PASS** | Chromium **25** (12 scroll + 13 gates); WebKit **14** (gates + a11y); `PERF-06` (**Agent Detail round trip**) **0 px drift** on both engines | `perf-scroll-gates.spec.ts` + `perf-scroll.spec.ts`, per project |
 | `SCROLL-03` WebKit — the blocker | **PASS** | **8 of 8 consecutive runs**; `posinset 4075`, inside the band | `npx playwright test tests/e2e/perf-scroll.spec.ts --project=webkit -g SCROLL-03` |
 | `PERF-STREAM-01` | **PASS** | included in the 13-passing `perf-scroll-gates` set above; no separate figure was reported to me, so none is claimed | `perf-scroll-gates.spec.ts -g PERF-STREAM` |
@@ -949,29 +959,40 @@ not called green (§I.2). Step detail is unavailable for every run.
 | `SCROLL-01..12` (`perf-scroll.spec.ts`) | **PASS** on both engines | Chromium: **12** scroll scenarios, inside the 25 above, same 1 skip. WebKit: covered by the run reported as **26 expected / 0 unexpected / 1 skipped / 0 flaky**, and `SCROLL-03` — the scenario that was the blocker — was additionally run **8 of 8 consecutive** times with `posinset 4075` in band. I did not receive the per-file split of those 26, so no arithmetic is claimed about which file the 12 sit in | `perf-scroll.spec.ts`, per project |
 | `PERF-A11Y-01` | **PASS** | list + listitems through Playwright's aria engine on **both engines**; `role` / `aria-setsize` / `aria-posinset` read on the entry's **real box**; calibration control (a native `<ul><li>` exposes the same absence of `posinset`/`setsize` through CDP) | `npx playwright test tests/e2e/perf-a11y.spec.ts` |
 | `auth.spec.ts` | **PASS** | **4/4** in both cookie modes: `caw_session` + `secure:false` (loopback dev) and `__Host-caw_session` + `secure:true` (production) | `npx playwright test tests/e2e/auth.spec.ts` per project |
-| `pnpm compat` | **PASS** | **18 ok, 0 warn, 0 fail** | `node scripts/compat-check.mjs` |
+| `pnpm compat` | **PASS** | **18 ok, 0 warn, 0 fail** (omp 18.15.0, tmux 3.6, Node 20.19.5) | `pnpm compat` |
+| sweep 1's single red — `mobile.spec.ts` *Latest* visibility | **PASS on re-runs; the one red is an unexplained load-sensitive tail-lock flake, not a `d29ffe6` defect** | Received on sweep 1: `expect(locator).toBeVisible()` failed, `Locator: getByRole('button', { name: /Latest/ })`, `Received: element(s) not found`, 7736 ms. **Not reproducible:** the exact test passed **6 of 6** isolated runs, **5 of 5** whole-file `mobile.spec.ts` runs (6/6 each), once under 6 busy-loop CPU hogs, and inside **both** clean full sweeps. **Not the new gate:** `activeUiRequest` is set only by a `ui-request` frame (`transcript.ts:868`), and `mobile.spec.ts` sends none — so `activeUiRequest === null` was true throughout and the extra conjunct is not the cause. It is the *tail-lock* rule under load (`updateTailLock`, `ConversationView.tsx:1211-1217`: `awayFromBottom && !geometryChanged` — a layout-driven `scrollHeight` change in the same event frame as the reader's scroll-up is attributed to the container, so `isDetached` stays false and the affordance is not mounted). That rule predates `d29ffe6` (`b1ef86c`) and the previous round did **not** meet it, so this is the first recorded instance. Left as-is rather than papered over: the assertion was not weakened, and the test asserts a real user-visible behaviour | `npx playwright test tests/e2e/mobile.spec.ts --project=chromium -g "long conversation scrolls internally"` |
+| `d29ffe6` / `b6ace88` — coverage of the **deployed** tree | **PASS** | The full browser sweep now covers the deployed bundle's exact code. Proof: `HEAD` (`744a954`) differs from the deployed `d29ffe6` by **one file, `docs/`-only** (`git diff --name-only d29ffe6 HEAD` → no non-doc path), so the tree swept here is the tree that ships; the scratch bundle `npx vite build --outDir /tmp/caw-final-dist` came out **byte-identical to production** — `index-hVfEUPqx.js` `02660079…8a035b`, `index-e2muy0ow.css` `ca7c06d5…1fccc5`, matching `apps/web/dist/assets/*` before **and** after the whole sweep (production untouched). `tests/e2e/overlay-collision.spec.ts` (the 6 gates `d29ffe6` added) ran **6/6 in all three Chromium sweeps**; the `activeUiRequest === null` gate is the shipped code path swept **219 specs** deep (216 expected + 3 skipped), and `b6ace88`'s deleted composer ref cannot fail without a typecheck/build error — `pnpm -r typecheck` exit 0 and the identical bundle hash cover it. `d29ffe6`'s other risk (a `.latest-row` regression) is exactly what sweep 1's one red measured, and it was **not reproducible** (see the row above) | Chromium sweeps 1–3 above |
 | CI (`.github/workflows/ci.yml`) | **PASS on run 121 (`99fae06`, `success`)** — the tree with the deployed build inputs; run **120 on the deployed `d29ffe6` itself is `cancelled`**, not green. Step logs **UNVERIFIED** for every run | Read without `gh` (absent; `GITHUB_TOKEN`/`GH_TOKEN` unset) from `https://api.github.com/repos/Le-Minh-Nhut/coding-agent-web/actions/runs`: 121 `99fae06` `success` (completed 02:59:40Z); 120 `d29ffe6` `cancelled` (superseded 20 s after start by the doc push); 119 `b6ace88` `success`; 118 `9e36a35` `cancelled`; 117 `f788ab8` `success`; 116 `d0e1bd5` `success`. Every `cancelled` row is the workflow's own `concurrency: ci-<ref>` with `cancel-in-progress: true` superseding an in-flight run — **not evidence about the code**. Per-step logs are not exposed without a token, so every step-level claim stays UNVERIFIED. The deployed SHA has no run of its own; the argument that run 121 covers its build inputs is in §I.2 | Actions index |
 | Physical iPhone Safari | **BLOCKED** | no device (§J.6) | — |
 
-**The skips are counted, not explained away.** 3 per Chromium sweep and 1 in the WebKit
-run. The WebKit skip is `PERF-LOAD-01`'s CDP gap (the 26 expected less that one equals the
-25 that ran); I did not enumerate the three Chromium skips, and the declared 200 ms
-`skipIfOverBudget` policy is the established candidate — but it is named as a candidate,
-not asserted as the cause. No over-budget measurement was converted to a green anywhere in
-this report.
+**The skips are counted AND enumerated.** 3 per Chromium sweep, 1 in the WebKit run. The
+WebKit skip is `PERF-LOAD-01`'s CDP gap (WebKit exposes no CDP for heap/node count), so the
+26 expected less that one equals the 25 that ran. The three Chromium skips — now read off
+the JSON reporter's annotations, not guessed — are all the declared 200 ms
+`skipIfOverBudget` policy:
+
+| Skipped test (Chromium) | Measured, and the annotation |
+| --- | --- |
+| `PERF-01` (4075-entry history) | first content **281.3 ms** against the 200 ms budget |
+| `PERF-08` (12 MB snapshot) | load **749.8 ms** against the 200 ms budget |
+| `PERF-LOAD-01` | first content **756 ms** against the 200 ms budget |
+
+`skipIfOverBudget` printed the measurement and skipped the timing assertion; the
+surrounding assertions ran and passed. No over-budget measurement was converted to a green
+anywhere in this report.
 
 **Not claimed:** `pnpm format:check` was not part of the release sweep, and no verdict is
 recorded for it here rather than an unearned PASS.
 
 ### H.2 Secondary suites
 
-These are covered by the two full sweeps and the full vitest run above — the Chromium
-suite ran 210 expected tests and the vitest run 202 files — so they passed **inside** those
+These are covered by the three full sweeps and the full vitest run above — the Chromium
+suite ran 216 expected tests and the vitest run 202 files — so they passed **inside** those
 totals. Recorded for traceability, with no separate figure invented for any of them:
 
 | Suite | Verdict | Covered by |
 | --- | --- | --- |
-| `perf-cost` (`PERF-COST-*`) | **PASS** | Chromium sweep (210 expected) |
+| `perf-cost` (`PERF-COST-*`) | **PASS** | Chromium sweep (216 expected) |
 | Tool-activity hierarchy, 5 cases incl. the merged-card case | **PASS** | Chromium sweep |
 | Premium geometry + contrast, 4 cases / 28 captures | **PASS** | Chromium sweep; captures committed under `docs/audits/assets/round58/` |
 | Pre-existing visual suites (`round54-mobile-redesign`, `round50-measure`, `files-center`, `sync-states-visual`, `screens`) | **PASS** | Chromium sweep |
@@ -1351,7 +1372,7 @@ pixels of the live origin. That is the honest coverage statement for this round.
     failing (§H.1). **Run 120 on `d29ffe6` — the commit the origin serves — is
     `in_progress` when the release sweep read it and `cancelled` once a doc push superseded
     it, so no verdict exists for the exact deployed SHA — the verdict that covers it is run
-    **121 on `99fae06` = `success`**, one doc-only commit above it (§I.2). Locally the same suites pass: 210 expected / 0
+    **121 on `99fae06` = `success`**, one doc-only commit above it (§I.2). Locally the same suites pass: 216 expected / 0
     unexpected twice on Chromium; the overlay gate 6/6 after the fix and failing at all four
     widths before it. What stays open is the **step-level** detail of every run — no `gh`,
     and the unauthenticated API exposes conclusions only — so "the run succeeded" is
