@@ -322,6 +322,13 @@ export interface TranscriptListProps {
  * back out of the spacers, which is why the landing is exact rather than merely
  * close — and why this paragraph used to be wrong when it said "exactly" without it.
  */
+interface AnchorDebugWindow {
+  __trackAnchorCaptures?: boolean;
+  __anchorCaptures?: number;
+  __capturesPerCorrection?: number[];
+  __anchorCorrectionDurations?: number[];
+}
+
 export const TranscriptList = memo(function TranscriptList({
   rows,
   onOpenFile,
@@ -694,6 +701,12 @@ export const TranscriptList = memo(function TranscriptList({
   }, [scrollElement]);
 
   const captureAnchor = (withDiscovery = true): void => {
+    if (typeof window !== "undefined") {
+      const debugWin = window as unknown as AnchorDebugWindow;
+      if (debugWin.__trackAnchorCaptures || window.location?.search?.includes("debug=anchor")) {
+        debugWin.__anchorCaptures = (debugWin.__anchorCaptures ?? 0) + 1;
+      }
+    }
     const element = scrollElement?.current ?? null;
     if (element === null) return;
     // Anything live inside a mounted entry becomes sticky before it can be dropped.
@@ -752,8 +765,17 @@ export const TranscriptList = memo(function TranscriptList({
    * own tail logic owns it.
    */
   useLayoutEffect(() => {
+    const debugWin = typeof window !== "undefined" ? (window as unknown as AnchorDebugWindow) : undefined;
+    const track = Boolean(debugWin?.__trackAnchorCaptures || (typeof window !== "undefined" && window.location?.search?.includes("debug=anchor")));
+    const t0 = track ? performance.now() : 0;
+    const startCaptures = track && debugWin !== undefined ? (debugWin.__anchorCaptures ?? 0) : 0;
+    const recordCorrectionMetrics = (): void => {
+      if (!track || debugWin === undefined) return;
+      (debugWin.__anchorCorrectionDurations ??= []).push(performance.now() - t0);
+      (debugWin.__capturesPerCorrection ??= []).push((debugWin.__anchorCaptures ?? 0) - startCaptures);
+    };
     const element = scrollElement?.current ?? null;
-    if (element === null || !windowed) return;
+    if (element === null || !windowed) { recordCorrectionMetrics(); return; }
     if (controller.follows) {
       // Following the tail means the *bottom* is the anchor. When an estimate becomes
       // a measurement the document grows or shrinks under the reader, and without
@@ -763,10 +785,15 @@ export const TranscriptList = memo(function TranscriptList({
       // not change here; this is the same rule applied to the height model.
       controller.sync();
       anchorRef.current = null;
+      recordCorrectionMetrics();
       return;
     }
     const anchor = anchorRef.current;
-    if (anchor === null) { captureAnchorRef.current?.(false); return; }
+    if (anchor === null) {
+      captureAnchorRef.current?.(false);
+      recordCorrectionMetrics();
+      return;
+    }
     const node = elementsRef.current.get(anchor.key);
     if (node === undefined) {
       /**
@@ -812,11 +839,13 @@ export const TranscriptList = memo(function TranscriptList({
           controller.keepTarget(Math.max(0, modelOffset - anchor.offset + scrolledSinceCapture));
           // Re-capture from the DOM so the next commit has a mounted anchor again.
           captureAnchorRef.current?.(false);
+          recordCorrectionMetrics();
           return;
         }
       }
       // Truly unknown (the entry is gone from the model): re-capture rather than guess.
       captureAnchorRef.current?.(false);
+      recordCorrectionMetrics();
       return;
     }
     /**
@@ -867,8 +896,7 @@ export const TranscriptList = memo(function TranscriptList({
     // anchor (`pinned`), and the new offset reaches the window through the scroller's
     // own scroll event. Publishing state from this effect instead makes the correction
     // its own trigger — React #185 — and the scroll event was already going to fire.
-    captureAnchorRef.current?.(false);
-    // Depends on the entry array's identity rather than on a spacer sum: any change to
+    recordCorrectionMetrics();
     // what is mounted, in any segment, is a candidate for a geometry correction.
     // `offsets` is a dependency because the missing-anchor branch corrects from the
     // model, not from a measured rect: without it that branch would run against the
