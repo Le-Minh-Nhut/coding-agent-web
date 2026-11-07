@@ -3686,7 +3686,12 @@ export function ConversationView({ conversationId, draft = "", onDraftChange, on
 
         </div>
       </div>
-      {!linkUnavailable && !transcript.readOnly && isDetached && commandSuggestions.length === 0 && !interceptedCommand && (
+      {/* Never while an approval is on screen: the card's option buttons are the only
+          way to unblock the agent, and the floating row is an absolute overlay at
+          `bottom: safe+84px` / `z-index: 15` — at 320px it covered the second option
+          and stole the tap. Removing the affordance leaves nothing unreachable: the
+          card sits at the tail and the reader can scroll to it. */}
+      {!linkUnavailable && !transcript.readOnly && isDetached && commandSuggestions.length === 0 && !interceptedCommand && activeUiRequest === null && (
         <div className="latest-row">
           <button type="button" className="latest-button" onClick={goToLatest}>↓ Latest</button>
         </div>

@@ -1166,9 +1166,11 @@ textarea::placeholder {
 
 /* Floating "jump to newest": only while scrolled away from the bottom, and
    positioned so it can never cover the composer (which is the next sibling and
-   owns the bottom of the screen) or an approval card (which lives in the
-   transcript and scrolls under it). It is a plain button, so an approval rendered
-   at the tail stays reachable by scrolling; this never scrolls for the user. */
+   owns the bottom of the screen). It is not rendered at all while a host
+   approval is pending — an approval card lives in the transcript and scrolls
+   under this band, and at 320px the button covered the card's second option and
+   stole the tap (tests/e2e/overlay-collision.spec.ts). This never scrolls for
+   the user. */
  .latest-row {
   position: absolute;
   right: calc(var(--safe-right) + 12px);
