@@ -4,10 +4,11 @@
  * Serves the built product UI at `/` (with SPA fallback for unknown non-API routes)
  * and the fallback guest viewer at `/guest` (single-page, exact path only).
  */
-import { constants as fsConstants, existsSync, realpathSync } from "node:fs";
+import { constants as fsConstants, realpathSync } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import { createStaticRootResolver, type StaticRoot, type StaticRootResolver } from "./static-roots.js";
 
 const MIME_BY_EXTENSION: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
@@ -149,40 +150,55 @@ async function tryServeFile(
 }
 
 export interface StaticWebOptions {
+  /**
+   * Literal build directory. Served when there is no release layout, so a fresh
+   * checkout and the E2E harness keep working without publishing a release.
+   */
   webDistDir: string;
   guestDistDir: string;
+  /**
+   * Deploy root holding `current` / `previous` release pointers. When present,
+   * the served directory is resolved per request from `current`, which is how a
+   * publish takes effect without a restart.
+   */
+  webReleaseRoot?: string | null;
 }
 export function registerStaticWeb(
   app: FastifyInstance,
   options: StaticWebOptions,
 ): void {
-  const webExists = existsSync(options.webDistDir);
-  if (!webExists) {
-    app.log.warn(
-      `Web build directory not found at ${options.webDistDir}. Run "pnpm --filter @caw/web build" to build web assets.`,
-    );
-  }
+  // The guest viewer is a plain build directory with no release pointer, but it
+  // goes through the same resolver so its containment root is realpathed and
+  // re-checked per request rather than captured once.
+  const webRoots: StaticRootResolver = createStaticRootResolver({
+    distDir: options.webDistDir,
+    releaseRoot: options.webReleaseRoot ?? null,
+  });
+  const guestRoots: StaticRootResolver = createStaticRootResolver({
+    distDir: options.guestDistDir,
+    releaseRoot: null,
+  });
 
-  const guestExists = existsSync(options.guestDistDir);
-  if (!guestExists) {
+  const startup = webRoots.current();
+  if (startup.root === null) {
+    app.log.warn(
+      `Web build directory not found: ${startup.reason}. Run "pnpm --filter @caw/web build" (writes a release under .deploy/), then "node scripts/deploy-web.mjs publish".`,
+    );
+  } else {
+    app.log.info(`Serving web assets from ${startup.root} (release ${startup.release ?? "literal dist dir"})`);
+  }
+  if (guestRoots.current().root === null) {
     app.log.warn(
       `Guest build directory not found at ${options.guestDistDir}. Run "node scripts/build-guest.mjs" to build guest viewer.`,
     );
   }
 
-  let webRootReal = path.resolve(options.webDistDir);
-  try {
-    webRootReal = realpathSync(webRootReal);
-  } catch {
-    // Keep resolved path if not yet present on disk
-  }
-
-  let guestRootReal = path.resolve(options.guestDistDir);
-  try {
-    guestRootReal = realpathSync(guestRootReal);
-  } catch {
-    // Keep resolved path if not yet present on disk
-  }
+  /** Resolve once per request; log a fault so a dead pointer is never a silent 404. */
+  const resolveWeb = (request: FastifyRequest): StaticRoot => {
+    const root = webRoots.current();
+    if (root.root === null) request.log.warn(`web assets unavailable: ${root.reason}`);
+    return root;
+  };
 
   const handleGuest = async (request: FastifyRequest, reply: FastifyReply) => {
     if (request.method !== "GET" && request.method !== "HEAD") {
@@ -193,7 +209,8 @@ export function registerStaticWeb(
       "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self' ws: wss:; font-src 'self' data:; manifest-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self';",
     );
 
-    if (!existsSync(options.guestDistDir)) {
+    const guestRoot = guestRoots.current().root;
+    if (guestRoot === null) {
       return reply
         .code(404)
         .type("text/plain; charset=utf-8")
@@ -214,8 +231,8 @@ export function registerStaticWeb(
 
     const targetPath =
       segments.length === 0
-        ? path.join(guestRootReal, "index.html")
-        : path.join(guestRootReal, ...segments);
+        ? path.join(guestRoot, "index.html")
+        : path.join(guestRoot, ...segments);
 
     const isHashedAsset = segments[0] === "assets";
     const cacheControl = isHashedAsset
@@ -224,7 +241,7 @@ export function registerStaticWeb(
 
     const served = await tryServeFile(
       targetPath,
-      guestRootReal,
+      guestRoot,
       request,
       reply,
       cacheControl,
@@ -247,17 +264,22 @@ export function registerStaticWeb(
       return reply.code(400).type("text/plain; charset=utf-8").send("Bad Request");
     }
 
-    if (!existsSync(options.webDistDir)) {
+    const web = resolveWeb(request);
+    if (web.root === null) {
+      // A dead release pointer is not the same state as "never built": say which
+      // one it is, so a broken publish reads as a broken publish.
+      const detail = web.fault === "broken_release" ? ` (${web.reason})` : "";
       return reply
         .code(404)
         .type("text/plain; charset=utf-8")
-        .send("Web build missing. Run pnpm --filter @caw/web build");
+        .send(`Web build missing${detail}. Run pnpm --filter @caw/web build`);
     }
+    const webRoot = web.root;
 
     const targetPath =
       segments.length === 0
-        ? path.join(webRootReal, "index.html")
-        : path.join(webRootReal, ...segments);
+        ? path.join(webRoot, "index.html")
+        : path.join(webRoot, ...segments);
 
     const isHashedAsset = segments[0] === "assets";
     const cacheControl = isHashedAsset
@@ -266,21 +288,35 @@ export function registerStaticWeb(
 
     const served = await tryServeFile(
       targetPath,
-      webRootReal,
+      webRoot,
       request,
       reply,
       cacheControl,
     );
     if (served) return reply;
 
-    // SPA fallback: non-/api, non-/guest, non-/r, non-/healthz path returns index.html
-    if (segments[0] === "assets") {
+    // An already-open tab keeps the HTML it was served and asks for that
+    // release's hashed assets after a publish. One hop back, assets only: an
+    // HTML/SPA request must never silently render an older index.
+    if (isHashedAsset) {
+      const previousRoot = webRoots.previous().root;
+      if (previousRoot !== null && previousRoot !== webRoot) {
+        const fallback = path.join(previousRoot, ...segments);
+        const servedFromPrevious = await tryServeFile(
+          fallback,
+          previousRoot,
+          request,
+          reply,
+          cacheControl,
+        );
+        if (servedFromPrevious) return reply;
+      }
       return reply.code(404).type("text/plain; charset=utf-8").send("Not Found");
     }
-    const indexPath = path.join(webRootReal, "index.html");
+    const indexPath = path.join(webRoot, "index.html");
     const spaServed = await tryServeFile(
       indexPath,
-      webRootReal,
+      webRoot,
       request,
       reply,
       "no-cache",

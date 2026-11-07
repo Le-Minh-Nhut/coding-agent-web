@@ -14,6 +14,14 @@ const schema = z.object({
   webDistDir: z.string().min(1).optional(),
   guestDistDir: z.string().min(1).optional(),
   /**
+   * Deploy root holding the `current` / `previous` release pointers
+   * (`<root>/current -> releases/<id>`). When set, every request resolves the
+   * served directory from `current`, so publishing a release needs no restart.
+   * Unset means `<repoRoot>/apps/web/.deploy`, which falls back to the literal
+   * build directory while no release has been published.
+   */
+  webReleaseRoot: z.string().min(1).optional(),
+  /**
    * Exact browser origins allowed to open a relay socket, e.g. your tailnet
    * origin. Empty means "loopback origins only", which is the safe default: a
    * browser on another host must be let in deliberately.
@@ -45,7 +53,7 @@ const schema = z.object({
   handoffEvidenceBudgetMs: z.coerce.number().int().min(0).max(60_000).default(0),
 });
 
-export type ServerConfig = z.infer<typeof schema> & { webDistDir?: string; guestDistDir?: string; configFile?: string };
+export type ServerConfig = z.infer<typeof schema> & { webDistDir?: string; guestDistDir?: string; webReleaseRoot?: string; configFile?: string };
 type RawConfig = Record<string, unknown>;
 
 export function findRepoRoot(): string {
@@ -81,7 +89,7 @@ function parseBoolean(value: string, name: string): boolean {
 
 function envConfig(env: NodeJS.ProcessEnv): RawConfig {
   const result: RawConfig = {};
-  for (const key of ["host", "stateDir", "logLevel", "webDistDir", "guestDistDir", "publicOrigin", "ompBinaryPath"] as const) {
+  for (const key of ["host", "stateDir", "logLevel", "webDistDir", "guestDistDir", "webReleaseRoot", "publicOrigin", "ompBinaryPath"] as const) {
     const value = env[`CAW_${key.replace(/[A-Z]/g, (m) => `_${m}`).toUpperCase()}`];
     if (value !== undefined) result[key] = value;
   }
@@ -160,6 +168,12 @@ export async function loadConfig(options: { env?: NodeJS.ProcessEnv; filePath?: 
     return resolve(expanded);
   });
   config.webDistDir = resolveDistDir(config.webDistDir ?? "apps/web/dist", repoRoot, "webDistDir");
+  // The deploy root sits beside the build directory it replaced: the default
+  // `apps/web/dist` pairs with `apps/web/.deploy`, and a relocated dist dir gets
+  // its own layout instead of silently reading the repo's real releases.
+  config.webReleaseRoot = config.webReleaseRoot
+    ? resolveDistDir(config.webReleaseRoot, repoRoot, "webReleaseRoot")
+    : join(dirname(config.webDistDir), ".deploy");
   config.guestDistDir = resolveDistDir(config.guestDistDir ?? "packages/guest/dist", repoRoot, "guestDistDir");
   if (hasConfigFile) config.configFile = resolve(filePath);
   return config;

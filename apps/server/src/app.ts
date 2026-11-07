@@ -10,7 +10,7 @@ import type { CapabilityService, CollabHost, HandoffResult, ModelCatalogService,
 import type { Supervisor, RuntimeLaunchSpec } from "@caw/runtime";
 import { evaluateState } from "@caw/runtime";
 import type { AuthenticationService } from "./auth.js";
-import { resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { findRepoRoot, resolveDistDir, type ServerConfig } from "./config.js";
 import { registerStaticWeb } from "./static-web.js";
 import { createLogger, redactEventPayload, redactLogValue } from "./logger.js";
@@ -287,7 +287,10 @@ export function buildApp(deps: AppDependencies): FastifyInstance<HttpServer> {
   const guestDistDir = deps.config.guestDistDir
     ? resolveDistDir(deps.config.guestDistDir, repoRoot, "guestDistDir")
     : resolve(repoRoot, "packages/guest/dist");
-  registerStaticWeb(app, { webDistDir, guestDistDir });
+  const webReleaseRoot = deps.config.webReleaseRoot
+    ? resolveDistDir(deps.config.webReleaseRoot, repoRoot, "webReleaseRoot")
+    : join(dirname(webDistDir), ".deploy");
+  registerStaticWeb(app, { webDistDir, guestDistDir, webReleaseRoot });
 
 
   const protectedHook = async (request: HttpRequest, reply: HttpReply) => {
