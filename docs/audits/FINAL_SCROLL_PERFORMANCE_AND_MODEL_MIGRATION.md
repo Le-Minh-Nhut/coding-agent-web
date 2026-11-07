@@ -4,7 +4,9 @@ Round 58. Base at round start `b0114e3`; the round's three code/doc commits are
 `b1ef86c` (windowed transcript), `ab2a7bb` (tool activity + premium chrome) and
 `8d3d2cc` (docs), pushed as `b0114e3..8d3d2cc` and **deployed** — §I.1 carries the
 observed deploy record, §H.1 the observed gate results. §I.0 is not deployment evidence
-but an operational hazard the round hit twice.
+but an operational hazard the round hit three times; §I.3 proves the bundle the origin now
+serves is `d29ffe6`'s output, and §I.4 records the approval-overlay defect that review
+found *after* the release report was written and that `d29ffe6` fixes.
 
 Every number below names the file it came from or the command that produced it. Where
 a number is a *range*, the range is the spread of separate runs, not a rounded claim.
@@ -574,7 +576,7 @@ sequence could outrun a commit (§J).
 | streaming responsiveness (12 Markdown sections into 4,075 entries) | stream wall **778 ms**, longest task **0 ms**, DOM **185** elements, 4,075 entries still reported | Chromium, unthrottled |
 | bundle delta, windowing + search | **470.70 → 481.91 kB raw, 138.24 → 142.18 kB gzip = +3.94 kB gzip**, **no dependency added** | `pnpm --filter @caw/web build` |
 | bundle delta, presentation layer | CSS **53.01 → 58.23 kB raw / 9.78 → 10.60 kB gzip = +5.22 / +0.82 kB**; JS byte-identical with and without the layer | same build, import commented out |
-| deployed bundle, as served | `index-5jbQdjjW.js` **486.15 kB raw / 143.56 kB gzip**; `index-e2muy0ow.css` **58.35 kB raw / 10.62 kB gzip** | §I.1, the build the gates ran against |
+| deployed bundle, as served | `index-hVfEUPqx.js` **486,141 B raw / 143,295 B gzip**; `index-e2muy0ow.css` **58,345 B raw / 10,648 B gzip** | §I.1/§I.3, the `d29ffe6` build that the origin serves and that a scratch rebuild reproduced |
 
 ---
 
@@ -921,8 +923,9 @@ provider credits and was out of scope. Recorded as an inference, not a result.
 Verdict vocabulary is PASS / FAIL / BLOCKED / UNVERIFIED only. Every number below is an
 **observed release-sweep or CI value**, reported to me by the director; nothing is rounded
 into a different claim and nothing unfilled is written as a pass. The remaining negative
-verdicts are physical-device work — CI is now read (run 116) and passes, with its step
-detail stated as unverified.
+verdicts are physical-device work — CI is read through run **119** (`b6ace88`, green), while
+run **120 on the shipped `d29ffe6`** is still `in_progress`, so its step detail does not
+exist yet and is stated as such.
 
 ### H.1 The gate table
 
@@ -946,7 +949,7 @@ detail stated as unverified.
 | `PERF-A11Y-01` | **PASS** | list + listitems through Playwright's aria engine on **both engines**; `role` / `aria-setsize` / `aria-posinset` read on the entry's **real box**; calibration control (a native `<ul><li>` exposes the same absence of `posinset`/`setsize` through CDP) | `npx playwright test tests/e2e/perf-a11y.spec.ts` |
 | `auth.spec.ts` | **PASS** | **4/4** in both cookie modes: `caw_session` + `secure:false` (loopback dev) and `__Host-caw_session` + `secure:true` (production) | `npx playwright test tests/e2e/auth.spec.ts` per project |
 | `pnpm compat` | **PASS** | **18 ok, 0 warn, 0 fail** | `node scripts/compat-check.mjs` |
-| CI (`.github/workflows/ci.yml`) | **PASS** — run **116** on `d0e1bd5`, `completed successfully`; step logs **UNVERIFIED** | Read without `gh` (absent, `command -v gh` exit 1; `GITHUB_TOKEN`/`GH_TOKEN` unset): the unauthenticated API answered `200` for the repo but exhausted its 60/hour quota mid-poll, so the conclusion was read from the **Actions index** (`aria-label` on the run rows) and cross-checked against the **workflow badge** (`ci.yml?branch=main` → `passing`, cache-busted twice, same result). Runs **114** (`8d3d2cc`) and **115** (`a1cd120`) read `cancelled` — **superseded by the next push, not evidence about the code**: the workflow declares `concurrency: ci-<ref>` with `cancel-in-progress: true`, so a newer push cancels the in-flight run. Run 116 is therefore the first *real* verdict, and it covers all three code commits plus both follow-ups. **Per-step logs were not read** (no `gh`; quota spent until 2026-11-07T02:43Z), so what is asserted is the conclusion, not which steps ran | Actions index + workflow badge |
+| CI (`.github/workflows/ci.yml`) | **PASS through run 119** (`b6ace88`, `success`); run **120** on the shipped `d29ffe6` is **`in_progress`** — no verdict exists for the shipped commit. Step logs **UNVERIFIED** for every run | Read without `gh` (absent; `GITHUB_TOKEN`/`GH_TOKEN` unset) from `https://api.github.com/repos/Le-Minh-Nhut/coding-agent-web/actions/runs` on 2026-11-07T02:44Z: 120 `d29ffe6` `in_progress`; 119 `b6ace88` `success`; 118 `9e36a35` `cancelled`; 117 `f788ab8` `success`; 116 `d0e1bd5` `success`. Runs 114/115/118 read `cancelled` — **superseded by the next push, not evidence about the code**: the workflow declares `concurrency: ci-<ref>` with `cancel-in-progress: true`. The earlier 403 rate-limit cleared at 02:43Z; the index was readable again at 02:44Z (57/60 remaining). Per-step logs are not exposed without a token, so every step-level claim stays UNVERIFIED. **The shipped code is ahead of the last completed verdict** (§I.2) | Actions index |
 | Physical iPhone Safari | **BLOCKED** | no device (§J.6) | — |
 
 **The skips are counted, not explained away.** 3 per Chromium sweep and 1 in the WebKit
@@ -1026,10 +1029,11 @@ content). That policy predates this round and is declared in the spec header.
 
 There is no staging directory, no symlink swap, no versioned release. So
 `pnpm --filter @caw/web build` is not a local build — it **publishes straight to the
-owner's live origin** the moment it finishes writing `dist`. It happened twice this round.
-An **unverified** build carrying React #185 (§D.2.1) was live at **05:27:41** and had to
-be rolled back twice, each rollback hash-verified three ways (file, loopback, public
-origin).
+owner's live origin** the moment it finishes writing `dist`. It happened **three** times
+this round. An **unverified** build carrying React #185 (§D.2.1) was live at **05:27:41**
+and had to be rolled back twice, each rollback hash-verified three ways (file, loopback,
+public origin). The third was not a rollback candidate: it is the approval-overlay fix
+(§I.4), it was verified after the fact (§I.3), and it stayed.
 
 | time | event | served JS |
 | --- | --- | --- |
@@ -1037,6 +1041,19 @@ origin).
 | 05:23 | restore of the known-good release | `index-C2QexEsC.js` |
 | 05:27:41 | an **unverified** `pnpm build` of the changed tree published itself | `index-BKiHgkkz.js` |
 | 05:29:03 | restore of the known-good release again | `index-C2QexEsC.js` |
+| 2026-11-07 09:43:49 +07 | the **third involuntary deploy**: a worker ran `pnpm --filter @caw/web build` while fixing the approval overlay (§I.4), and the origin began serving the result with no release step and no restart | `index-5jbQdjjW.js` → `index-hVfEUPqx.js` |
+
+The third occurrence is the one that matters for how the fix should be judged: it was not
+an accident of carelessness so much as the shadow of a correct command. The worker needed a
+bundle to run the gates against, ran the package's ordinary build script, and the serving
+path *is* the build path — so "compile the client" and "ship the client" are the same
+keystroke on this machine.
+
+**Mitigation actually used this round, stated with its limit.** Every gate run was pointed
+at a scratch output directory through `CAW_WEB_DIST_DIR`, so gates never needed the real
+`dist` and never touched it. That worked — the gates ran against scratch builds — but it did
+**not** stop a plain `pnpm --filter @caw/web build`, which still writes `apps/web/dist`
+directly. It is a discipline that removes the *need* to publish, not the *ability*.
 
 **`dist` mtime is not a trustworthy signal.** A build that fails partway can leave newer
 mtimes on stale content, and a copy that preserves mtimes can look old while serving new
@@ -1054,19 +1071,22 @@ this machine again.
 ### I.1 Deployment record
 
 **Observed after release.** The values below were read from the live system by the
-director's release sweep and reported to me; they are not inferred from this report.
+director's release sweep and reported to me; they are not inferred from this report. Rows
+marked with §I.3 were re-read on 2026-11-07 after the involuntary rebuild (§I.0, third row)
+and now describe the `d29ffe6` bundle the origin actually serves.
 
 | Field | Value |
 | --- | --- |
-| Final commit SHA | `8d3d2cc891c73237c0b787bb2338235c9a7c1333` (`docs: round-58 research, adversarial review, premium spec and final report`) |
+| Final commit SHA | `d29ffe6aabd84b6fbca6b716bde0fa05a30b0b0a` (`fix(web): never float the jump-to-latest control over an approval`). The release itself was `8d3d2cc891c73237c0b787bb2338235c9a7c1333`; `d29ffe6` is what the origin now serves (§I.3) |
 | Release commits | `b1ef86c` perf(web): window the transcript; `ab2a7bb` feat(web): group tool activity by evidence + premium chrome; `8d3d2cc` docs |
 | Push to `origin/main` | **`b0114e3..8d3d2cc`, exit 0**; working tree clean; 75 files committed (28 round-58 PNGs, largest 193,325 B); sensitive-value scan empty |
-| CI run and result | **PASS — run 116 on `d0e1bd55953933887e38d76d0d29baf9e95b6453`**, `completed successfully`; workflow badge `ci.yml?branch=main` = `passing` (cache-busted twice). Runs 114 (`8d3d2cc`) and 115 (`a1cd120`) are `cancelled` because `concurrency: ci-<ref>` with `cancel-in-progress: true` let the next push supersede them — **not** code evidence. Read from the Actions index without `gh`; **per-step logs UNVERIFIED** (API quota spent until 2026-11-07T02:43Z) |
-| Deployed SHA | **`8d3d2cc`** — a single authoritative build, and **all gates above ran against `/tmp/caw-build-ship`**, i.e. against the code that was deployed, not a sibling tree |
-| `apps/web/dist` JS | `assets/index-5jbQdjjW.js`, sha256 `d4cbcf66…`, **486.15 kB** (gzip **143.56 kB**) |
-| `apps/web/dist` CSS | `assets/index-e2muy0ow.css`, sha256 `ca7c06d5…`, **58.35 kB** (gzip **10.62 kB**) |
-| `apps/web/dist/index.html` | sha256 `9726739a…`, 0.97 kB |
-| Dist ↔ loopback ↔ public | **identical on all three files — 9 of 9 checks**, by sha256, not by mtime |
+| CI run and result | **Newest completed verdict: run 119 on `b6ace88` = `success`.** Run 116 on `d0e1bd5` was `completed successfully` (badge `passing`); 117 on `f788ab8` also `success`; 114/115/118 are `cancelled` because `concurrency: ci-<ref>` with `cancel-in-progress: true` let the next push supersede them — **not** code evidence. **Run 120 on `d29ffe6`, the shipped commit, is `in_progress` with no conclusion** (§I.2). Conclusions read from the Actions index without `gh`; **per-step logs UNVERIFIED** |
+| Deployed SHA | **`d29ffe6`**, proven by rebuilding HEAD in a detached worktree (`git worktree add /tmp/caw-verify HEAD`, `npx vite build --outDir /tmp/caw-verify-dist`) and hashing the output — see §I.3. This supersedes the earlier entry that read `8d3d2cc` |
+| Deployed revision | **`d29ffe6aabd84b6fbca6b716bde0fa05a30b0b0a` — VERIFIED.** The scratch build of HEAD reproduced all three served deliverables byte-for-byte (§I.3), so the live origin is serving a committed SHA's output, not an unrecorded tree |
+| `apps/web/dist` JS | `assets/index-hVfEUPqx.js`, sha256 `02660079191e8615ea455b8e67b096023507c888b4539569f5b06fd5778a035b`, **486,141 B** (gzip **143,295 B**) |
+| `apps/web/dist` CSS | `assets/index-e2muy0ow.css`, sha256 `ca7c06d554a6731ae852924c2aa8aba9060fb6fdd909839509eab27d131fccc5`, **58,345 B** (gzip **10,648 B**) |
+| `apps/web/dist/index.html` | sha256 `79abb38cb2344d68be299c3d923cbd1d205cb7b1b14b079fb1dddc3083a4806c`, 973 B |
+| Dist ↔ loopback ↔ public | **identical on all three files — 9 of 9 checks**, by sha256, not by mtime (§I.3) |
 | `coding-agent-web.service` | enabled, `active`, **MainPID 92072 unchanged**, started 2026-11-06 15:39:16 +07, **never restarted this round** |
 | HTTPS | **`HTTP/2 200`**; `referrer-policy: no-referrer`; `x-content-type-options: nosniff`; CSP carries `connect-src … wss://…`; `frame-ancestors 'none'` |
 | WebSocket | **`HTTP/1.1 101 Switching Protocols`** through the public origin (`/r/<id>?role=guest`); **101** also on `127.0.0.1:8792` (relay) and `:8791` (host); over HTTP/2 the same request answers **404**, which is the expected behaviour, not a failure |
@@ -1074,13 +1094,13 @@ director's release sweep and reported to me; they are not inferred from this rep
 | Was the service restarted? | **No** |
 | What was not restarted, and why | The backend. `apps/server` and `packages/*` have **zero changes**, and the server reads `apps/web/dist` from disk (`apps/server/src/app.ts:286`), so new web assets went live with no restart — which is exactly why the pane pids are unchanged and no session was at risk |
 | Authenticated populated-conversation walk in the deployed app | **BLOCKED** — no owner session cookie was available to the sweep |
-| Commits after the deployed build | `a1cd120` (CI lane only: `playwright.config.ts` + `.github/workflows/ci.yml`, no `apps/web` file), then doc-only `d0e1bd5`, `f788ab8` and `docs: correct shipped-code citations and record the CI probe` (this file each time). The served bundle is unchanged by all of them — argued in §I.2 with the diff and `find` evidence — and the three `dist` hashes were re-read from disk on 2026-11-07 and still match the deployed build |
+| Commits after the release build, and what they did to `dist` | `a1cd120` (CI lane: `playwright.config.ts` + `.github/workflows/ci.yml`), then doc-only `d0e1bd5`, `f788ab8`, `9e36a35` — **artifact unchanged**. Then `b6ace88` (`apps/web/src/components/ConversationView.tsx`: dead composer ref) and `d29ffe6` (`ConversationView.tsx`, `styles.css`, `overlay-collision.spec.ts`) — **artifact changed**, and a plain `pnpm --filter @caw/web build` published the result (§I.0, third row). The current `dist` is that build, and it matches a scratch rebuild of `d29ffe6` exactly (§I.3) |
+| `pnpm --filter @caw/web build` after the release | run once, by a worker fixing the approval overlay; `apps/web/dist` mtime moved to **2026-11-07 09:43:49 +07** and the origin served the new hashes immediately. Not a release step: no staging, no verification before serving (§I.0) |
 
 **Independent re-read.** The three files were re-hashed from `apps/web/dist` on
-2026-11-07 after the release: `486,148 B` JS, `58,345 B` CSS, `973 B` HTML — the same
-bytes, and `gzip -c` on them yields **143,290 B** and **10,648 B**, within 0.3 kB of the
-sizes recorded above (a different gzip level, not a different build). The three sha256
-values match byte-for-byte.
+2026-11-07 after the overlay build: `486,141 B` JS, `58,345 B` CSS, `973 B` HTML, and
+`gzip -c` on them yields **143,295 B** and **10,648 B**. All three sha256 values equal the
+scratch rebuild of `d29ffe6` (§I.3), not merely a re-read of the same directory.
 
 **The one thing the owner must do himself.** Everything above is machine-verified except
 the experience of a logged-in conversation. One line: open the origin, open a long
@@ -1088,38 +1108,145 @@ conversation, scroll to the top and back to the bottom. The newest row must be o
 and the transcript must not go blank on the way up. That is the symptom this round
 existed for, and it is the only claim nobody has checked in the deployed app.
 
-### I.2 Why the deployed SHA differs from the CI-verified SHA, and why the bundle is still correct
+### I.2 The shipped code is ahead of the last CI verdict
 
-The deployed revision is `8d3d2cc`; the green CI run is **116 on `d0e1bd5`**. Those are
-different commits, which raises the obvious question: is the bundle on the origin the one
-CI validated?
+The deployed revision is now `d29ffe6` (§I.3 proves it), and the newest **completed** CI
+run is **119 on `b6ace88` = `success`**. So the bundle on the origin contains a commit
+whose CI verdict does not exist yet — the honest statement is *shipped code is ahead of
+the last CI verdict*, not "CI covers what is deployed".
 
-**Yes — no rebuild was needed, and here is the evidence rather than the assertion.**
+Read from the Actions index on 2026-11-07T02:44Z (unauthenticated, `core` quota 57/60
+remaining — the earlier 403 had cleared at 02:43Z):
 
-| check | result |
-| --- | --- |
-| What `a1cd120` touches | exactly `.github/workflows/ci.yml` + `playwright.config.ts` — CI lane only |
-| What `d0e1bd5` touches | exactly this report |
-| Every doc-only commit on top of the deployed `8d3d2cc` | `a1cd120` (CI lane), `d0e1bd5` (`docs: record the round-58 gate results, deploy and CI status`), `f788ab8` (`docs: record the CI verdict for the released revision`), and this report's own `docs: correct shipped-code citations and record the CI probe`. **None of them touches a build input** |
-| Build inputs changed across that whole span | `git diff-tree --name-only -r d0e1bd5 <this commit>` and the same filtered comparison from `a1cd120`: after filtering to `vite|package.json|pnpm-lock|tsconfig|apps/web/(src|index.html)` → **empty** |
-| Source newer than the built artifact | `find apps/web/src -newer apps/web/dist/index.html` → **empty** |
-| What the origin actually serves | `index-5jbQdjjW.js` / `index-e2muy0ow.css`, **byte-for-byte identical to `apps/web/dist`** (§I.1, 9/9 checks) |
-| CI coverage of this commit | **not re-probed**: `curl -s "https://api.github.com/repos/Le-Minh-Nhut/coding-agent-web/actions/runs?per_page=3"` returned **403 `API rate limit exceeded`** (unauthenticated, 60/hour, resets 2026-11-07T02:43Z). Run 116 on `d0e1bd5` remains the newest verdict read; the doc-only commits after it are unobserved by CI and cannot change the artifact |
+| run | SHA | status | conclusion |
+| --- | --- | --- | --- |
+| 120 | `d29ffe6aabd84b6fbca6b716bde0fa05a30b0b0a` | **`in_progress`** | `null` — no verdict yet |
+| 119 | `b6ace88da4b46bea1d536da928b5fe1dc31521d6` | `completed` | **`success`** |
+| 118 | `9e36a354a1a8bdb78f87065680361bc4d2f727ee` | `completed` | `cancelled` (superseded by 119 under `cancel-in-progress`) |
+| 117 | `f788ab8cebc8ff41e02490e0912e412fdcb67c7d` | `completed` | **`success`** |
+| 116 | `d0e1bd55953933887e38d76d0d29baf9e95b6453` | `completed` | **`success`** |
 
-I re-ran the origin row myself while writing this section, on the loopback origin:
-`curl http://127.0.0.1:8791/assets/index-5jbQdjjW.js` and the CSS both hash to
-`d4cbcf66…` / `ca7c06d5…`, identical to `sha256sum apps/web/dist/assets/*` — and the
-served `index.html` references exactly those two filenames. So the origin is serving the
-`dist` bytes, not a stale copy.
+Which of the post-116 commits can reach the bundle, by `git diff-tree --name-only -r`:
 
-So the deployed bundle was built from `8d3d2cc` — all three code commits and nothing after
-them that can reach `dist` — and every follow-up since is doc-only or CI-lane-only, hence
-inert with respect to the shipped artifact. That is the reason this report keeps being
-committed without a rebuild: the commits are documentation about a fixed artifact, not a
-new artifact. Green CI on `d0e1bd5` therefore covers the shipped code: run 116 contains all
-three code commits **plus** the CI-lane fix that made the lane able to run at all. Read
-the other way round, a reader who sees "deployed `8d3d2cc`, CI green on `d0e1bd5`" and
-assumes a gap is looking at exactly the gap this table closes.
+| commit | files | can reach `dist`? |
+| --- | --- | --- |
+| `f788ab8` | this report | no |
+| `9e36a35` | this report | no |
+| `b6ace88` | `apps/web/src/components/ConversationView.tsx` | **yes** |
+| `d29ffe6` | `apps/web/src/components/ConversationView.tsx`, `apps/web/src/styles.css`, `tests/e2e/overlay-collision.spec.ts` | **yes** (the spec is not a build input) |
+
+`b6ace88` is covered by run 119's `success`; `d29ffe6` changes the shipped JavaScript and
+has no verdict at all, because run 120 is still running. It is the one commit whose CI
+status is genuinely unknown **and** whose code is being served. Its gates pass locally
+(§I.4, 6/6, and fail on the pre-fix build — a stronger statement than a pass), but local is
+not CI. The verdict arrives with run 120 and was **not** available while this edit was
+written.
+
+The origin does serve the `dist` bytes, which is a separate and verified claim: §I.3's
+three-way hash table is 9/9.
+
+### I.3 Provenance of the deployed bundle: rebuilt from HEAD, byte-for-byte
+
+The bundle changed under everyone after the release report was written (§I.0, third row),
+so "which commit is live?" had to be answered by rebuilding rather than by trusting the
+directory's mtime (§J.18). Method, on 2026-11-07:
+
+1. `git log --oneline -4` → `d29ffe6`, `b6ace88`, `9e36a35`, `f788ab8`.
+2. `git rev-parse HEAD origin/main` → both `d29ffe6aabd84b6fbca6b716bde0fa05a30b0b0a`.
+3. `git status --porcelain` → **empty**: the tree is clean, so no uncommitted edit could
+   have contributed to the bundle.
+4. `git worktree add /tmp/caw-verify HEAD` → detached at `d29ffe6`; `pnpm install
+   --prefer-offline --frozen-lockfile` → done in 856 ms, lockfile frozen (no dependency
+   drift).
+5. `cd apps/web && npx vite build --outDir /tmp/caw-verify-dist` → `vite v6.4.5`, 101
+   modules, built in 1.17 s.
+6. `sha256sum` on both directories, compared.
+
+| file | scratch build of `d29ffe6` | `apps/web/dist` | match |
+| --- | --- | --- | --- |
+| `assets/index-hVfEUPqx.js` | `02660079191e8615ea455b8e67b096023507c888b4539569f5b06fd5778a035b` | same | ✅ |
+| `assets/index-e2muy0ow.css` | `ca7c06d554a6731ae852924c2aa8aba9060fb6fdd909839509eab27d131fccc5` | same | ✅ |
+| `index.html` | `79abb38cb2344d68be299c3d923cbd1d205cb7b1b14b079fb1dddc3083a4806c` | same | ✅ |
+
+That is outcome **(a)**: the deployed bundle is provably `d29ffe6`'s output. The content
+hashes in the filenames match too, which is the independent confirmation — Vite derives
+them from the bytes.
+
+Then the three surfaces, each hashed by `curl | sha256sum` (`/` for the document, `/assets/<name>`
+for the two assets):
+
+| surface | `index-hVfEUPqx.js` | `index-e2muy0ow.css` | `index.html` |
+| --- | --- | --- | --- |
+| `apps/web/dist` (disk) | `0266007…035b` | `ca7c06d…ccc5` | `79abb38…806c` |
+| loopback `http://127.0.0.1:8791` | `0266007…035b` | `ca7c06d…ccc5` | `79abb38…806c` |
+| public `https://heheboiz-legion-5-15arh7.tail8d8eff.ts.net` | `0266007…035b` | `ca7c06d…ccc5` | `79abb38…806c` |
+| **match** | **9 / 9 identical** | | |
+
+The public document references exactly `assets/index-e2muy0ow.css` and
+`assets/index-hVfEUPqx.js` (`curl -s <origin>/ | grep -o 'assets/[a-zA-Z0-9._-]*'`, two
+hits, no stale third). So no surface serves a file the others do not, and no HTML points at
+an artifact that is absent.
+
+Cleanup: `git worktree remove --force /tmp/caw-verify` and `rm -rf /tmp/caw-verify-dist` —
+both done; `git worktree list` shows three pre-existing unrelated worktrees under
+`~/.cache/` and no `/tmp/caw-verify`.
+
+**What this does and does not prove.** It proves the bytes on the origin are the bytes HEAD
+compiles to, so the live origin is serving a committed revision. It does **not** prove that
+revision is correct — that is the gates' job, and for `d29ffe6` CI has not finished
+(§I.2). Nor does it make the involuntary deploy acceptable: reproducibility is why this
+incident was recoverable, not a reason to keep doing it (§I.0).
+
+**Nothing else moved.** `systemctl --user show` → `MainPID=92072`, `ActiveState=active`,
+`SubState=running`, `ActiveEnterTimestamp=Fri 2026-11-06 15:39:16 +07`, `NRestarts=0` —
+the same pid as §A.2, so the server was never restarted and picked up three new bundles
+purely by reading the directory. The three OMP panes are alive and unchanged:
+`1204278` (`$0`, started Nov 5 03:07:26), `2080435` (`$1`, Nov 5 11:48:26), `2082046`
+(`$2`, Nov 5 11:51:15), all `pane_dead=0`. `curl -sI <origin>/` → **`HTTP/2 200`** with
+`referrer-policy: no-referrer` present (rule 3 of `AGENTS.md`), plus the unchanged CSP and
+`x-content-type-options: nosniff`.
+
+### I.4 The approval-overlay defect, found by review after this report was written
+
+The release report was already committed when a review of the deployed pixels found a
+real defect, so it is recorded here rather than left to a footnote. It was **shipped in the
+`8d3d2cc` bundle** — the one §I.1 previously certified — and fixed in `d29ffe6`.
+
+**The defect.** At 320×568 the floating `↓ Latest` control (`.latest-row`, `bottom:
+calc(var(--safe-bottom) + 84px)`, `z-index: 15`) is painted on top of the transcript band
+where the active approval card's second option sits. In that geometry the row occupies
+roughly y 440–484, x 230–308, and the card's second option falls under it. Hit-testing with
+`elementFromPoint` at **6 sampled points inside the visible options returned
+`button.latest-button` at 2 of them** instead of the `Approve for Session` button. The
+consequence is not cosmetic: the owner's tap on "approve" was routed to a scroll control, so
+the approval could be approved only by a route the tap did not intend — exactly the kind of
+failure rule 6 ("unknown is acceptable, a guess is not") exists to prevent, applied to input
+rather than to state.
+
+**The fix.** One predicate: `activeUiRequest === null` added to the `.latest-row` render
+gate at `apps/web/src/components/ConversationView.tsx:3694`. The row now cannot render while
+a host approval is pending, so the affordance and the card are mutually exclusive by
+construction rather than by geometry — it does not matter how tall the card is, what
+viewport the phone has, or whether the safe-area insets shift. The transcript is still
+reachable: the card is the last row, and nothing becomes unreachable when the jump control is
+absent. The comment in `apps/web/src/styles.css:1167-1173` that claimed the button could
+never cover an approval was **wrong** and was corrected to state the gate and cite the spec.
+
+**The permanent gate.** `tests/e2e/overlay-collision.spec.ts`: **6 tests** across
+**320×568, 375×667, 390×844, 430×932**, each placing a **3×2 `elementFromPoint` grid inside
+every visible approval option** (3 points × 2 rows per option, every point must land on the
+option) plus a scan for any element at `z-index >= 10` whose box overlaps an option's box,
+plus the negative test that the control still works when no approval is pending and the
+named 320 px regression case. It is a geometry gate, not a "the component rendered" gate:
+the pre-fix build fails it at **all four widths** — 320/375 on the hit-test assertions,
+390/430 on `latest-row` being present while an approval was pending (the card is tall enough
+there to scroll under the band) — and the fixed build passes **6/6**. Failing-before and
+passing-after is the evidence that the gate tests the defect and not itself.
+
+**Why this belongs in the deployment section.** The defect and its fix are both *inside the
+shipped artifact*, and neither was observed by CI or by the release sweep: the sweep's
+viewport set did not hit 320 px with an approval pending. It was found by reading the
+pixels of the live origin. That is the honest coverage statement for this round.
 
 ---
 
@@ -1203,25 +1330,35 @@ assumes a gap is looking at exactly the gap this table closes.
    two live journals). No filter was added: classifying a host string by its text is
    forbidden by this repository's rules and would hide legitimate content.
 
-12. **`Latest` can overlap the second approval option at 320 px.** Pre-existing round-54
-   geometry (`bottom: safe + 84px`), visible in the round-58 approval capture at 320. Not
-   fixed: moving it is a transcript-control change with its own geometry contract.
+12. **`Latest` overlapped the second approval option at 320 px — fixed after this report
+   was first written, in `d29ffe6`.** Round-54 geometry (`bottom: safe + 84px`,
+   `z-index: 15`) put the floating control on top of the approval card's second option; 2
+   of 6 sampled `elementFromPoint` points returned `button.latest-button`. The fix is a
+   render gate (`activeUiRequest === null` at `ConversationView.tsx:3694`), not a
+   re-position, and the permanent gate is `tests/e2e/overlay-collision.spec.ts` (6 tests,
+   320/375/390/430; fails before, passes after). §I.4. Recorded here because the first
+   version of this entry said "not fixed" and that stopped being true.
 
 13. **`.agent-chat-carry` still paints `--text-faint` as body text at 3.85:1**
     (`agent-chat.css:137`). Recorded by the visual lane, not owned by this workstream.
 
-14. **The round's gates are committed (W29 closed), and CI has now been read — green.**
+14. **The round's gates are committed (W29 closed), and CI has been read — green through
+    `b6ace88`, with the shipped commit still in flight.**
     `perf-scroll-harness.ts`, `perf-scroll.spec.ts`, `perf-scroll-gates.spec.ts`,
     `perf-a11y.spec.ts`, `premium-visual.spec.ts`, `perf-input.spec.ts`,
     `perf-pixels.spec.ts`, `perf-profile.spec.ts`, `perf-decision.spec.ts`, `perf-trace.ts`,
     `png.ts` and `scripts/overscan-sweep.mjs` are all tracked as of `8d3d2cc` — verified
-    (`git ls-files` returns 12/12), so the "green by absence" risk is gone. And CI has now
-    been read rather than assumed: **run 116 on `d0e1bd5` = `completed successfully`**,
-    badge `passing`, with runs 114/115 `cancelled` by the lane's own
-    `cancel-in-progress: true` rather than failing (§H.1). Locally the same suites pass:
-    210 expected / 0 unexpected twice on Chromium. What stays open is only the **step-level**
-    detail of that run — no `gh`, quota spent — so "the run succeeded" is evidence and "this
-    specific step ran" is not.
+    (`git ls-files` returns 12/12), so the "green by absence" risk is gone — and
+    `tests/e2e/overlay-collision.spec.ts` is tracked as of `d29ffe6`. CI has been read
+    rather than assumed: **117 `f788ab8` `success`, 119 `b6ace88` `success`**, with
+    114/115/118 `cancelled` by the lane's own `cancel-in-progress: true` rather than
+    failing (§H.1). **Run 120 on `d29ffe6` — the commit the origin serves — is
+    `in_progress`**, so the shipped code is ahead of the last completed verdict and that
+    gap is stated, not papered over (§I.2). Locally the same suites pass: 210 expected / 0
+    unexpected twice on Chromium; the overlay gate 6/6 after the fix and failing at all four
+    widths before it. What stays open is the **step-level** detail of every run — no `gh`,
+    and the unauthenticated API exposes conclusions only — so "the run succeeded" is
+    evidence and "this specific step ran" is not.
 
 15. **Adversarial-review status, stated honestly.** 30 findings: **0 blocker, 8 major, 20
     minor, 2 info**. The eight majors were all addressed in the working tree:
@@ -1245,8 +1382,8 @@ assumes a gap is looking at exactly the gap this table closes.
     measurement), W27 reworded, W13 is the declared pre-existing budget policy, W21 is
     tested-unreachable, W30 partial (the `.tool-output-preview` base rule's home).
     **W29 is closed**: the gates are committed as of `8d3d2cc` (verified, 12/12 tracked), and
-    CI run 116 on `d0e1bd5` completed successfully; only its step detail is unread
-    (limitation 14 above).
+    CI runs 117 and 119 completed successfully on the commits after it; only their step
+    detail is unread (limitation 14 above).
 
 16. **`--trace=off` is load-bearing for verdicts, and leaving it on makes the verdict
     wrong in both directions.** With `retain-on-failure`, the trace writer races the
@@ -1287,26 +1424,32 @@ assumes a gap is looking at exactly the gap this table closes.
 
 ## Open items
 
-Every field this report was written to leave open has been filled — from the release
-sweep, and now from the CI run itself. What remains is five entries, and none of them is a
-gap in this round's evidence: one **PASS with its step detail unverified**, two **BLOCKED**
-(no device, no owner session cookie), and two **UNVERIFIED** at a finer grain than the claim
-made (CI step detail, and the post-fix blank count that `SCROLL-01` measures but does not
-assert). The CI **conclusion** is no longer open.
+Reconciled on 2026-11-07 against the live machine and the Actions index. Six entries: one
+**in progress** (CI for the shipped commit), two **BLOCKED** (no device, no owner session
+cookie), one **UNVERIFIED** figure, one **VERIFIED and closed** (bundle provenance), and one
+recorded gap in the release sweep's coverage.
 
 | Item | Status | Why it cannot be closed here | Who closes it |
 | --- | --- | --- | --- |
-| CI conclusion | **PASS** (read), **UNVERIFIED** at step level | Run **116 on `d0e1bd5`** = `completed successfully`, badge `passing` (cache-busted twice), read from the Actions index because `gh` is absent and the API quota was spent mid-poll. Per-step logs were not read, so the conclusion is asserted and the step detail is not. Its coverage of the deployed bundle is argued in §I.2, not assumed. The doc-only commits after it were **not** re-probed: the same API returned **403 rate-limited** on a single retry | nothing — but a reader wanting step detail needs `gh` after 2026-11-07T02:43Z |
-| Physical iPhone Safari (compositor under a real thumb, safe-area insets, tab eviction, keyboard) | **BLOCKED** | no device on this machine. Playwright WebKit is the same engine family and the WebKit run reported **26 expected / 0 unexpected / 1 skipped / 0 flaky**, but it is not a thumb. | owner, on the phone |
-| Authenticated populated-conversation walk in the deployed app | **BLOCKED** | no owner session cookie. Everything else about the deploy is machine-verified (§I.1). | owner: open the origin, open a long conversation, scroll top→bottom; newest row on screen, no blank |
+| **CI verdict for the shipped code** | **OPEN — run 120 `in_progress`; shipped code is ahead of the last completed verdict** | CI has **not completed on `d29ffe6`**, which is the commit the origin serves (§I.3). Completed runs on the preceding commits: **119 `b6ace88` success**, 118 `9e36a35` `cancelled` (superseded under `cancel-in-progress`, not a failure), **117 `f788ab8` success**, **116 `d0e1bd5` success**. So `f788ab8` and `b6ace88` are *not* unverified — they were probed and are green — but `d29ffe6`, the one that changes shipped behaviour (approval gate + `styles.css`), has no verdict. Read from the Actions index with the unauthenticated API (`core` 57/60 remaining at 02:44Z; no `gh` on this machine) | the CI lane, on push of this commit. Until it finishes, "shipped and CI-green" is **false** for `d29ffe6`; "shipped and locally gated" is true (§I.4) |
+| CI **step-level** detail for any run | **UNVERIFIED** | no `gh`; the API returns conclusions, not step logs, without a token | `gh run view 120 --log` once available |
+| Physical iPhone Safari (compositor under a real thumb, safe-area insets, tab eviction, keyboard) | **BLOCKED** | no device on this machine. Playwright WebKit is the same engine family and the WebKit run reported **26 expected / 0 unexpected / 1 skipped / 0 flaky**, but it is not a thumb. The approval-overlay gate (§I.4) ran at four widths — a real iPhone is still a different compositor and a different thumb | owner, on the phone |
+| Authenticated populated-conversation walk in the deployed app | **BLOCKED** | no owner session cookie. Everything else about the deploy is machine-verified (§I.1, §I.3) | owner: open the origin, open a long conversation with an approval pending, scroll top→bottom; newest row on screen, no blank, and every approval option tappable |
 | Post-fix blank-frame **count** on the final WebKit build | **UNVERIFIED** | `SCROLL-01` measures blank duration rather than asserting on it, and the sweep reported verdicts, not the blank series; the 283 ms sample quoted throughout is a workstream-build number (§J.1) | a rerun that prints `PERF_JSON` for `SCROLL-01` |
-| CI **step-level** detail for run 116 | **UNVERIFIED** | no `gh`; the unauthenticated API's 60/hour quota was exhausted during the poll and does not reset until 2026-11-07T02:43Z. The run's conclusion is read; which steps ran and in what order is not | `gh run view 116 --log` once available |
+| Was the sweep's viewport set sufficient? | **No — proven by the escaped defect** | The release sweep certified the `8d3d2cc` bundle, then a 320 px approval-pending state was found to send 2 of 6 taps to `button.latest-button` (§I.4). The gate set had no case at that combination, so the certification was true of what it measured and false of the product | closed for this defect by `overlay-collision.spec.ts`; the general lesson (approval × narrow × detached) is now gated at 320/375/390/430 |
 
-Two further items are **measured and reported, not pending**: first content exceeds the
-200 ms budget and is published as such (§J.2, with the two runs' discrepancy stated rather
-than resolved), and `pnpm format:check` was not part of the release sweep — no verdict is
+**Closed since the first version of this section.** Bundle provenance: the deployed bundle
+is now **provably `d29ffe6`'s output**, by rebuilding HEAD in a scratch worktree and
+matching all three sha256 values, and by matching disk ↔ loopback ↔ public 9/9 (§I.3). The
+earlier text here argued provenance from file lists; that argument is superseded by a
+byte comparison and is no longer the basis for any claim.
+
+Two items remain **measured and reported, not pending**: first content exceeds the 200 ms
+budget and is published as such (§J.2, with the two runs' discrepancy stated rather than
+resolved), and `pnpm format:check` was not part of the release sweep — no verdict is
 recorded for it rather than an unearned PASS.
 
 Fixes **recommended and deliberately NOT IMPLEMENTED** this round, each with its statement
-in place: atomic `dist` release + `dist-prev` (§I.0), trace-artifact isolation remaining
-for local runs (§J.16), per-run harness isolation by time (§J.17).
+in place: atomic `dist` release + `dist-prev` (§I.0) — now with a third involuntary deploy
+behind it (§I.0 table) — trace-artifact isolation remaining for local runs (§J.16),
+per-run harness isolation by time (§J.17).
