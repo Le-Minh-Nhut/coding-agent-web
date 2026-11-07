@@ -42,7 +42,8 @@ git clone git@github.com:Le-Minh-Nhut/coding-agent-web.git
 cd coding-agent-web
 pnpm install
 node scripts/build-guest.mjs       # browser guest client -> packages/guest/dist
-pnpm --filter @caw/web build       # web app -> apps/web/dist
+pnpm --filter @caw/web build       # builds release -> apps/web/.deploy/releases/
+node scripts/deploy-web.mjs publish # publishes release -> apps/web/.deploy/current
 ```
 
 ## 3. Configure
@@ -213,6 +214,7 @@ git pull
 pnpm install
 node scripts/build-guest.mjs
 pnpm --filter @caw/web build
+node scripts/deploy-web.mjs publish
 pnpm compat                      # free, read-only OMP capability probe
 pnpm test
 ```

@@ -51,10 +51,14 @@ jobs:
       - name: Build web app
         run: pnpm --filter @caw/web build
 
+      - name: Publish the web release (atomic pointer swap, serves nothing else)
+        run: node scripts/deploy-web.mjs publish
+
       - name: Assert no off-origin assets in the shipped bundles
         run: |
-          test -d apps/web/dist && test -d packages/guest/dist || { echo "::error::Required dist directory missing."; exit 1; }
-          if grep -rIl "um\.can\.ac\|my\.omp\.sh" apps/web/dist packages/guest/dist; then
+          test -L apps/web/.deploy/current && test -f apps/web/.deploy/current/index.html && test -d packages/guest/dist || { echo "::error::Required release or dist directory missing."; exit 1; }
+          test ! -e apps/web/dist || { echo "::error::Build wrote into apps/web/dist; developer builds must not touch the unpointered fallback path."; exit 1; }
+          if grep -rIl "um\.can\.ac\|my\.omp\.sh" apps/web/.deploy/current packages/guest/dist; then
             echo "::error::A shipped bundle references a third-party or upstream origin."
             exit 1
           else

@@ -10,7 +10,8 @@ stub, so nothing here launches an LLM-backed agent and a full run is free — se
 ```bash
 pnpm install                          # adds @playwright/test (pinned 1.64.1)
 node scripts/build-guest.mjs          # if not already built
-pnpm --filter @caw/web build          # the specs drive apps/web/dist
+pnpm --filter @caw/web build          # builds release -> apps/web/.deploy/releases
+node scripts/deploy-web.mjs publish   # publishes release -> apps/web/.deploy/current
 
 pnpm test:e2e            # Chromium only
 pnpm test:e2e:all        # Chromium + WebKit (when this machine has WebKit)

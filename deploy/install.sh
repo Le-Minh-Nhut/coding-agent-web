@@ -65,6 +65,10 @@ NODE
   config_changed=1
   printf 'LOUD: set maxActiveAgents from %s to 3; timestamped backup: %s\n' "$max_state" "$backup"
 fi
+web_release_root=${CAW_WEB_RELEASE_ROOT:-$repo_root/apps/web/.deploy}
+if [[ ${1:-} == --build || ! -d $repo_root/packages/guest/dist || (! -L $web_release_root/current && ! -d $repo_root/apps/web/dist) ]]; then
+  (cd "$repo_root" && "$node_path" scripts/build-guest.mjs && "$pnpm_path" --filter @caw/web build && "$node_path" scripts/deploy-web.mjs publish)
+fi
 pending_restart=0
 service_active=0
 if "$systemctl_path" --user is-active --quiet "$unit_name"; then

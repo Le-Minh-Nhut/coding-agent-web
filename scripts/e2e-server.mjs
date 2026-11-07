@@ -68,7 +68,7 @@ process.stderr.on("error", (err) => {
 if (!existsSync(SERVER_ENTRY)) refuse(`apps/server/src/server.ts not found at ${SERVER_ENTRY}`);
 if (!existsSync(WEB_INDEX)) {
   refuse(
-    `no web build at ${WEB_INDEX} — run \`pnpm --filter @caw/web build\` first.\n` +
+    `no web build at ${WEB_INDEX} — run \`pnpm --filter @caw/web build\` and \`node scripts/deploy-web.mjs publish\` first.\n` +
       `The specs drive the built SPA; there is nothing to test without it.`,
   );
 }

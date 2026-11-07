@@ -229,7 +229,7 @@ export async function gotoApp(page: Page): Promise<void> {
   if (status !== 200) {
     test.skip(
       true,
-      `apps/server does not serve the web app yet: GET / answered ${status}, expected 200 with the built SPA from apps/web/dist`,
+      `apps/server does not serve the web app yet: GET / answered ${status}, expected 200 with the built SPA from the published release`,
     );
     return;
   }
