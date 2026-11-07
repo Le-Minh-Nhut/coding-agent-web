@@ -79,6 +79,19 @@ const insecureCookies = includeWebkit;
 if (insecureCookies) process.env.CAW_INSECURE_COOKIES = "1";
 else delete process.env.CAW_INSECURE_COOKIES;
 
+/**
+ * This machine drives the real installed Chrome (present at /usr/bin/google-chrome);
+ * CI installs Playwright's own chromium bundle and has no system Chrome, so naming
+ * the channel there fails with "executable doesn't exist". `CAW_E2E_CHANNEL` forces
+ * either lane when diagnosing.
+ */
+const forcedChannel = process.env.CAW_E2E_CHANNEL;
+const chromiumChannel =
+  forcedChannel === "bundled" ? undefined
+  : forcedChannel === "chrome" ? ("chrome" as const)
+  : process.env.CI ? undefined
+  : ("chrome" as const);
+
 export default defineConfig({
   testDir: "./tests/e2e",
   // Ceiling: one server, state dir, fixture manifest, and folder tree, so specs stay serial. Upgrade path: per-shard server with its own port, state dir, fixture manifest, and roots before enabling `--shard` + N workers.
@@ -98,9 +111,17 @@ export default defineConfig({
   },
 
   projects: [
-    // Chrome is present at /usr/bin/google-chrome on the target machine; the
-    // `chrome` channel uses it instead of downloading Playwright's own Chromium.
-    { name: "chromium", use: { ...devices["Desktop Chrome"], ...MOBILE_CONTEXT, channel: "chrome" } },
+    // Chrome is present at /usr/bin/google-chrome on the target machine; CI installs
+    // Playwright's own chromium bundle. The channel is resolved above from the
+    // environment (see CAW_E2E_CHANNEL) so both lanes name one real browser.
+    {
+      name: "chromium",
+      use: {
+        ...devices["Desktop Chrome"],
+        ...MOBILE_CONTEXT,
+        ...(chromiumChannel === undefined ? {} : { channel: chromiumChannel }),
+      },
+    },
     ...(includeWebkit ? [{ name: "webkit", use: { ...devices["Desktop Safari"], ...MOBILE_CONTEXT } }] : []),
   ],
 

@@ -71,10 +71,14 @@ jobs:
 
       # E2E drives the real server with hermetic state. It launches no LLM-backed
       # agent: the harness pre-seeds the project and conversation it asserts on.
+      # The repo's local lane drives system Chrome; CI has none, so it runs the
+      # chromium bundle installed above (CAW_E2E_CHANNEL overrides either way).
+      # One project, no trace: a trace artifact race must not decide the lane.
       - name: Browser E2E (Chromium, mobile viewport)
-        run: npx playwright test --project=chromium
+        run: npx playwright test --project=chromium --trace=off
         env:
           CI: "true"
+          CAW_E2E_SKIP_WEBKIT: "1"
 
       # The reporter list+github writes no HTML report, so what a red run leaves
       # behind is Playwright's own outputDir (traces, screenshots). Upload that.
