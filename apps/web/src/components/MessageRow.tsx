@@ -897,10 +897,6 @@ export const TranscriptList = memo(function TranscriptList({
     // own scroll event. Publishing state from this effect instead makes the correction
     // its own trigger — React #185 — and the scroll event was already going to fire.
     recordCorrectionMetrics();
-    // what is mounted, in any segment, is a candidate for a geometry correction.
-    // `offsets` is a dependency because the missing-anchor branch corrects from the
-    // model, not from a measured rect: without it that branch would run against the
-    // offsets from before the expansion that unmounted the anchor.
     /**
      * Why the window's bounds are dependencies even though this effect writes
      * `scrollTop`.
@@ -920,6 +916,11 @@ export const TranscriptList = memo(function TranscriptList({
      * geometry at all: `delta` is 0, nothing is written, and the effect terminates after
      * one pass. Measured: `PERF-STREAM-02` 6/6 clean with these dependencies in place.
      */
+    // Depends on the entry array's identity rather than on a spacer sum: any change to
+    // what is mounted, in any segment, is a candidate for a geometry correction.
+    // `offsets` is a dependency because the missing-anchor branch corrects from the
+    // model, not from a measured rect: without it that branch would run against the
+    // offsets from before the expansion that unmounted the anchor.
   }, [scrollElement, windowed, controller, measureVersion, visible.start, visible.end, entries, offsets, indexOfKey]);
 
   /** One observer for every mounted entry: a measured height is cached by identity. */
