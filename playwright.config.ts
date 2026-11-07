@@ -1,6 +1,8 @@
 import { readdirSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { acquireSlotLock, releaseLock } from "./scripts/e2e-lock.mjs";
 import { defineConfig, devices } from "@playwright/test";
 
 /**
@@ -22,21 +24,42 @@ const MOBILE_CONTEXT = {
   screen: MOBILE_VIEWPORT,
 } as const;
 
+const repoRoot = dirname(fileURLToPath(import.meta.url));
+const RUN_ID = process.env.CAW_E2E_RUN_ID || `${Date.now()}-${process.pid}`;
+const OUTPUT_DIR = process.env.CAW_E2E_OUTPUT_DIR ?? (process.env.CI ? join(repoRoot, "test-results") : join(repoRoot, "test-results", `run-${RUN_ID}`));
+
 /** Set CAW_E2E_PORT to reuse an already-running server instead of launching one. */
 const REUSE_PORT = process.env.CAW_E2E_PORT;
-const BASE_URL = process.env.CAW_E2E_BASE_URL ?? (REUSE_PORT ? `http://127.0.0.1:${REUSE_PORT}` : "http://127.0.0.1:4399");
 
-/**
- * Where the launcher publishes the fixture paths (temp roots tree, seeded ids).
- * The launcher owns the file and removes it on shutdown; the default below is
- * only this config's fallback (a `--list` run, or a developer-started server),
- * and the launcher's own default is the same path — the two must match so a
- * direct `node scripts/e2e-server.mjs` and a Playwright run agree. Specs skip
- * with a clear reason when it is missing.
- */
-const FIXTURE_FILE = process.env.CAW_E2E_FIXTURE ?? join(tmpdir(), "caw-e2e-fixture.json");
-process.env.CAW_E2E_FIXTURE = FIXTURE_FILE;
+let activePort: number;
+let activeRelayPort: number;
+let activeFixtureFile: string;
 
+if (REUSE_PORT) {
+  activePort = Number(REUSE_PORT);
+  activeRelayPort = process.env.CAW_E2E_RELAY_PORT ? Number(process.env.CAW_E2E_RELAY_PORT) : activePort - 1;
+  activeFixtureFile = process.env.CAW_E2E_FIXTURE ?? join(tmpdir(), `caw-e2e-fixture-${activePort}.json`);
+  process.env.CAW_E2E_FIXTURE = activeFixtureFile;
+} else {
+  const slot = acquireSlotLock();
+  if (slot) {
+    activePort = slot.port;
+    activeRelayPort = slot.relayPort;
+    activeFixtureFile = process.env.CAW_E2E_FIXTURE ?? slot.fixtureFile;
+    process.env.CAW_E2E_PORT = String(activePort);
+    process.env.CAW_E2E_RELAY_PORT = String(activeRelayPort);
+    process.env.CAW_E2E_FIXTURE = activeFixtureFile;
+    process.once("exit", () => releaseLock(slot.lockPath, process.pid));
+  } else {
+    activePort = 4399;
+    activeRelayPort = 4398;
+    activeFixtureFile = process.env.CAW_E2E_FIXTURE ?? join(tmpdir(), "caw-e2e-fixture-4399.json");
+    process.env.CAW_E2E_FIXTURE = activeFixtureFile;
+  }
+}
+
+const BASE_URL = process.env.CAW_E2E_BASE_URL ?? `http://127.0.0.1:${activePort}`;
+const FIXTURE_FILE = activeFixtureFile;
 /**
  * WebKit is skipped when this machine has no WebKit build. Playwright's browser
  * bundles live in PLAYWRIGHT_BROWSERS_PATH or the platform cache directory
@@ -102,10 +125,11 @@ export default defineConfig({
   reporter: process.env.CI ? [["list"], ["github"]] : [["list"]],
   timeout: 30_000,
   expect: { timeout: 7_000 },
+  outputDir: OUTPUT_DIR,
 
   use: {
     baseURL: BASE_URL,
-    trace: "retain-on-failure",
+    trace: (process.env.CAW_E2E_TRACE as "on" | "off" | "retain-on-failure") ?? "retain-on-failure",
     screenshot: "only-on-failure",
     actionTimeout: 10_000,
   },
@@ -116,13 +140,18 @@ export default defineConfig({
     // environment (see CAW_E2E_CHANNEL) so both lanes name one real browser.
     {
       name: "chromium",
+      outputDir: join(OUTPUT_DIR, "chromium"),
       use: {
         ...devices["Desktop Chrome"],
         ...MOBILE_CONTEXT,
         ...(chromiumChannel === undefined ? {} : { channel: chromiumChannel }),
       },
     },
-    ...(includeWebkit ? [{ name: "webkit", use: { ...devices["Desktop Safari"], ...MOBILE_CONTEXT } }] : []),
+    ...(includeWebkit ? [{
+      name: "webkit",
+      outputDir: join(OUTPUT_DIR, "webkit"),
+      use: { ...devices["Desktop Safari"], ...MOBILE_CONTEXT }
+    }] : []),
   ],
 
   webServer: {
@@ -131,7 +160,7 @@ export default defineConfig({
     // also what makes reuse of a running instance work: Playwright probes this
     // URL first and only spawns the command when nothing answers.
     url: `${BASE_URL}/api/capabilities`,
-    reuseExistingServer: !process.env.CI,
+    reuseExistingServer: Boolean(REUSE_PORT),
     timeout: 60_000,
     // The launcher survives SIGTERM so Playwright escalates to SIGKILL at the
     // end of the run; see scripts/e2e-server.mjs for why (process-group signal
@@ -139,7 +168,8 @@ export default defineConfig({
     gracefulShutdown: { signal: "SIGTERM", timeout: 10_000 },
     env: {
       CAW_E2E_FIXTURE: FIXTURE_FILE,
-      ...(REUSE_PORT ? { CAW_E2E_PORT: REUSE_PORT } : {}),
+      CAW_E2E_PORT: String(activePort),
+      CAW_E2E_RELAY_PORT: String(activeRelayPort),
       /**
        * WebKit will not store `__Host-caw_session` over plain HTTP: the prefix
        * REQUIRES `Secure`, and unlike Chrome, WebKit does not exempt loopback from

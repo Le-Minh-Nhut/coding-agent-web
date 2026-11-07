@@ -14,6 +14,7 @@ import { constants as osConstants, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { reapServerWriters as reapServerWritersForRun } from "./e2e-utils.mjs";
+import { acquirePortLock, acquireSlotLock, releaseLock } from "./e2e-lock.mjs";
 
 const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 
@@ -82,6 +83,46 @@ if (!tsxBin) {
     "no TypeScript runner found. Run `pnpm install` (root devDependencies include tsx), " +
       "or set CAW_E2E_TSX=/path/to/tsx.",
   );
+}
+
+// ── 1b. Harness port & isolation lock ───────────────────────────────────────
+let activePort;
+let activeRelayPort;
+let activeLockPath = null;
+let defaultManifestFile;
+
+if (process.env.CAW_E2E_PORT) {
+  const requestedPort = process.env.CAW_E2E_PORT;
+  if (requestedPort === "0") {
+    activePort = "0";
+    activeRelayPort = process.env.CAW_E2E_RELAY_PORT ?? "0";
+    defaultManifestFile = join(tmpdir(), "caw-e2e-fixture.json");
+  } else {
+    const portLock = acquirePortLock(requestedPort);
+    if (!portLock.acquired) {
+      process.stderr.write(
+        `[e2e-server] port ${requestedPort} is locked by pid ${portLock.holder?.pid} (started at ${portLock.holder?.startedAt}); refusing to overwrite or destroy active server\n`,
+      );
+      process.exit(1);
+    }
+    activePort = String(portLock.port);
+    activeRelayPort = process.env.CAW_E2E_RELAY_PORT ?? String(portLock.port - 1);
+    activeLockPath = portLock.lockPath;
+    defaultManifestFile = join(tmpdir(), "caw-e2e-fixture.json");
+  }
+} else {
+  const slotLock = acquireSlotLock();
+  if (!slotLock) {
+    refuse("all E2E server port slots (4399..4489) are currently locked by active runs");
+  }
+  activePort = String(slotLock.port);
+  activeRelayPort = String(slotLock.relayPort);
+  activeLockPath = slotLock.lockPath;
+  defaultManifestFile = slotLock.fixtureFile;
+}
+
+if (activeLockPath) {
+  process.once("exit", () => releaseLock(activeLockPath, process.pid));
 }
 
 // ── 2. Hermetic state ──────────────────────────────────────────────────────
@@ -258,8 +299,8 @@ const env = {
   ...cleanParentEnv,
   // Keep scratch listeners off the deployed app and relay ports; both remain independently overridable.
   CAW_HOST: "127.0.0.1",
-  CAW_PORT: process.env.CAW_E2E_PORT ?? "4399",
-  CAW_RELAY_PORT: process.env.CAW_E2E_RELAY_PORT ?? "4398",
+  CAW_PORT: activePort,
+  CAW_RELAY_PORT: activeRelayPort,
   CAW_STATE_DIR: stateDir,
   CAW_ALLOWED_ROOTS: `${rootsDir},${secondaryRootsDir}`,
   // See the block above: this single value pins every omp call the server makes,
@@ -370,6 +411,7 @@ child.on("exit", (code, signal) => {
   } catch {
     /* already gone, or unwritable: nothing left to clean. */
   }
+  if (activeLockPath) releaseLock(activeLockPath, process.pid);
   if (code !== null) process.exit(code);
   if (expectedTeardown) process.exit(0);
   process.exit(signal ? 128 + (osConstants.signals[signal] ?? 1) : 1);
@@ -381,6 +423,7 @@ child.on("error", (err) => {
   } catch {
     /* already gone, or unwritable: nothing left to clean. */
   }
+  if (activeLockPath) releaseLock(activeLockPath, process.pid);
   process.stderr.write(`[e2e-server] could not start server: ${err.message}\n`);
   process.exit(1);
 });
@@ -393,7 +436,7 @@ const port = env.CAW_PORT;
 // default path is the one `tests/e2e/fixture.ts` and `playwright.config.ts`
 // fall back to, so a hand-started launcher and a Playwright run agree; the file
 // is removed again on the shutdown path below.
-const defaultManifestFile = join(tmpdir(), "caw-e2e-fixture.json");
+
 const manifestFile = process.env.CAW_E2E_FIXTURE ?? defaultManifestFile;
 writeFileSync(
   manifestFile,
