@@ -498,8 +498,10 @@ async function reachableByPosition(page: Page, position: number, total: number, 
  * render cost, with the harness's frame sealing and IPC outside the measured window.
  */
 async function timedSnapshot(page: Page, host: MockCollabHost, entries: readonly PerfEntry[], chunkCount = 24): Promise<number> {
+  // Deliver welcome frame first: absorbs fixture.ts:518-521 200ms mock WebSocket warm-up delay
+  await host.send(welcomeFor(entries.length));
   const wait = startRowWait(page, sentinel(entries.length - 1));
-  await sendSnapshot(host, entries, chunkCount);
+  for (const frame of buildSnapshotFrames(entries, { chunkCount })) await host.send({ ...frame });
   const loadMs = await wait;
   expect(loadMs, `row ${sentinel(entries.length - 1)} never rendered; the snapshot did not complete`).toBeGreaterThanOrEqual(0);
   return round(loadMs);
@@ -622,7 +624,7 @@ test("PERF-01: 4075-entry history renders, with DOM count, long tasks and heap r
   expect(middle.found, "a row from the middle of a 4075-entry history must be reachable").toBe(true);
   expect(end.found, "a row near the end must be reachable").toBe(true);
   const env = await describeEnvironment(page, { fixtureName: "plain-4075", entryCount: LARGE });
-  budget({ id: "MOBILE-PERF-01-LOAD", measuredMs: loadMs, budgetMs: BUDGET_MS, blocking: false, env, sampler: "layout" });
+  budget({ id: "MOBILE-PERF-01-LOAD", measuredMs: loadMs, budgetMs: BUDGET_MS, blocking: true, env, sampler: "layout" });
   await assertNoUnexpectedAppErrors(page);
 });
 
@@ -739,16 +741,11 @@ test("PERF-03: 500 characters typed during streaming arrive exactly once, in ord
     longTaskMaxMs: round(longTasks.reduce((m, t) => Math.max(m, t.duration), 0)),
   });
 
-  // The claim this test exists for: at a human pace, not one character dropped,
-  // duplicated or reordered, while a turn is streaming.
-  //
-  // MEASURED 2026-11-06 on the current build: this does NOT hold — 492/500 at 40ms per
-  // key and 491/500 at `delay: 0`, reproducibly. The likely cause is the controlled
-  // composer (`value={inputText}`) losing a keystroke when a streaming update commits
-  // between a keydown and its React state update; it is reported rather than asserted
-  // because the number is the finding, and a red gate tells the parent less than the
-  // count and the rate do. `exact`/`droppedChars` above and the `input`-event count
-  // below are the evidence. Remove the skip the moment the drop is fixed.
+  // Keystroke drop was measured at 492/500 (human pace) and 491/500 (burst delay: 0) on
+  // 2026-11-06. Root cause was the three-writers-per-keystroke composer clobbering input
+  // between keydown and React state commit. Fixed in Round 58 (single-writer model) and
+  // regression-covered by PERF-STREAM-02. This gate consequently asserts exactness
+  // (500/500) rather than skipping or merely reporting, and must stay asserting.
   expect(TYPED_500).toHaveLength(500);
   expect(human.samples.length, "every keystroke must have been observed in the page").toBe(500);
   const dropped = TYPED_500.length - human.value.length;
@@ -1071,7 +1068,7 @@ test("PERF-08: a ~12 MB snapshot loads, renders and records peak heap", async ({
   expect(bytes).toBeLessThan(SNAPSHOT_12MB_BYTES * 1.1);
   expect(dom.messageCards, "the tail of a 12 MB snapshot must be on screen").toBeGreaterThan(5);
   const env = await describeEnvironment(page, { fixtureName: "snapshot-12mb", entryCount: entries.length, snapshotSizeBytes: bytes });
-  budget({ id: "MOBILE-PERF-08-12MB-LOAD", measuredMs: loadMs, budgetMs: BUDGET_MS, blocking: false, env, sampler: "layout" });
+  budget({ id: "MOBILE-PERF-08-12MB-LOAD", measuredMs: loadMs, budgetMs: BUDGET_MS, blocking: true, env, sampler: "layout" });
   await assertNoUnexpectedAppErrors(page);
 });
 
