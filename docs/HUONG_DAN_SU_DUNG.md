@@ -453,6 +453,14 @@ Tool call được gom lại theo nhóm **cùng loại, liền kề nhau**, mỗ
 - `✓ Inspect diff` — xem diff
 - `✓ Run 1 tool` — tool chưa có cách hiển thị riêng (nhóm "khác")
 
+**Một lượt gọi nhiều tool là MỘT dòng.** Mỗi lần agent gọi tool là một message `assistant` chỉ chứa `toolCall` và không có chữ nào. Trước đây mỗi message như vậy cắt lượt chạy thành một dòng riêng, nên một turn gọi 5 lệnh hiện thành 5 dòng `✓ Run 1 command`. Nay những message **không vẽ ra gì** (mọi call của nó đã có dòng kết quả trên màn hình) không còn cắt lượt chạy — chúng vẫn được giữ nguyên trong nhóm, chỉ không tạo dòng. Một dòng có chữ (văn xuôi của agent, một call chưa có kết quả, một notice) **vẫn** cắt lượt chạy như cũ.
+
+**Nhãn `Read` đếm FILE, không đếm lần gọi.** Số tệp là số **đường dẫn khác nhau** lấy từ chính tham số của call (hoặc `details.resolvedPath` của kết quả). Đọc cùng một tệp hai lần ghi `Read 1 file` kèm `2 calls`; một nhóm không chứng minh được đường dẫn nào ghi `Read 2 calls` kèm `2 path unverified`, **không bao giờ** ghi "files".
+
+**Một dòng số liệu thứ hai, chỉ khi có bằng chứng.** Dòng metric chỉ hiện khi chính output của tool chứa bản tóm tắt của test runner, ví dụ `3 failed | 15 passed` (đọc từ dòng `Tests ...` của vitest/jest, hoặc dòng `=== ... in 0.52s ===` của pytest). Không có bản tóm tắt thì không in gì thêm. Chỉ đọc với tool **thực thi** (`bash`, `test`, và các tool "khác" như `eval`/`wait`); một file `read` có chứa log test cũng **không** sinh ra claim. Việc đọc file `.log` không phải là một lần chạy test.
+
+Vì vậy `✓ Run 3 commands · 3 failed | 1343 passed` là **hai sự thật khác nhau**: 3 lệnh đã chạy, và một trong số đó báo 3 test hỏng. Nếu bản tóm tắt nói có test hỏng thì dòng nhóm chuyển sang trạng thái `✕` **dù** host gắn cờ thành công cho call — đã đo được 59 kết quả như vậy trên máy này, và tô xanh chúng là nói sai.
+
 **Vì sao nhóm sửa tệp đếm `operations` chứ không phải `files`:** một *tool call* là một thao tác, không phải một tệp. Một lần gọi có thể sửa nhiều tệp, và cũng có thể thất bại mà không sửa gì. Ghi `Edit 3 files` ở đây là khẳng định một con số tệp mà chưa có gì chứng minh. Con số tệp **có bằng chứng** nằm ngay cạnh đó (xem bên dưới) và được đếm từ diff thật.
 
 Ba trạng thái, đọc ở ký tự đầu dòng:
@@ -462,6 +470,10 @@ Ba trạng thái, đọc ở ký tự đầu dòng:
 | `◌` | Đang chạy (chưa xong — **không** phải đã thành công) |
 | `✓` | Đã xong, không có lỗi |
 | `✕` | Có lỗi — dòng này đọc được ngay cả khi chưa mở nhóm |
+
+Trạng thái nhóm là trạng thái **xấu nhất** của thành viên: một dòng đang chạy làm cả nhóm `◌`, một dòng lỗi (theo cờ của host, **hoặc** theo bản tóm tắt test) làm cả nhóm `✕`. Không bao giờ gộp một dòng đang chạy hay đang lỗi vào một dòng "đã xong".
+
+Tên đọc được của dòng nhóm (cho trình đọc màn hình) gồm **cả trạng thái bằng chữ và bản tóm tắt**, dạng `Failed: Run 3 commands, 3 failed | 1343 passed` — lỗi được đọc ra thành chữ, không chỉ bằng màu. Đầu dòng là một `<button>` thật với `aria-expanded`, chạm được bằng bàn phím, và cao tối thiểu 44px.
 
 Nhóm chưa mở **không** dựng nội dung bên trong vào trang, nên conversation dài vẫn nhẹ. Chạm vào nhóm để mở danh sách tool call; chạm vào từng dòng tool để mở chi tiết. Khi một tool báo lỗi, nội dung lỗi hiện ngay dưới dòng nhóm dù bạn chưa mở, để lỗi không bị sót.
 
@@ -942,19 +954,34 @@ Trước đây **mọi** câu trả lời của trợ lý đều nằm trong m�
 - Bong bóng người dùng vẫn là **bubble bo góc phải**, giới hạn 85% chiều rộng.
 - **Nhãn vai trò chỉ còn khi nó nói điều gì đó** mà hình dạng dòng không nói: dòng tool, dòng notice, tin có lỗi, và câu ghi chú `· sent while active; awaiting host`. Câu trả lời bình thường không còn nhãn `Assistant`.
 
-### 25.5 Hoạt động công cụ — icon trạng thái và số dòng thật
+### 25.5 Hoạt động công cụ — icon trạng thái, một dòng cho mỗi lượt, và số liệu có bằng chứng
 
 Tool call liền kề **cùng loại** được gom thành một **dòng nhóm** gọn; mở nhóm ra là danh sách tool call, mở tiếp từng dòng là chi tiết.
+
+**Một lượt gọi nhiều tool nay là một dòng.** Message `assistant` chỉ chứa `toolCall` (không có chữ) không còn cắt lượt chạy: nó không vẽ ra gì, nên nó được giữ nguyên trong nhóm mà không tạo dòng riêng. Một lượt gọi 5 lệnh trước đây là 5 dòng `✓ Run 1 command`, nay là `✓ Run 5 commands`.
 
 Ký hiệu trạng thái đứng đầu dòng (nhóm lấy trạng thái "xấu nhất" của thành viên):
 
 | Ký hiệu | Nghĩa |
 | --- | --- |
-| `✓` | Đã xong, không lỗi (`✓ completed`) |
-| `◌` | Đang chạy, **chưa** phải đã thành công (`◌ Running…`) |
-| `✕` | Có lỗi (`✕ failed — View output`) |
+| `✓` | Đã xong, không lỗi |
+| `◌` | Đang chạy, **chưa** phải đã thành công |
+| `✕` | Có lỗi — kể cả khi lỗi chỉ được chứng minh bởi bản tóm tắt test của chính output |
 
-Nhãn nhóm theo loại, ví dụ `✓ Read 8 files`, `✓ Search 3 patterns`, `✓ Run 2 commands`, `✓ Edit 3 operations`, `✓ Apply 1 patch operation`, `✓ Inspect diff`, `✓ Run 1 tool`. Nhóm sửa tệp hiện thêm **dòng mô tả** đếm từ diff thật, ví dụ `✓ Edit 3 operations · Changed 2 files +128 −34`; các con số này đã giải thích ở [chương 15](#15-nhóm-hoạt-động-tool-agent-activity) và chương 16.
+Nhãn nhóm theo loại, ví dụ `✓ Read 8 files`, `✓ Search 3 patterns`, `✓ Run 2 commands`, `✓ Edit 3 operations`, `✓ Apply 1 patch operation`, `✓ Inspect diff`, `✓ Run 1 tool`. Nhãn `Read` đếm **tệp khác nhau** lấy từ tham số/`details` thật (đọc cùng tệp hai lần ghi `Read 1 file` kèm `2 calls`; không chứng minh được đường dẫn nào thì ghi `Read N calls`, không bao giờ ghi "files").
+
+**Dòng metric thứ hai chỉ hiện khi có bằng chứng.** Với tool thực thi, nếu chính output chứa bản tóm tắt của test runner (`Tests  3 failed | 1343 passed`) thì nhóm in `· 3 failed | 1343 passed` và chuyển sang `✕`. Không có bản tóm tắt thì không in gì thêm, và một file `.log` đọc bằng `read` **không** sinh claim.
+
+Nhóm sửa tệp hiện thêm **dòng mô tả** đếm từ diff thật, ví dụ `✓ Edit 3 operations · Changed 2 files +128 −34`; các con số này đã giải thích ở [chương 15](#15-nhóm-hoạt-động-tool-agent-activity) và chương 16.
+
+**Subagent đang chạy:** khi host báo có agent `kind: "sub"` với `status: "running"` (cùng nguồn mà panel Agents dùng), một dòng gọn hiện trên transcript:
+
+```
+○ 2 subagents working                    ›
+  Open Agents to view details
+```
+
+Chạm vào dòng đó mở panel Agents. `task` tool spawn subagent và **không** chứng minh được agent nào còn đang làm việc (`details.progress[].status` luôn là `pending`), nên con số này **chỉ** lấy từ snapshot agent của host — không suy đoán từ output tool.
 
 Bên trong một dòng tool có thay đổi tệp, danh sách tệp liệt kê **từng tệp một dòng** với **số dòng thật** `+x −y`, ví dụ:
 
