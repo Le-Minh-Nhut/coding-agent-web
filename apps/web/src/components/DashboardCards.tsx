@@ -56,7 +56,11 @@ export function DashboardCards({ counts, onOpenAgents, onOpenFiles, onOpenActivi
             dozen live processes. */}
         {/* Short enough to survive the card's ellipsis at 320px: the earlier
             wording ("past and present") was itself the part that got clipped, so
-            the disclaimer never reached the phone it was written for. */}
+            the disclaimer never reached the phone it was written for. At 320px the
+            informative half (`0 running`) is what stays visible and the trailing
+            qualifier ellipsises, exactly as in the round-57 capture; the full
+            string is also on the card's `aria-label`, so assistive tech never sees
+            the clip. */}
         <span className="dashboard-sub">
           {agents.running === 0 ? "0 running · all-time" : `${agents.running} running`}
         </span>

@@ -293,7 +293,11 @@ button.files-diff-nav button {
   flex: none;
   width: 2.6em;
   text-align: right;
-  color: var(--text-faint);
+  /* `--text-faint` is ornament-only by its own contract (3.85:1 on
+     `--surface-primary`); this is 0.78rem text on `--tv-inset` #0b0d11, where the
+     token measures 4.34:1 — below AA. `--text-muted` is 6.09:1 there and still far
+     quieter than the code beside it, so the hierarchy is unchanged. */
+  color: var(--text-muted);
   font-variant-numeric: tabular-nums;
   user-select: none;
 }

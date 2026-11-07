@@ -1,0 +1,453 @@
+/* ── Premium chrome layer (round 58) ─────────────────────────────────────────
+   Loaded once from `main.tsx`, AFTER `styles.css`. This file carries the
+   *presentation* layer only: surfaces, typography, spacing, elevation, and the
+   header/composer/message-chrome/notice rules that can be expressed as additive
+   overrides. It changes no component's behaviour and removes no control.
+
+   Three rules keep it honest and non-conflicting:
+
+   1. **Specificity is explicit, not positional.** Every selector in this file
+      carries an extra `body` prefix, so it is one class more specific than the
+      `styles.css` rule it overrides instead of tying it and relying on this file
+      being loaded later. Rule order in a bundle is a build detail; a selector that
+      wins at equal specificity on source order is a latent bug, and this project
+      has already paid for one of those (the `.modal-content` cascade defeat
+      recorded in round 54 m3). The only unprefixed heads are `:root` (token
+      declarations, no competition) and the breakpoint wrapper, which is a `@media`
+      query rather than a selector.
+
+   2. **Scope is stated by surface.** A rule may only reach the screens it names.
+      `.message-content` is the trap here: `MessageRow` renders it in the
+      conversation, in `AgentChat` and in the saved-history reader, so the reading
+      rhythm names all three surfaces explicitly rather than styling whichever ones
+      happen to be mounted (finding W8 of `docs/audits/adversarial-review-round58.md`).
+
+   3. **Tool activity is not touched here.** `.tool-row`, `.activity-group`,
+      `.tool-body` and every `--tv-*` / `.tv-*` rule belong to the vendored guest
+      renderer and to the tool-activity workstream. This file only supplies the
+      neutral tokens those rules already consume (`--border-subtle`, `--surface`,
+      `--text-muted`), so a restyle there does not have to reconcile with this
+      one. Nothing here competes with it.
+
+   Colour discipline, unchanged from round 54 and enforced in
+   `tests/e2e/premium-visual.spec.ts`: colour means state. The only saturated ink
+   in the chrome is the status dot/word (green idle/running, amber connecting,
+   red disconnected/unknown), the Stop control, and a notice's own level. Every
+   ratio quoted below is WCAG 2.1 relative-luminance contrast, computed against
+   the surface the token is actually painted on. */
+
+:root {
+  /* Chrome surfaces. The canvas is the app background; chrome is raised from it
+     by a hairline rather than by a lighter fill, because a lighter band across
+     the top and bottom of a near-black screen is the single strongest
+     "debug console" cue in the round-57 captures (measured header band
+     `rgb(27,27,27)` against a `#050505` canvas). */
+  --chrome-bg: #050505;
+  --hairline: #1f1f1f;
+  --field-bg: #161616;
+  --field-border: #262626;
+
+  /* Measured (`tests/e2e/premium-visual.spec.ts` asserts these pairs):
+       #f5f5f5 / --chrome-bg .......... 18.69:1
+       #909090 / --chrome-bg ........... 6.38:1
+       #a5a5a5 / --field-bg ............ 7.35:1
+       #909090 / --field-bg ............ 5.67:1  (the composer placeholder)
+       #f5f5f5 / --field-bg ........... 16.60:1
+     No text token in the chrome sits below 4.5:1; the lowest is the muted
+     placeholder at 5.67:1. */
+  /* Chrome type scale. There is no field token on purpose: `.composer-input` stays
+     at 1rem because iOS Safari zooms a focused field under 16px. */
+  --fs-value: 0.8rem;
+  --fs-meta: 0.72rem;
+  --fs-status: 0.75rem;
+  --lh-prose: 1.55;
+
+  /* The 4/8/12 steps, the part of the app's 4/8/12/16/24 scale the chrome actually
+     uses. Only the used steps are declared: a token for a value no rule consumes is
+     scaffolding. */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+
+  /* One elevation, for the two things that float (the overflow sheet and the
+     Latest button). A second level would be a level nobody uses. Values as shipped
+     in `styles.css:1818`, now named so the chrome states it once. */
+  --elev-float: 0 8px 24px rgba(0, 0, 0, 0.55);
+}
+
+/* ── Header ──────────────────────────────────────────────────────────────────
+   One row, 53 box px of chrome (44px controls + 2x4px padding + the 1px hairline),
+   against the 56 measured from the round-57 pixels, sitting flush on the canvas
+   with a hairline instead of a lighter band. `--safe-top` is preserved: on a notched device the inset adds
+   to this height by design, and the 56px budget in the spec covers the chrome,
+   not the hardware inset. */
+body .conversation-column > .app-header {
+  padding: calc(var(--safe-top) + var(--sp-1)) calc(var(--safe-right) + var(--sp-3)) var(--sp-1) calc(var(--safe-left) + var(--sp-3));
+  background-color: var(--chrome-bg);
+  border-bottom: 1px solid var(--hairline);
+}
+
+/* The title block gets one line each for title and status; both ellipsise before
+   the action cluster, which never shrinks. */
+body .conversation-header-copy h3 {
+  font-size: 1rem;
+  line-height: 1.2;
+  font-weight: 600;
+}
+
+body .header-status {
+  font-size: var(--fs-status);
+  gap: var(--sp-1);
+}
+
+body .header-status-dot {
+  width: 6px;
+  height: 6px;
+}
+
+/* ── Composer ────────────────────────────────────────────────────────────────
+   Compact, bottom-anchored, one row. The field is the only raised surface on
+   the canvas; Send stays a 44px icon control beside it. */
+body .composer-container {
+  background-color: var(--chrome-bg);
+  border-top: 1px solid var(--hairline);
+  padding: var(--sp-2) calc(var(--safe-right) + var(--sp-3)) calc(var(--safe-bottom) + var(--sp-2)) calc(var(--safe-left) + var(--sp-3));
+  gap: var(--sp-2);
+}
+
+body .composer-input {
+  background-color: var(--field-bg);
+  border-color: var(--field-border);
+  border-radius: var(--radius-composer);
+  /* 1rem, deliberately: iOS Safari zooms the viewport when a focused field's
+     font-size is below 16px, and this is the field a phone user focuses most. */
+  font-size: 1rem;
+}
+
+body .composer-input::placeholder {
+  color: var(--text-muted);
+}
+
+/* Focus must be visible, not merely a 1px border tint: this is the only
+   affordance a keyboard user has. Scoped to the conversation column so a
+   disclosure elsewhere keeps its own treatment. */
+body .conversation-column :focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+
+/* ── Dashboard: three compact navigation summaries, one bounded row ──────────
+   Was 56px of card plus a gutter (64-72px measured); is now a 44px card plus the
+   same gutter (50px). Same three destinations, same one tap, same numbers and
+   the same accessible names — the height is what changed, because the owner's
+   complaint is that permanent chrome eats the transcript.
+
+   Kept as cards (rather than one segmented strip) because the reference shows
+   three bounded summaries; the density comes out of the vertical padding and the
+   type scale, not out of removing the affordance. */
+body .dashboard-row {
+  gap: 6px;
+  padding: var(--sp-2) calc(var(--safe-right) + var(--sp-3)) 0 calc(var(--safe-left) + var(--sp-3));
+}
+
+body button.dashboard-card {
+  height: var(--touch-min);
+  min-height: var(--touch-min);
+  padding: 2px 10px;
+  gap: 1px;
+  border-color: var(--hairline);
+  border-radius: var(--radius-control);
+  background-color: var(--surface-secondary);
+}
+
+body .dashboard-value {
+  font-size: var(--fs-value);
+  font-weight: 600;
+  line-height: 1.15;
+}
+
+body .dashboard-sub {
+  font-size: var(--fs-meta);
+  line-height: 1.15;
+  color: var(--text-muted);
+}
+
+/* At 320px the three-column row is ~95px per card, so the two lines keep the
+   informative half (`0 running`, `+12 −3`) and the trailing qualifier ellipsises
+   — the same string and the same ellipsis the shipped narrow layout already had,
+   at 12-20px less height. The full string stays on the card's `aria-label`, so
+   nothing is lost to assistive tech; the row still reports three columns. */
+@media (max-width: 420px) {
+  body .dashboard-row {
+    gap: 6px;
+    padding: var(--sp-1) calc(var(--safe-right) + var(--sp-2)) 0 calc(var(--safe-left) + var(--sp-2));
+  }
+
+  body button.dashboard-card {
+    padding: 2px var(--sp-2);
+  }
+}
+
+/* ── Notices and the banners that stay ───────────────────────────────────────
+   One visual language for every full-width row that reports state: a hairline
+   tint of the level's own colour, the level's colour for the text, no fill
+   saturation. The legacy GitHub-ish fills (`#3b181a`, `#3a2b10`, `#21262d`)
+   predate the round-54 tokens and were the loudest thing on a 320px screen.
+   Contrast after the change (recomputed from the tokens this file actually
+   consumes, over `--chrome-bg`; `color-mix` interpolates in sRGB here):
+     warning  #f59e0b on 12% warning tint .. 8.19:1
+     danger   #f87171 on 10% danger tint ... 7.02:1
+     neutral  #a5a5a5 on 12% neutral tint .. 7.35:1
+     accent   #4d94ff on 10% primary tint .. 6.35:1
+     success  #22c55e on 10% success tint .. 8.03:1
+   Each row keeps its own `role` (`status` for a warning, `alert` for an error)
+   and its own text; only the paint moved. */
+body .conversation-column .banner {
+  border-bottom: 0;
+  font-size: 0.85rem;
+  font-weight: 500;
+  padding: var(--sp-2) calc(var(--safe-right) + var(--sp-3)) var(--sp-2) calc(var(--safe-left) + var(--sp-3));
+}
+
+/* Scoped to `.conversation-column` (plus `body` for explicit specificity — a bare
+   `.conversation-column .banner` ties `.banner.disconnected` on classes and would
+   depend on bundle order). The column is exactly the surface this file owns: it
+   contains the header, dashboard, transcript, notices AND the composer form, so
+   the composer's send-status banner is included. It deliberately excludes the
+   overlay panels (siblings of the column), the history view, and the settings
+   cards, which are different screens with their own layouts. */
+body .conversation-column .banner.disconnected,
+body .conversation-column .banner.error {
+  background-color: color-mix(in srgb, var(--danger) 10%, var(--chrome-bg));
+  color: var(--danger-text);
+}
+
+body .conversation-column .banner.reconnecting,
+body .conversation-column .banner.warning {
+  background-color: color-mix(in srgb, var(--warning) 12%, var(--chrome-bg));
+  color: var(--warning);
+}
+
+body .conversation-column .banner.unknown,
+body .conversation-column .banner.connecting {
+  background-color: color-mix(in srgb, var(--text-muted) 12%, var(--chrome-bg));
+  color: var(--text-secondary);
+}
+
+body .conversation-column .banner.idle {
+  background-color: color-mix(in srgb, var(--primary-action) 10%, var(--chrome-bg));
+  color: var(--primary);
+}
+
+body .conversation-column .banner.running,
+body .conversation-column .banner.success {
+  background-color: color-mix(in srgb, var(--success) 10%, var(--chrome-bg));
+  color: var(--success);
+}
+
+/* The level mark is the non-colour carrier of the same fact: a reader who cannot
+   separate red from amber still sees two different rows, and both keep their own
+   `role` (`status` for a warning, `alert` for an error).
+
+   It is generated content, not a node. A real `<span aria-hidden>` here changed the
+   row's `textContent` (the accessibility assertion in
+   `tests/web/mobile-reading-ux.test.tsx` compares it to the host's message), and a
+   presentation-only layer must not alter the text of a region the host wrote. The
+   `/ ""` alternative-text form keeps the mark out of the accessible name too: it is
+   announced as nothing, exactly like the `aria-hidden` span it replaces. */
+body .conversation-column .notice-banner:not(.notice-banner--info)::before {
+  /* The plain form first: an engine without `content` alternative text must still
+     paint the mark (it would only also expose it as an unlabelled decoy), so the
+     fallback keeps the visual contract and the `/ ""` form below upgrades it. */
+  content: "!";
+  content: "!" / "";
+  flex: none;
+  margin-right: var(--sp-2);
+  font-family: var(--font-mono);
+}
+
+/* One class more than the rule above, so the error mark wins on specificity
+   instead of on source order (both would otherwise be (0,4,1)). */
+body .notice-row--error .banner.error.notice-banner::before {
+  content: "✕";
+  content: "✕" / "";
+}
+
+/* `.banner` is a flex row, so the clamped span is a flex item beside the generated
+   mark and needs the explicit shrink permission the line-clamp depends on: without
+   `min-width: 0` a flex item refuses to go below its content width and the clamp
+   does nothing. (True with or without the mark, which is why it is unconditional.) */
+body .notice-banner .notice-text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* `.banner` right-aligns its second child for a banner that ends in an action
+   button. A notice's second child is the clamped text, so it must start at the
+   left like the mark does. */
+body .notice-row .notice-banner {
+  justify-content: flex-start;
+  align-items: center;
+}
+
+/* Routine chatter: one muted line, no fill, no rule. It is still a notice and the
+   host still reported it — it just no longer looks like an alert. */
+body .conversation-column .notice-banner--info {
+  padding: var(--sp-1) calc(var(--safe-right) + var(--sp-3)) var(--sp-1) calc(var(--safe-left) + var(--sp-3));
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  font-weight: 400;
+}
+
+/* The expander is a real control, so it clears the app's own 44px floor (`styles.css`
+   gave it 32px). `body` is here for explicit specificity: `styles.css` declares
+   `button.notice-toggle` at exactly (0,1,1), so a bare repeat would depend on this
+   file being last in the bundle. */
+body button.notice-toggle {
+  min-height: var(--touch-min);
+  margin-left: calc(var(--safe-left) + var(--sp-3));
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+
+/* ── Message chrome ──────────────────────────────────────────────────────────
+   The user bubble stays a right-aligned rounded fill (18px) and the assistant
+   reply stays chrome-free. Both are already true in `styles.css:938-958`
+   (`.message-card.user` / `.message-card.assistant`), so this file adds no rule
+   for either — re-declaring the radius here would be a rule that changes nothing.
+   What it does add is the reading rhythm, which is what the round-57 captures show
+   as flat: one 1.5 line-height for prose and code alike.
+
+   `:not(pre)` matters: a `pre` here is a tool result's own body, where a taller
+   line-height is a scroll cost, not a reading aid. Prose moves; code does not.
+
+   Scoped by SURFACE, not by class. `.message-content` is rendered by `MessageRow`
+   (including `AdvisorMessageCard`) and by the streaming card — and `MessageRow` is
+   also used by `AgentChat` and by the saved-history reader, both of which mount
+   outside the conversation column. An unscoped rule therefore styled three screens,
+   which is exactly the reach this file's contract disclaims. Each reading surface is
+   now named:
+
+     .conversation-column  live + saved transcript in a conversation, streaming card
+     .agent-chat-scroll    one agent's own chat (AgentDetail → AgentChat)
+     .history-reader       a saved session opened from History
+
+   The last two are named deliberately, not left to inheritance: they are the same
+   reading task at the same density, so they get the same rhythm; leaving them at the
+   body's 1.5 while the conversation uses 1.55 would be an accident of reach. */
+body .conversation-column .message-content:not(pre),
+body .agent-chat-scroll .message-content:not(pre),
+body .history-reader .message-content:not(pre) {
+  line-height: var(--lh-prose);
+}
+
+/* The recovery summary is a bounded row that reports something the user must act
+   on; it keeps the warning colour and gains the same radius as the rest of the
+   chrome. */
+body button.recovery-summary {
+  border-radius: var(--radius-control);
+  border-color: color-mix(in srgb, var(--warning) 45%, transparent);
+  background-color: color-mix(in srgb, var(--warning) 10%, var(--chrome-bg));
+}
+
+/* ── Floating and sheet affordances ─────────────────────────────────────────
+   The Latest button and the overflow sheet, on the same two elevations as the
+   bars. */
+body .latest-button {
+  background: var(--surface-elevated);
+  border-color: var(--hairline);
+  box-shadow: var(--elev-float);
+}
+
+/* The sheet keeps `styles.css`'s own offset: it is positioned against the header's
+   action cluster, not the viewport, so re-deriving it here would double-count
+   `--safe-top` and move the sheet on a notched device for no gain. */
+body .header-menu {
+  background: var(--surface-elevated);
+  border-color: var(--hairline);
+  border-radius: var(--radius-control);
+  box-shadow: var(--elev-float);
+}
+
+/* A one-line explanation under the header: chrome, so it sits on the canvas with
+   a hairline under it rather than on a raised band. */
+body .handoff-reason {
+  background: var(--chrome-bg);
+  border-bottom: 1px solid var(--hairline);
+  font-size: 0.8rem;
+}
+
+body .modal-content {
+  box-shadow: var(--elev-float);
+}
+
+/* ── Touch targets ───────────────────────────────────────────────────────────
+   Controls on this screen were below the app's own 44px floor: the notice
+   expander (32px), the empty state's retry (36px), the sync-stall strip's retry
+   (30px) and the advisor row heads (32/34px). Each is a real control a thumb has
+   to hit, and the floor is the app's own rule for buttons — these were exceptions
+   nobody chose. Only the minimum moves: no layout, label or behaviour changes, and
+   a control already taller than 44px is untouched.
+
+   `.notice-toggle` is inside the chrome this spec scans, so
+   `tests/e2e/premium-visual.spec.ts` holds it at 44 automatically. The other four
+   live outside that scan (the transcript and the empty state are other surfaces),
+   so they are covered here and by `tests/e2e/screens.spec.ts`'s own sub-44px
+   inventory report. */
+body button.notice-toggle,
+body button.empty-state-action,
+body .sync-stall-strip button,
+body .advisor-card-head,
+body .advisor-note-head {
+  min-height: var(--touch-min);
+}
+
+/* ── Surfaces added by the windowing change ─────────────────────────────────
+   Two panels arrived with it that no earlier round styled against this palette:
+   the in-app transcript search, and the running-subagents roll-up. Neither is
+   owned by the tool-activity workstream (that owns `.tool-row` / `.activity-group`
+   / `.tv-*`), and both are chrome at the same level as the dashboard row, so their
+   resting state is set here rather than left to `styles.css` defaults.
+
+   Transcript search: `styles.css` gave it `--surface` + a full border, which is the
+   raised band this file removes everywhere else. It stays a distinct panel — it is
+   a mode, and mode must be visible — but it separates from the canvas with the
+   same 1px hairline as the header and composer. */
+body .transcript-search {
+  background-color: var(--chrome-bg);
+  border-bottom: 1px solid var(--hairline);
+  gap: var(--sp-2);
+}
+
+/* Its field is a search box, not the composer: same field surface, smaller radius,
+   and the 1rem floor still applies (iOS zooms a focused field under 16px). */
+body .transcript-search input {
+  background-color: var(--field-bg);
+  border-color: var(--field-border);
+  border-radius: var(--radius-control);
+  font-size: 1rem;
+}
+
+body .transcript-search-actions button.ghost {
+  color: var(--text-secondary);
+  border-radius: var(--radius-control);
+}
+
+/* `--text-muted` on `--chrome-bg` is 6.38:1; the count line is small type, so it
+   keeps the muted ink rather than the faint one. */
+body .transcript-search-count {
+  color: var(--text-muted);
+}
+
+/* The subagent roll-up sits between the dashboard row and the transcript, so it
+   uses the dashboard's gutter: without it the label starts at x=0 and the row
+   looks like it fell out of another layout. Its own type scale and 44px tap target
+   come from `tool-activity.css` and are left alone (`tool-activity.css` owns
+   `.subagent-row`, and the two files must not fight). */
+body .conversation-column > .subagent-row {
+  padding: var(--sp-1) calc(var(--safe-right) + var(--sp-3)) 0 calc(var(--safe-left) + var(--sp-3));
+}
+
+body .subagent-row-hint {
+  color: var(--text-muted);
+}

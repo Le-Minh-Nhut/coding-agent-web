@@ -1,0 +1,462 @@
+/*
+ * Tool activity styles — imported by `components/ToolActivity.tsx`.
+ *
+ * WHY A SEPARATE FILE. The tool-activity rules used to live in `styles.css`,
+ * which every other screen also edits. Owning them here means a change to the
+ * activity card cannot collide with an unrelated screen's change, and the whole
+ * surface is readable in one place. `styles.css` still owns the design tokens and
+ * the guest `--tv-*` bridge, both `:root` declarations that must stay global.
+ *
+ * The budget these rules serve: one collapsed card per related run, with a
+ * smaller vertical footprint than the card stack it replaces. That is why the
+ * card is borderless (the header itself is the control, so a border draws a box
+ * around nothing), gaps are 4/6/8 rather than 8/12, and the type scale is a single
+ * 0.85rem with a 0.75rem secondary line rather than an ad-hoc mix.
+ */
+
+/* The collapsed card.
+ *
+ * `border: 0` and a transparent background: the previous card sat in a bordered
+ * box with `background: var(--surface)`, and a screenful of those is what the
+ * complaint described. The header keeps its own hit area and hover state, so
+ * nothing is lost but the frame. */
+.activity-group,
+.tool-row {
+  min-width: 0;
+}
+
+.activity-group {
+  border: 0;
+  background: none;
+}
+
+.activity-group-head,
+.tool-row-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  /* 44px minimum tap target on the collapsed header, unchanged. */
+  min-height: var(--touch-min);
+  padding: 4px 6px;
+  background: none;
+  border: 0;
+  border-radius: var(--radius-control);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.activity-group-head:hover,
+.tool-row-head:hover {
+  background: var(--surface-hover);
+}
+
+/* The state glyph sits in a fixed gutter so every card's label starts at the same
+ * x, whichever glyph precedes it. */
+.activity-group-state,
+.tool-row-state {
+  flex: none;
+  width: 1.1em;
+  text-align: center;
+  font-size: 0.85rem;
+  line-height: 1;
+}
+
+.activity-group--completed .activity-group-state,
+.tool-row:not(.tool-row--error) .tool-row-state { color: var(--success); }
+.activity-group--running .activity-group-state { color: var(--primary); }
+.activity-group--failed .activity-group-state,
+.tool-row--error .tool-row-state { color: var(--danger-text); }
+
+.activity-group-label {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.85rem;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The evidence metric (`3 failed | 15 passed`) and the verified-diff counts. Both
+ * are secondary lines of fact, so both are 0.75rem muted. */
+.activity-group-metric,
+.activity-group-note {
+  flex: none;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+/* A failure's metric carries the failure tone: the count that matters must not
+ * read the same as a clean one. */
+.activity-group--failed .activity-group-metric {
+  color: var(--danger-text);
+}
+
+.activity-group-counts {
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  white-space: nowrap;
+}
+
+.tool-row-name {
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.tool-row-sum {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.tool-row-status {
+  flex: none;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.activity-group-chevron,
+.tool-row-chevron {
+  flex: none;
+  color: var(--text-muted);
+  line-height: 1;
+}
+
+/* The expanded bodies: one level, no nested border. Member rows indent past the
+ * head's glyph gutter, and a hairline left rule groups them without boxing each
+ * one — the frame that made a stack of cards read as a stack. */
+.activity-group-body,
+.tool-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.activity-group-body {
+  padding: 0 0 4px 1.1em;
+}
+
+.activity-group-body .tool-row {
+  border-left: 1px solid var(--border);
+  padding-left: 6px;
+}
+
+.tool-body {
+  padding: 0 0 4px 6px;
+}
+
+.tool-body-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.tool-body-heading {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.tool-body-note {
+  margin: 0;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+/* Per-file rows are plain list lines, not nested bordered cards. */
+.tv-file-changes {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+}
+
+.tv-file-change {
+  display: block;
+  min-width: 0;
+}
+
+/* One line per file in an edit's flattened body: whole row is the control. */
+.tv-file-change-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  width: 100%;
+  min-height: var(--touch-min);
+  padding: 0 4px;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.tv-file-change-head:disabled {
+  /* A row with nothing to open is not a control, but it keeps the same height so
+     the list does not jitter between rows. */
+  cursor: default;
+}
+
+.tv-file-change-head:hover {
+  background: var(--surface-hover);
+}
+
+/* Filename primary, directory secondary on one line: an absolute path is never
+   printed twice, and the part that distinguishes two files is the part that
+   survives the ellipsis. */
+.tv-file-titles {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+}
+
+.tv-file-name {
+  flex: none;
+  max-width: 60%;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.tv-file-dir {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  /* Ellipsise from the LEFT so the deepest directory survives: the tail of the
+     path (the part nearest the file) is what tells two lookalike trees apart. */
+  direction: rtl;
+  text-align: left;
+}
+
+/* The failed call's own reason, verbatim: a failure with no message is one the
+   user cannot act on. */
+.tool-body-error {
+  margin: 0;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--surface);
+  border-left: 2px solid var(--danger-text);
+  color: var(--danger-text);
+  font-size: 0.75rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* The raw `details` payload, one disclosure per edit row. */
+.tool-raw-details {
+  margin: 0;
+}
+
+/* The host's own LSP diagnostics summary. A component-owned class, NOT `.tv-note`:
+   the guest renderer emits `.tv-note` for its own callouts and styles it
+   (`tool-render.css`: padding, raised background, `color: var(--tv-muted)`), so a
+   rule of mine under that name restyled every guest note inside every tool body —
+   including `--warn`/`--ok` ones — to this app's warning colour. */
+.tv-diag-note {
+  margin: 0;
+  font-size: 0.75rem;
+  color: var(--warning);
+}
+
+.tv-diag-note--err {
+  color: var(--danger-text);
+}
+
+.tv-file-status--failed {
+  color: var(--danger-text);
+}
+
+.tv-file-change-body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 4px 0 4px 2ch;
+  min-width: 0;
+}
+
+.tv-file-chevron {
+  flex: none;
+  color: var(--text-muted);
+}
+
+.tv-file-error {
+  margin: 0;
+  padding: 6px 8px;
+  overflow-x: auto;
+  font-size: 0.75rem;
+  white-space: pre-wrap;
+  color: var(--danger-text);
+  background: var(--surface);
+  border-radius: 6px;
+}
+
+.tv-file-error--err {
+  border-left: 2px solid var(--danger-text);
+}
+
+.tv-file-change--failed .tv-file-path {
+  color: var(--danger-text);
+}
+
+.tv-file-status {
+  flex: none;
+  width: 2ch;
+  font-weight: 600;
+}
+.tv-file-status--added { color: var(--success); }
+.tv-file-status--deleted { color: var(--danger-text); }
+.tv-file-status--renamed,
+.tv-file-status--modified { color: var(--warning); }
+.tv-file-status--binary,
+.tv-file-status--unknown { color: var(--text-muted); }
+
+.tv-file-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.tv-file-counts {
+  flex: none;
+  color: var(--text-muted);
+}
+
+.tv-count-add { color: var(--success); font-variant-numeric: tabular-nums; }
+.tv-count-del { color: var(--danger-text); font-variant-numeric: tabular-nums; }
+
+.tool-diff-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  min-width: 0;
+  font-size: 0.75rem;
+}
+
+/* The raw transport record's scroll bound. The `pre` styling itself is the app's
+   (styles.css); only the overrides this surface needs live here. */
+.tool-raw-output {
+  max-height: 24rem;
+  overflow: auto;
+  margin: 0;
+  font-size: 0.8rem;
+  overscroll-behavior: contain;
+}
+
+/* A failed member's text under a collapsed head, and the tool body's fallback
+   preview: bounded, muted, and independent of the scroller's own padding. */
+/* The collapsed failure preview, base rule included: it moved here from
+   `styles.css` with the rest of the activity surface. `MessageRow` also emits it
+   for an ungrouped tool row, which is why the base rule must stay unscoped — but
+   the file that ships it is this one (this module is imported by the component
+   `MessageRow` renders the card through), so the surface is complete in one place. */
+.tool-output-preview {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 7rem;
+  overflow: hidden;
+  color: var(--text-muted);
+}
+
+.tool-body .tool-output-preview,
+.activity-group > .tool-output-preview {
+  margin: 0 6px 6px;
+  font-size: 0.75rem;
+}
+
+/* The guest renderer's own controls inside a tool body keep the app's 44px
+   minimum, which the guest CSS does not know about. */
+.tool-body .tv-head { min-height: var(--touch-min); }
+.tool-body .tv-expand { min-height: var(--touch-min); }
+
+/* The subagent roll-up: a state glyph, a label, and — when a handler exists — the
+   one tap that opens the Agents panel. Same gutter and type scale as a group head,
+   so the two read as one list. */
+.subagent-row {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  min-width: 0;
+}
+
+.subagent-row-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-height: var(--touch-min);
+  padding: 4px 6px;
+  background: none;
+  border: 0;
+  border-radius: var(--radius-control);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.subagent-row-head:hover {
+  background: var(--surface-hover);
+}
+
+.subagent-row-state {
+  flex: none;
+  width: 1.1em;
+  text-align: center;
+  font-size: 0.85rem;
+  line-height: 1;
+  color: var(--primary);
+}
+
+.subagent-row-label {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.85rem;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.subagent-row-chevron {
+  flex: none;
+  color: var(--text-muted);
+  line-height: 1;
+}
+
+.subagent-row-hint {
+  margin: 0 0 2px;
+  /* Aligned under the label, past the glyph gutter, so the hint reads as the
+     second line of the same row rather than a new one. */
+  padding-left: calc(1.1em + 6px);
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}

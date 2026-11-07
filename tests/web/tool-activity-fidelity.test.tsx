@@ -386,7 +386,7 @@ describe("R07 — per-file drill-down, and the full record behind one more tap",
     // the one part of an edit result a diff cannot show.
     expect(view.container.textContent).toContain("DIAGNOSTIC_SENTINEL");
     expect(view.container.textContent).toContain("2 errors");
-    expect(fileRows(view.container)[0]!.querySelector(".tv-note--err")).not.toBeNull();
+    expect(fileRows(view.container)[0]!.querySelector(".tv-diag-note--err")).not.toBeNull();
   });
 
   it("still reaches the whole raw record — transport text and wire arguments", () => {

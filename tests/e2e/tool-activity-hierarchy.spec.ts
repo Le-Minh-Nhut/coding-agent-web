@@ -98,6 +98,92 @@ test.beforeEach(async ({ request }) => {
   await requireAppServer(request);
 });
 
+/**
+ * A realistic turn on the real screen: the same shape the owner's session has.
+ *
+ * An agent that runs four commands emits four `assistant` messages whose only
+ * content is a `toolCall`, each followed by its result. Those echoes render as
+ * nothing, and they used to split the run into four cards reading `Run 1 command`
+ * — the reported complaint. This asserts the repair end to end: one card, a real
+ * accessible name, an evidence metric, and every operation still one tap away.
+ */
+function assistantCall(id: string, callId: string, toolName: string, args: Record<string, unknown>, timestamp: number) {
+  return {
+    t: "entry",
+    entry: {
+      id,
+      type: "message",
+      message: {
+        role: "assistant",
+        content: [{ type: "toolCall", id: callId, name: toolName, arguments: args }],
+        model: "provider/model",
+        usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { total: 0 } },
+        stopReason: "toolUse",
+        timestamp,
+      },
+    },
+  };
+}
+
+test("a multi-command turn is one card, with a state word and an evidence metric", async ({ page }) => {
+  const fixture = harnessFixture();
+  const host = await installMockCollabHost(page, { conversationId: fixture.seededConversationId });
+  await openSeededConversation(page);
+  await host.send(welcomeFrame(false));
+
+  // Four commands, each requested by its own assistant message — the shape that
+  // produced four `Run 1 command` cards.
+  for (let index = 0; index < 4; index++) {
+    await host.send(assistantCall(`call-msg-${index}`, `tc-${index}`, "bash", { command: `pnpm step-${index}` }, 10 + index * 2) as never);
+    await host.send({
+      t: "entry",
+      entry: {
+        id: `tr-${index}`,
+        type: "message",
+        message: {
+          role: "toolResult",
+          toolCallId: `tc-${index}`,
+          toolName: "bash",
+          // The last one carries a real runner summary: that is the only evidence
+          // that may become a `passed` claim.
+          content: index === 3
+            ? [{ type: "text", text: " Test Files  1 failed (1)\n      Tests  3 failed | 15 passed (18)" }]
+            : [{ type: "text", text: `step ${index} ok` }],
+          isError: false,
+          timestamp: 11 + index * 2,
+        },
+      },
+    } as never);
+  }
+
+  const groups = page.locator(".activity-group");
+  await expect(groups).toHaveCount(1);
+  const head = groups.first().locator(".activity-group-head");
+  await expect(head).toContainText("Run 4 commands");
+  // The runner's own numbers, and the state escalated by them: the wire said the
+  // call was clean, and a green card would have been a lie.
+  await expect(head.locator(".activity-group-metric")).toHaveText("3 failed | 15 passed");
+  await expect(groups.first()).toHaveClass(/activity-group--failed/);
+  // Failure is announced in words, not only by the glyph's colour.
+  await expect(head).toHaveAttribute("aria-expanded", "false");
+  await expect(head).toHaveAttribute("aria-label", /^Failed: Run 4 commands,/);
+
+  // Every operation is still reachable, in order, with its own identity.
+  await head.click();
+  await expect(groups.first().locator(".tool-row")).toHaveCount(4);
+  await expect(groups.first().locator(".tool-row-name").first()).toHaveText("bash");
+});
+
+/**
+ * The subagent roll-up's own wiring is the transcript worker's to make:
+ * `SubagentActivityRow` takes the count and an `onOpenAgents` handler, but
+ * `TranscriptList` (in `components/MessageRow.tsx`) does not yet read
+ * `transcript.agents` or accept that prop, and this workstream does not own that
+ * file. The component's behaviour is pinned in
+ * `tests/web/tool-activity-card.test.tsx`; an E2E test here would assert a row
+ * that nothing mounts yet.
+ */
+
 test("an edit expands to a flat file list, and the patch stays out of the conversation", async ({ page }) => {
   await openEditRow(page);
 

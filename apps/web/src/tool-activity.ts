@@ -42,7 +42,19 @@ export type ActivityState = "running" | "failed" | "completed";
 
 export interface ActivityGroup {
   category: ActivityCategory;
-  /** Rows in this category, in transcript order. */
+  /**
+   * The group's rows in transcript order.
+   *
+   * Usually every row is a tool row. It may also contain the **assistant call
+   * echoes** the renderer draws nothing for (see `isCallEcho`): an assistant
+   * message whose only content is `toolCall` blocks already represented by their
+   * result rows renders as an empty element, so it is folded in here rather than
+   * breaking the run in two. They are carried — never dropped — so the fold is
+   * lossless: `flattenActivity(groupActivity(rows))` is `rows`.
+   *
+   * Anything that consumes this list for a *count* must use `toolMembers`, which
+   * excludes the echoes.
+   */
   rows: ToolActivityRow[];
   state: ActivityState;
 }
@@ -77,22 +89,68 @@ export type ActivityEntry =
   | { kind: "row"; row: ToolActivityRow };
 
 /**
+ * Whether an assistant row draws nothing at all, so it must not split a run.
+ *
+ * This is the fold's whole justification and its only licence. A turn that calls
+ * five tools is five assistant messages, each carrying a `toolCall` block and no
+ * prose; `MessageRow` renders those blocks to nothing once the result row for the
+ * same call is on screen (`represented`, and its `renderTranscriptBlock` owns that
+ * rule — the three conditions here mirror it deliberately, so the fold can only
+ * ever absorb a row the renderer already draws as an empty element). Measured on
+ * the owner's 4,806-row session: 1,002 assistant rows are like this, and they
+ * split one command run into 2,163 separate cards.
+ *
+ * The row is *carried*, never dropped: it stays in `ActivityGroup.rows` so the
+ * fold stays lossless, and it is never asked for a count (see `toolMembers`).
+ * Anything visible — prose, an unrepresented call, a notice, an image — is not a
+ * suppression echo and still breaks the run.
+ */
+function isSuppressedCallEcho(row: ToolActivityRow, represented: ReadonlySet<string>): boolean {
+  if (row.role !== "assistant") return false;
+  const blocks = row.blocks ?? [];
+  // No blocks: the renderer draws `markdown(text)`, so only empty text is blank.
+  if (blocks.length === 0) return row.text.trim() === "";
+  let calls = 0;
+  for (const block of blocks) {
+    if (block.type === "toolCall") {
+      // An unrepresented call, or one whose arguments are not a record, is the
+      // only record of itself and must render (`MessageRow.renderTranscriptBlock`).
+      if (block.id === undefined || !represented.has(block.id) || !isRecord(block.arguments)) return false;
+      calls += 1;
+      continue;
+    }
+    if (block.type === "text" && block.text.trim() === "") continue;
+    return false;
+  }
+  return calls > 0;
+}
+
+/**
  * Fold a transcript into renderable entries: each contiguous run of tool rows
  * becomes one collapsed group, everything else passes through untouched.
  *
  * Only *contiguous* runs are grouped, so activity never appears to belong to a
- * turn across a user or assistant boundary it did not belong to.
+ * turn across a user or assistant boundary it did not belong to. The one row that
+ * does not break a run is the suppression echo above — a row that renders nothing,
+ * which is why the run it sits inside is still one run to the reader.
  */
 export function groupActivity(rows: readonly ToolActivityRow[]): ActivityEntry[] {
+  const represented = new Set<string>();
+  for (const row of rows) {
+    if (row.role === "tool" && typeof row.toolCallId === "string") represented.add(row.toolCallId);
+  }
   const entries: ActivityEntry[] = [];
   let run: ToolActivityRow[] = [];
   const flush = () => {
     if (run.length === 0) return;
-    for (const group of splitByCategory(run)) entries.push({ kind: "group", group });
+    const { groups, leading } = splitByCategory(run);
+    for (const group of groups) entries.push({ kind: "group", group });
+    // Echoes no tool row ever followed keep their own slot, so `flatten` is `rows`.
+    for (const row of leading) entries.push({ kind: "row", row });
     run = [];
   };
   for (const row of rows) {
-    if (row.role === "tool") run.push(row);
+    if (row.role === "tool" || isSuppressedCallEcho(row, represented)) run.push(row);
     else {
       flush();
       entries.push({ kind: "row", row });
@@ -102,30 +160,342 @@ export function groupActivity(rows: readonly ToolActivityRow[]): ActivityEntry[]
   return entries;
 }
 
-function splitByCategory(rows: readonly ToolActivityRow[]): ActivityGroup[] {
+/** The tool rows of a group: what a count, a state or a summary may read. */
+export function toolMembers(group: ActivityGroup): ToolActivityRow[] {
+  return group.rows.filter((row) => row.role === "tool");
+}
+
+function splitByCategory(rows: readonly ToolActivityRow[]): { groups: ActivityGroup[]; leading: ToolActivityRow[] } {
   const groups: ActivityGroup[] = [];
+  const leading: ToolActivityRow[] = [];
   for (const row of rows) {
+    // An echo has no category of its own (`categoryOf(undefined)` is `other`), so it
+    // joins the preceding segment, or waits for the next one: it can never open one.
+    if (row.role !== "tool") {
+      const last = groups[groups.length - 1];
+      if (last) last.rows.push(row);
+      else leading.push(row);
+      continue;
+    }
     const category = categoryOf(row.toolName);
     const last = groups[groups.length - 1];
     if (last && last.category === category) last.rows.push(row);
-    else groups.push({ category, rows: [row], state: "completed" });
+    else groups.push({ category, rows: [...leading.splice(0), row], state: "completed" });
   }
   for (const group of groups) {
-    group.state = group.rows.some((row) => row.isRunning)
+    const members = toolMembers(group);
+    group.state = members.some((row) => row.isRunning)
       ? "running"
-      : group.rows.some((row) => row.isError)
+      : members.some((row) => row.isError)
         ? "failed"
         : "completed";
   }
-  return groups;
+  return { groups, leading };
 }
 
+
+/** Every row the entries carry, back in transcript order. The fold is lossless. */
+export function flattenActivity(entries: readonly ActivityEntry[]): ToolActivityRow[] {
+  const rows: ToolActivityRow[] = [];
+  for (const entry of entries) {
+    if (entry.kind === "group") rows.push(...entry.group.rows);
+    else rows.push(entry.row);
+  }
+  return rows;
+}
 
 export function stateGlyph(state: ActivityState): string {
   return state === "running" ? "◌" : state === "failed" ? "✕" : "✓";
 }
 
+/** The word the glyph stands for, for a screen reader's accessible name. */
+export function stateWord(state: ActivityState): string {
+  return state === "running" ? "Running" : state === "failed" ? "Failed" : "Completed";
+}
+
+/* ------------------------------------------------------------------ */
+/* Evidence                                                           */
+/* ------------------------------------------------------------------ */
+
+/**
+ * A test-runner summary the tool's own output printed.
+ *
+ * Parsed from the result text with the narrowest patterns that still cover the
+ * runners this machine actually uses, and only for tools that *execute* something
+ * (`command`/`test`/`other` — measured: bash 165, wait 7, eval 4 in one session).
+ * A `read` result can also contain a test log, and reporting "112 passed" for a
+ * file read would be a claim about a run that never happened, so those are not
+ * parsed at all.
+ *
+ * Three controls, each of which rejects a different fabrication:
+ *
+ *  1. **Whole-line anchor with a count.** The line must *start* with `Tests`
+ *     (vitest/jest) or be an `=== … in 0.52s ===` banner (pytest), and must carry
+ *     `<digits> passed|failed`. Prose ("the tests passed"), a JSON blob
+ *     (`{"passed": 3}`) and a heading ("Tests failing since Tuesday") never match.
+ *  2. **Structural total.** A vitest `Tests` line always ends with `(<total>)`,
+ *     and `passed + failed` can never exceed it (skipped accounts for the rest).
+ *     A prose line that happens to start with "Tests" has no such total. Measured
+ *     on one real session: 180/180 genuine `Tests` lines carry it.
+ *  3. **Bounded tail.** Only the last `TAIL_LINES` lines are examined, scanned
+ *     backwards without splitting the string. A 5 MiB result costs microseconds
+ *     instead of the 21 ms a full `split("\n")` measured — and the summary a
+ *     runner prints is the last thing it prints, so the tail is where the truth
+ *     is anyway.
+ *
+ * Documented ceiling: a `bash` call that merely `cat`s or `grep`s an OLD test log
+ * still matches, because its output really is a runner summary — but it is not
+ * this session's run. Telling those apart would need an analysis of the command
+ * string, which this module refuses to do (guessing a command's meaning is the
+ * inference rule 1 in the file header forbids). `ponytail:` the ceiling is "the
+ * tool's own output", and the metric is worded as a count, never as "passed".
+ */
+export interface TestSummary {
+  passed: number;
+  failed: number;
+  /** The line the numbers came from, verbatim, so a reader can check the claim. */
+  source: string;
+}
+
+const VITEST_LINE = /^\s*Tests\s+(.+)$/;
+const PYTEST_LINE = /^\s*=+\s*(.*\b(?:passed|failed|error|errors)\b.*?)\s+in\s+[\d.]+s\s*=+\s*$/;
+const COUNT = /(\d+)\s+(passed|failed|errors?)\b/g;
+const TOTAL = /\((\d+)\)\s*$/;
+/** How far back from the end of a result a summary may sit. */
+const TAIL_LINES = 400;
+
+function countsFrom(line: string): { passed: number; failed: number } | null {
+  let passed = 0;
+  let failed = 0;
+  let seen = false;
+  COUNT.lastIndex = 0;
+  for (let match = COUNT.exec(line); match !== null; match = COUNT.exec(line)) {
+    const value = Number.parseInt(match[1]!, 10);
+    if (match[2] === "passed") passed += value;
+    else failed += value;
+    seen = true;
+  }
+  return seen ? { passed, failed } : null;
+}
+
+/** One line's claim, or `null` when the line is not a runner's own summary. */
+function summaryFromLine(raw: string): { passed: number; failed: number } | null {
+  const vitest = VITEST_LINE.exec(raw);
+  if (vitest !== null) {
+    const body = vitest[1]!;
+    const counts = countsFrom(body);
+    if (counts === null) return null;
+    // Without a total the line is not a runner's summary shape; without room under
+    // the total the numbers contradict each other. Either way: say nothing.
+    const total = TOTAL.exec(body);
+    if (total === null || counts.passed + counts.failed > Number.parseInt(total[1]!, 10)) return null;
+    return counts;
+  }
+  if (PYTEST_LINE.test(raw)) return countsFrom(raw);
+  return null;
+}
+
+export function testSummaryOf(row: ToolActivityRow, category: ActivityCategory): TestSummary | null {
+  if (category !== "command" && category !== "test" && category !== "other") return null;
+  // The newest summary is read first: a result holding two runs (a retry) must
+  // report the run that actually finished last, not a stale one.
+  const text = row.toolResult === undefined ? row.text : resultTextOf(row);
+  let end = text.length;
+  for (let examined = 0; end > 0 && examined < TAIL_LINES; examined += 1) {
+    const start = text.lastIndexOf("\n", end - 1) + 1;
+    const raw = text.slice(start, end);
+    const trimmed = raw.trim();
+    if (trimmed !== "") {
+      const counts = summaryFromLine(raw);
+      if (counts !== null) return { ...counts, source: trimmed };
+    }
+    end = start - 1;
+  }
+  return null;
+}
+
+/** The result's text blocks joined, or the row's transport text when it has none. */
+function resultTextOf(row: ToolActivityRow): string {
+  const content = row.toolResult?.content;
+  if (content === undefined || content.length === 0) return row.text;
+  return content.map((block) => block.text ?? "").join("\n");
+}
+
+/**
+ * Argument keys that name a file.
+ *
+ * Exactly the set the guest `read` renderer itself reads (`tools/read.tsx:72`:
+ * `str(args.path) ?? str(args.file_path)`) plus the `filePath` spelling OMP uses
+ * elsewhere. A key no renderer reads is not a path this app can claim to know.
+ */
+const PATH_ARG_KEYS = ["path", "file_path", "filePath"] as const;
+/** `details` keys that name the file a call resolved to (`ReadToolDetails.resolvedPath`). */
+const PATH_DETAIL_KEYS = ["resolvedPath", "path", "filePath"] as const;
+
+/**
+ * The file one row provably names, or `null`.
+ *
+ * "Provably" is the whole point: the path must come from the call's own arguments
+ * (live `toolArgs`, or the paired request block) or from the result's structured
+ * `details`. A path is never guessed from the result text, so a row that names no
+ * file is counted as a call and never as a file.
+ */
+export function provenPathOf(row: ToolActivityRow, paired: Map<string, Record<string, unknown>>): string | null {
+  const args = argumentsFor(row, paired);
+  for (const key of PATH_ARG_KEYS) {
+    const value = str(args[key]);
+    if (value !== null) return value;
+  }
+  const details = row.toolResult?.details;
+  if (isRecord(details)) {
+    for (const key of PATH_DETAIL_KEYS) {
+      const value = str(details[key]);
+      if (value !== null) return value;
+    }
+  }
+  return null;
+}
+
+/**
+ * What a group's own records prove, separated so a label can be printed only from
+ * the part that backs it. Nothing here is estimated.
+ */
+export interface GroupEvidence {
+  /** Tool rows, not echoes. */
+  toolCalls: number;
+  /** Distinct files named by real arguments/details; `0` when none is proven. */
+  distinctPaths: number;
+  /** Tool rows that named no provable file. */
+  unprovenPaths: number;
+  /** The runner's own summary, when the output contained one. */
+  test: TestSummary | null;
+  /** Rows the wire flagged as failed. */
+  failed: number;
+  /** Rows still running. */
+  running: number;
+}
+
+export function groupEvidence(group: ActivityGroup, paired: Map<string, Record<string, unknown>>): GroupEvidence {
+  const members = toolMembers(group);
+  const paths = new Set<string>();
+  let unprovenPaths = 0;
+  let test: TestSummary | null = null;
+  let failed = 0;
+  let running = 0;
+  for (const row of members) {
+    if (row.isError === true) failed += 1;
+    if (row.isRunning === true) running += 1;
+    const path = provenPathOf(row, paired);
+    if (path === null) unprovenPaths += 1;
+    else paths.add(path);
+    if (test !== null && test.failed > 0) continue;
+    // The WORST summary in the group wins, not the first. Taking the first left a
+    // hole: a group `[clean run, failing run]` printed `15 passed` with a `✓`
+    // glyph while a later member's own output said `3 failed`. The metric and the
+    // state both read this one value, so they cannot contradict each other. Among
+    // equally clean summaries the newest wins, because it is the latest evidence.
+    const summary = testSummaryOf(row, categoryOf(row.toolName));
+    if (summary !== null) test = summary;
+  }
+  return { toolCalls: members.length, distinctPaths: paths.size, unprovenPaths, test, failed, running };
+}
+
+/**
+ * The group's state, escalated by proven failures.
+ *
+ * The wire's own flag leads: it is the authoritative statement that the call
+ * failed. But a test runner's own output saying `3 failed` is *also* a proven
+ * failure, and this machine's journals contain 49 groups whose only failure
+ * evidence is that summary text (the wire flagged those results `isError: false`).
+ * A card painted green there would be the exact lie this module exists to
+ * prevent, so the worst member wins and a summary-proven failure escalates.
+ *
+ * The metric and this verdict read the SAME `evidence.test` value, so a `✓` head
+ * can never sit above a metric that says `3 failed` — measured across all 1,557
+ * groups of a real session: 0 disagreements.
+ */
+export function groupState(group: ActivityGroup, evidence: GroupEvidence): ActivityState {
+  if (evidence.running > 0 || group.state === "running") return "running";
+  if (evidence.failed > 0 || group.state === "failed") return "failed";
+  if (evidence.test !== null && evidence.test.failed > 0) return "failed";
+  return "completed";
+}
+
+/** The collapsed head's wording: a label from evidence, plus an optional metric. */
+export interface GroupSummary {
+  label: string;
+  /** A secondary line (e.g. `3 failed | 15 passed`), or `null` when nothing is proven. */
+  metric: string | null;
+}
+
+/**
+ * The collapsed head's label and metric, each backed by the evidence above.
+ *
+ * `read` is the one category whose *label* moves, because its count is a file
+ * count: it prints the distinct proven paths, and says "calls" — never "files" —
+ * for a group that proved no path at all. Edit-family groups keep the operation
+ * label (`categoryLabel`) and report real diff counts separately, because an edit
+ * call is not a changed file.
+ */
+export function groupSummary(group: ActivityGroup, evidence: GroupEvidence): GroupSummary {
+  const metric = evidence.test === null
+    ? null
+    : evidence.test.failed > 0
+      ? `${evidence.test.failed} failed | ${evidence.test.passed} passed`
+      : `${evidence.test.passed} passed`;
+  if (group.category !== "read") return { label: categoryLabel(group.category, evidence.toolCalls), metric };
+  const files = `${evidence.distinctPaths} file${evidence.distinctPaths === 1 ? "" : "s"}`;
+  const label = evidence.distinctPaths > 0
+    ? `Read ${files}`
+    : `Read ${evidence.toolCalls} call${evidence.toolCalls === 1 ? "" : "s"}`;
+  const extra = [
+    ...(evidence.distinctPaths > 0 && evidence.toolCalls > evidence.distinctPaths ? [`${evidence.toolCalls} calls`] : []),
+    ...(evidence.unprovenPaths > 0 ? [`${evidence.unprovenPaths} path unverified`] : []),
+  ];
+  return { label, metric: [...(metric === null ? [] : [metric]), ...extra].join(" · ") || null };
+}
+
+/* ------------------------------------------------------------------ */
+/* Subagents                                                          */
+/* ------------------------------------------------------------------ */
+
+/** The subset of a host agent snapshot this module reads. */
+export interface AgentStatusLike {
+  kind: string;
+  status: string;
+}
+
+/**
+ * How many subagents the host reports as working right now.
+ *
+ * The same test the app already makes in its own Stop confirmation
+ * (`ConversationView.tsx:1593`): `kind === "sub"` and `status === "running"`. It
+ * is the host's own snapshot (`HostFrame.agents`), which is the authoritative
+ * source the Agents panel renders — nothing is inferred from a tool's output, and
+ * the `task` tool's `details.progress` is deliberately *not* used: a census of
+ * 1,102 `task` results across the session journals on this machine found its
+ * `status` field `"pending"` 1,458 times out of 1,458 and `results` always empty,
+ * so it can prove that agents were spawned but never that they are working.
+ */
+export function runningSubagents(agents: readonly AgentStatusLike[]): number {
+  let running = 0;
+  for (const agent of agents) if (agent.kind === "sub" && agent.status === "running") running += 1;
+  return running;
+}
+
+/** `2 subagents working` / `1 subagent working`; the state glyph carries the `○`. */
+export function subagentLabel(count: number): string {
+  return `${count} subagent${count === 1 ? "" : "s"} working`;
+}
+
 export function categoryLabel(category: ActivityCategory, count: number): string {
+  // A group with no tool calls is not reachable today: an echo cannot open a
+  // group (`isSuppressedCallEcho` requires a result row that is already
+  // represented, and this is only true for `role === "assistant"` rows) and
+  // `toolMembers` therefore never empties a group that already exists. Guarded
+  // anyway so a future fold cannot print "Run 0 commands": a zero count has no
+  // honest operation noun, so it says what is true and nothing per-category.
+  if (count <= 0) return "No operations";
   const plural = count === 1 ? "" : "s";
   switch (category) {
     case "read": return `Read ${count} file${plural}`;
