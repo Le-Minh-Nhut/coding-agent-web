@@ -9,6 +9,7 @@ import {
   welcomeFrame,
   type MockCollabHost,
 } from "./fixture.js";
+import { revealRow } from "./perf-scroll-harness.js";
 
 /**
  * HIST-01..15: conversation history synchronisation, driven through a real browser
@@ -115,6 +116,17 @@ test("HIST-04: multi-batch chunks arrive without duplicates and keep live update
   await host.send({ t: "entry", entry: createUserMessageEntry("live-1", "live during snapshot", 9_999) });
   for (const chunk of chunks.slice(2)) await host.send(chunk);
 
+  /**
+   * Wait for the transcript to settle, then assert the exact set.
+   *
+   * The mock host delivers frames over the socket, so "I sent every chunk" is not the same
+   * instant as "the app has rendered them": reading the DOM on the next round trip can
+   * land while the window is still empty (measured: `Received: 0` for this exact flow,
+   * against `21` when the same test was re-read one frame later). The claim is unchanged —
+   * no duplicated and no lost rows — so it polls for the count a correct build reaches
+   * rather than weakening the number.
+   */
+  await expect.poll(() => transcriptTexts(page).then((rows) => rows.length)).toBe(21);
   const texts = await transcriptTexts(page);
   expect(texts.length, "no row may be duplicated or lost").toBe(21);
   expect(texts[20], "the live row belongs at the tail").toContain("live during snapshot");
@@ -181,6 +193,10 @@ test("HIST-08: switching conversations does not leak one transcript into another
   const { host } = await openWithHost(page);
   await host.send({ t: "welcome", proto: 3, header: { type: "session", id: "native-1", cwd: "/workspace", timestamp: "2026-01-01T00:00:00Z" }, state: { isStreaming: false, queuedMessageCount: 0, cwd: "/workspace", participants: [] }, agents: [], entryCount: 4 });
   for (const chunk of snapshot(4, 1)) await host.send(chunk);
+  // Same settle rule as HIST-04: the frames are asynchronous, so the four rows are
+  // polled for rather than read on the next round trip (measured: an immediate read can
+  // see the empty window).
+  await expect.poll(() => transcriptTexts(page).then((rows) => rows.length)).toBe(4);
   expect((await transcriptTexts(page)).length).toBe(4);
 
   // Navigate away and back: the previous conversation's rows must not survive into
@@ -271,7 +287,32 @@ test("HIST-14: a large, slow snapshot progresses without being failed on total d
     if (index === 0) await expect(page.getByText(LOADING_COPY)).toBeVisible();
   }
   await expect(page.getByText(LOADING_COPY)).toBeHidden();
-  expect((await transcriptTexts(page)).length).toBe(300);
+  /**
+   * The claim is "the whole 300-entry history is there and readable", not "300 cards are
+   * in the document". A windowed transcript mounts the rows near the reader, so counting
+   * `.message-card` measures the window size, not the history — the previous assertion
+   * would have failed for a correct build and passed for one that mounted everything and
+   * dropped the rest.
+   *
+   * Two honest halves instead: the transcript DECLARES the full size, and a specific
+   * early row can actually be read once the reader goes to it.
+   */
+  const declared = await page.evaluate(() => {
+    const box = document.querySelector(".messages-scroll [aria-setsize]");
+    return box === null ? null : Number(box.getAttribute("aria-setsize"));
+  });
+  expect(declared, "the transcript must declare the complete 300-entry history").toBe(300);
+  expect((await transcriptTexts(page)).length, "at least the mounted window must be readable").toBeGreaterThan(0);
+  /**
+   * Read an early row through the path a reader would use.
+   *
+   * Writing `scrollTop = 0` here does not work any more: the view is holding the tail, so
+   * the pin immediately restores the bottom and the assertion was watching a scroll that
+   * the app correctly overruled (measured: the transcript still showed rows 267-299).
+   * `revealRow` walks the document the way a reader does, which is the behaviour this test
+   * is actually about — the history is complete and every part of it is reachable.
+   */
+  await revealRow(page, "prompt number 0", 60_000);
 });
 
 test("HIST-15: malformed entries do not take valid rows down with them", async ({ page }) => {
@@ -288,6 +329,9 @@ test("HIST-15: malformed entries do not take valid rows down with them", async (
     final: true,
   });
 
+  // Settle first, for the same reason as HIST-04: the chunk is delivered
+  // asynchronously, so an immediate read can see the pre-render window.
+  await expect.poll(() => transcriptTexts(page).then((rows) => rows.length)).toBeGreaterThan(1);
   const texts = await transcriptTexts(page);
   expect(texts.some((text) => text.includes("good row one")), "a valid row must survive").toBe(true);
   expect(texts.some((text) => text.includes("good row two")), "a valid row must survive").toBe(true);

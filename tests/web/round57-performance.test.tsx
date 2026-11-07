@@ -78,7 +78,14 @@ describe("MessageRow memoization on the represented set", () => {
   });
 });
 
-describe("TranscriptList keeps every row in the document", () => {
+/**
+ * The caller-supplied-scroller path is the windowed one; without a scroller the list
+ * still mounts every row, which is what `AgentChat` and these component tests rely on.
+ * The window's own bounds and its reachability guarantees are proven in
+ * `transcript-window.test.ts` and `transcript-window-component.test.tsx`; this block
+ * keeps proving the unwindowed contract exactly as before.
+ */
+describe("TranscriptList without a scroller keeps every row in the document", () => {
   it("renders one element per row plus none dropped, across a large list", () => {
     const rows: DisplayMessage[] = Array.from({ length: 300 }, (_, index) => row({ id: `u-${index}`, text: `message ${index}` }));
     render(<TranscriptList rows={rows} />);

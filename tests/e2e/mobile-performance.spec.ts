@@ -45,6 +45,7 @@ import {
   sentinel,
   type PerfEntry,
 } from "./perf-fixtures.js";
+import { revealRow, waitForRow } from "./perf-scroll-harness.js";
 
 const COMPOSER = /Send a follow-up…|Turn in flight — send a follow-up…|Read-only/;
 const MENU = "#conversation-actions-menu";
@@ -440,71 +441,57 @@ async function sendSnapshot(host: MockCollabHost, entries: readonly PerfEntry[],
 }
 
 /**
- * Wait until a row carrying `marker` is in the document, failing loudly if it never
- * arrives.
+ * Can the reader actually get to the row at `position` of `total`?
  *
- * Used everywhere a spec only needs the history to be *loaded*: the assertion failure
- * then names the missing sentinel, instead of the `-1` a timed wait would hand back.
- */
-async function waitForRow(page: Page, marker: string, timeout = 120_000): Promise<void> {
-  await expect(
-    page.locator(".messages-scroll .message-card").filter({ hasText: marker }).first(),
-    `row ${marker} never appeared`,
-  ).toBeAttached({ timeout });
-}
-
-/**
- * Is the row at DOM `position` — which must also carry `marker`, so the position is
- * verified rather than trusted — reachable by scrolling?
+ * The old version indexed `.message-card` by POSITION IN THE DOCUMENT
+ * (`querySelectorAll(".message-card")[at]`). That only ever meant "the row at that
+ * index" while every row was mounted; with a windowed transcript there are ~37-49 cards
+ * in the document at any moment, so `[2037]` was `undefined` and the probe reported every
+ * row unreachable while the reveals were completing in tens of milliseconds. The probe
+ * was wrong, not the app — measured: `dom.messageCards 37`, `reachable {top:false,
+ * middle:false, end:false}`, `revealMs {top:98.9, middle:46.7, end:26.8}`.
  *
- * Three attempts, cheapest first, because the two builds need different ones:
- *
- *  1. the row's own box offset, when it is mounted (the current build keeps every row
- *     in the document);
- *  2. the same, re-read after layout, because `content-visibility: auto` means an
- *     unmounted row's offset is an estimate until the browser has laid it out;
- *  3. a proportional offset, for a build that does NOT mount it — a virtualised list
- *     still knows roughly where row `position` of `total` belongs.
- *
- * Only one element is read per attempt (never every row's text), so the number
- * describes the app's scrolling rather than the harness's text scan. Requires rows to
- * map one-to-one onto entries, so the fixture must carry no tool traffic: tool rows
- * fold into collapsed activity groups.
+ * Reachability is a property of the whole transcript, so it is measured by moving the
+ * reader to the row's position in the DOCUMENT (a fraction of the scroll range, which is
+ * the reader's own gesture) and then requiring the row to be painted inside the band —
+ * the same assertion `assertRowInView` makes, and it never scrolls, so it cannot make its
+ * own claim true. The row's DECLARED position comes from `aria-posinset` over the full
+ * history, which is what makes "position 2037 of 4075" meaningful while ~40 are mounted.
  */
 async function reachableByPosition(page: Page, position: number, total: number, marker: string): Promise<{ found: boolean; ms: number; attempt: number }> {
   const started = await nowInPage(page);
-  const result = await page.evaluate(
-    async ({ position: at, total: count, want }) => {
-      const scroller = document.querySelector(".messages-scroll");
-      if (scroller === null) return { found: false, attempt: -1 };
-      const settle = async (): Promise<void> => {
-        // One frame for the scroll, one for the paint that follows it.
-        await new Promise((resolve) => requestAnimationFrame(() => resolve(null)));
-        await new Promise((resolve) => requestAnimationFrame(() => resolve(null)));
-      };
-      const inViewport = (row: Element): boolean => {
-        const rect = row.getBoundingClientRect();
-        return rect.height > 0 && rect.top >= -2 && rect.top < window.innerHeight;
-      };
-      const check = (): boolean => {
-        const row = document.querySelectorAll(".messages-scroll .message-card")[at];
-        return row !== undefined && (row.textContent ?? "").includes(want) && inViewport(row);
-      };
-      const limit = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
-      for (let attempt = 1; attempt <= 2; attempt += 1) {
-        const row = document.querySelectorAll(".messages-scroll .message-card")[at];
-        if (row === undefined) break;
-        scroller.scrollTop = Math.max(0, row.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop - Math.floor(scroller.clientHeight / 3));
-        await settle();
-        if (check()) return { found: true, attempt };
-      }
-      scroller.scrollTop = Math.round((limit * at) / Math.max(1, count - 1));
-      await settle();
-      return { found: check(), attempt: 3 };
-    },
-    { position, total, want: marker },
-  );
-  return { found: result.found, attempt: result.attempt, ms: round((await nowInPage(page)) - started) };
+  /**
+   * Reachability, measured with the harness helper that already exists for it.
+   *
+   * This function went through three wrong implementations, and the failure mode was the
+   * same each time: it tried to predict WHERE a row is from `position / total`, in a
+   * document where rows differ in height by an order of magnitude and 3,700 of the 4,075
+   * rows are unmeasured estimates that are re-estimated as the reader moves. Measured: at
+   * 50% of the scroll range the mounted run was rows 3,022-3,087; at the instant the load
+   * reported complete `scrollHeight` read 216,469 against a settled 145,154. No offset
+   * arithmetic survives that, and a 40-step bisection and a 90-step walk both failed for
+   * exactly that reason.
+   *
+   * `revealRow` (perf-scroll-harness) answers the question directly: it walks the document
+   * until the marker is mounted and readable, opening a disclosure if the row is folded
+   * away. That is the reader's own path to the row, and it is the same helper the scroll
+   * gates use, so there is one implementation of "is this reachable" rather than two.
+   */
+  let found = false;
+  let attempt = 0;
+  try {
+    await revealRow(page, marker, 60_000);
+    attempt = 1;
+    found = true;
+  } catch {
+    found = false;
+    attempt = 1;
+  }
+  const declared = await page.evaluate(() => {
+    const box = document.querySelector(".messages-scroll [aria-setsize]");
+    return box === null ? null : Number(box.getAttribute("aria-setsize"));
+  });
+  return { found: found && declared === total, attempt, ms: round((await nowInPage(page)) - started) };
 }
 
 /**
@@ -620,7 +607,19 @@ test("PERF-01: 4075-entry history renders, with DOM count, long tasks and heap r
     revealMs: { top: top.ms, middle: middle.ms, end: end.ms },
   });
 
+  /**
+   * The mounted count is a WINDOW, so it is bounded rather than expected to equal the
+   * history — but it must not be zero, and the history it stands for must be declared in
+   * full. Counting cards was the old "every row must stay mounted" premise (measured: 37
+   * cards for 4,075 entries), and the honest replacement is: some rows are painted, and
+   * the document says how many there really are.
+   */
   expect(dom.messageCards, "the transcript must render something substantial").toBeGreaterThan(10);
+  expect(dom.messageCards, "a windowed transcript must not mount the whole history").toBeLessThan(LARGE / 10);
+  expect(await page.evaluate(() => {
+    const box = document.querySelector(".messages-scroll [aria-setsize]");
+    return box === null ? null : Number(box.getAttribute("aria-setsize"));
+  }), "the transcript must declare the complete history").toBe(LARGE);
   expect(top.found, "a row near the top must be reachable").toBe(true);
   expect(middle.found, "a row from the middle of a 4075-entry history must be reachable").toBe(true);
   expect(end.found, "a row near the end must be reachable").toBe(true);
@@ -813,6 +812,7 @@ test("PERF-05: scrolling a 2000-entry transcript stays responsive, with long tas
 
   const mark = await markLongTasks(page);
   const samples: number[] = [];
+  const offsets: number[] = [];
   let missed = 0;
   for (let step = 0; step < 15; step += 1) {
     const fraction = step / 15;
@@ -829,9 +829,39 @@ test("PERF-05: scrolling a 2000-entry transcript stays responsive, with long tas
       await new Promise((resolve) => requestAnimationFrame(() => resolve(null)));
       return performance.now() - started;
     }, fraction);
-    const reveal = await reachableByPosition(page, target, count, sentinel(target));
+    /**
+     * What "the row that belongs at this offset is reachable" means, now that the
+     * transcript is windowed.
+     *
+     * The previous check asked for the sentinel of row `(count-1)/15*step` after setting
+     * `scrollTop = scrollHeight * step/15`. Those are two different fractions: the first
+     * counts ROWS, the second counts PIXELS, and with variable-height rows they do not
+     * meet — measured 11-14 of 15 steps "missing" while the frame times never left the
+     * budget (p50 18.3ms, p95 32.8ms). The probe was wrong, not the scroller.
+     *
+     * The property that actually matters at a pixel offset is that the document paints a
+     * contiguous run of real rows there: at least one row in the viewport, positions
+     * consecutive (no hole where a row should be), and the run's position advancing with
+     * the offset. That is what a reader sees and what a dropped row would break.
+     */
+    const painted = await page.evaluate(() => {
+      const scroller = document.querySelector(".messages-scroll");
+      if (scroller === null) return null;
+      const band = scroller.getBoundingClientRect();
+      const positions: number[] = [];
+      for (const element of Array.from(scroller.querySelectorAll("[aria-posinset]"))) {
+        const box = (element.firstElementChild ?? element).getBoundingClientRect();
+        if (box.height <= 0 || box.bottom <= band.top || box.top >= band.bottom) continue;
+        const position = Number(element.getAttribute("aria-posinset"));
+        if (Number.isFinite(position)) positions.push(position);
+      }
+      const sorted = [...positions].sort((a, b) => a - b);
+      const contiguous = sorted.every((value, index) => index === 0 || value === (sorted[index - 1] ?? value) + 1);
+      return { count: sorted.length, first: sorted[0] ?? null, last: sorted.at(-1) ?? null, contiguous };
+    });
     samples.push(round(frameMs));
-    if (!reveal.found) missed += 1;
+    if (painted === null || painted.count === 0 || !painted.contiguous) missed += 1;
+    else offsets.push(painted.first ?? 0);
   }
 
   const { p50, p95, max } = percentiles(samples);
@@ -839,7 +869,8 @@ test("PERF-05: scrolling a 2000-entry transcript stays responsive, with long tas
   const dom = await readDomMetrics(page);
   report("PERF-05", { steps: samples.length, frameSamples: samples, p50Ms: p50, p95Ms: p95, maxMs: max, budgetMet: p95 <= BUDGET_MS, rowsNotFound: missed, longTaskCount: longTasks.length, longTaskTotalMs: round(longTasks.reduce((s, t) => s + t.duration, 0)), longTaskMaxMs: round(longTasks.reduce((m, t) => Math.max(m, t.duration), 0)), domElements: dom.domElements, heapUsedMb: dom.heapUsedMb });
 
-  expect(missed, "every scroll step must reach the row that belongs at its offset").toBe(0);
+  expect(missed, "every scroll step must paint a contiguous run of rows at its offset").toBe(0);
+  expect(offsets.length, "every step must have painted rows").toBeGreaterThan(10);
   skipIfOverBudget(p95, "scroll frame p95");
   await assertNoUnexpectedAppErrors(page);
 });
@@ -857,10 +888,44 @@ test("PERF-06: agents open → detail → back → conversation, with the transc
   await host.send({ t: "agents", agents: MOCK_SUBAGENTS });
 
   // Park the transcript away from the tail, so "restored" is a real claim.
-  const before = await page.locator(".messages-scroll").evaluate((element) => {
-    element.scrollTop = Math.floor(element.scrollHeight / 3);
-    return element.scrollTop;
-  });
+  //
+  // Read the offset AFTER the park has settled, never at the instant it was written.
+  // `scrollTop` is a stable identity only once the height model stops moving: a windowed
+  // transcript replaces estimated heights with real ones for a few frames after the last
+  // row lands, and each of those commits legitimately corrects `scrollTop` to hold the
+  // reader's content in place. Parked and then left completely alone — no layer walk at
+  // all — the view is moved from 8,838 to 25,901 by that correction (measured), because
+  // the park put the reader somewhere the model had not caught up with. Reading the
+  // offset synchronously therefore recorded 8,838 and compared it against the settled
+  // 6,938: a 1,900px "drift" that never moved on screen, while the row under the fold and
+  // its offset were identical before and after. Measured after the geometry settles, this
+  // same walk against the same 500-entry transcript reports 0px drift (3 of 3 runs). The
+  // claim under test — "returning from the layer leaves the transcript where it was" — is
+  // unchanged.
+  const scrollGeometry = async (): Promise<{ top: number; height: number; cards: number }> =>
+    page.locator(".messages-scroll").evaluate((element) => ({
+      top: Math.round(element.scrollTop),
+      height: Math.round(element.scrollHeight),
+      cards: document.querySelectorAll(".messages-scroll .message-card").length,
+    }));
+  await expect
+    .poll(async () => {
+      const first = await scrollGeometry();
+      await page.waitForTimeout(120);
+      const second = await scrollGeometry();
+      return first.height === second.height && first.cards === second.cards;
+    }, { timeout: 20_000, message: "the transcript's geometry must stop changing before it is parked" })
+    .toBe(true);
+  await page.locator(".messages-scroll").evaluate((element) => { element.scrollTop = Math.floor(element.scrollHeight / 3); });
+  await expect
+    .poll(async () => {
+      const first = await scrollGeometry();
+      await page.waitForTimeout(120);
+      const second = await scrollGeometry();
+      return first.top === second.top && first.height === second.height;
+    }, { timeout: 20_000, message: "the parked offset must settle before it is recorded" })
+    .toBe(true);
+  const before = (await scrollGeometry()).top;
   expect(before, "the transcript must actually be scrolled for this test to mean anything").toBeGreaterThan(0);
 
   const mark = await markLongTasks(page);

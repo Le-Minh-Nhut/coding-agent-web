@@ -714,16 +714,40 @@ textarea::placeholder {
   height: 0;
   min-height: 0;
   overflow-y: auto;
+  /* The transcript does its own anchoring (see `TranscriptList`'s anchor effect), and
+     the browser's native scroll anchoring would be a second, invisible authority over
+     the same `scrollTop`. The two disagree exactly when it matters — a row being
+     measured, a disclosure opening — and the loser is whichever correction runs
+     second. Measured with native anchoring on: a 1,296px jump when a disclosure above
+     the reader expanded, because Chromium moved the scroll position first and the
+     list's own guard then treated that movement as the user's. */
+  overflow-anchor: none;
   /* Round 51: 16px -> 10px. The 32px horizontal gutter was the same on a 320px
      phone as on a desktop; 24px keeps text off the edge and returns width to the
      content, which is what actually reduces wrapping on a narrow screen. */
-  padding: 10px calc(var(--safe-right) + 12px) calc(var(--safe-bottom) + 10px) calc(var(--safe-left) + 12px);
+  /* NO vertical padding, deliberately. `overflow` clips to the PADDING box, so a
+     scroller with `padding-top: 10px` keeps a permanent 10px window at the top
+     through which whatever was scrolled out above the content box still paints.
+     Measured at 320x568 idle: an `.activity-group-head` at band-relative
+     y -12.7..31.3, i.e. its rounded bottom 10.7px sliced off and painted directly
+     under the dashboard, reading as a stray pill. The top inset therefore lives on
+     `.messages-content` instead, so a partially scrolled row is clipped flush by
+     the scrollport edge and the 10px of breathing room still exists at rest.
+     The bottom keeps its padding: the composer sits there, nothing scrolls past it
+     into a neighbouring surface, and `--safe-bottom` has to be reserved. */
+  padding: 0 calc(var(--safe-right) + 12px) calc(var(--safe-bottom) + 10px) calc(var(--safe-left) + 12px);
+  /* The inset that the padding used to provide, kept for scroll-into-view and for
+     any future native scroll anchoring: a revealed row must not sit under the edge. */
+  scroll-padding-top: 10px;
   display: flex;
   flex-direction: column;
   gap: 16px;
 }
 
 .messages-content {
+  /* The scrollport's former top inset (see `.messages-scroll`): it has to scroll
+     WITH the rows, or it is a window the rows paint through. */
+  padding-top: 10px;
   display: flex;
   flex-direction: column;
   /* Round 51: 16px -> 10px between rows. Combined with the card padding below,
@@ -760,6 +784,147 @@ textarea::placeholder {
   flex-basis: 100%;
   color: var(--text-muted);
   font-size: 0.8rem;
+}
+
+/* A windowed transcript's mounted entries and its two spacers.
+
+   `display: contents` on the entry wrapper is deliberate and load-bearing: the
+   wrapper exists for measurement (one `data-entry-key` per identity, one rect to
+   read) and for `aria-posinset`, but it must not become a layout box. The
+   transcript's own spacing is a flex column with a 10px gap and per-card
+   `align-self` — a wrapper box would collapse both the gap and the self-alignment
+   of every assistant and user bubble. Containing the box here would also create the
+   very paint boundary the entries are being measured to avoid.
+
+   The spacers are plain, unmeasured heights that stand in for the unmounted span.
+   They are `aria-hidden` and carry no content: they are the scrollbar's arithmetic,
+   not part of the document a reader is told about. */
+.transcript-entries {
+  display: flex;
+  flex-direction: column;
+  /* `inherit` rather than a fixed value: the transcript's own column has one gap
+     (10px) and the Agent Detail chat's scroller has another (8px), and the wrapper
+     must not change either. */
+  gap: inherit;
+  min-width: 0;
+}
+
+.transcript-entry {
+  display: contents;
+}
+
+.transcript-spacer {
+  flex: 0 0 auto;
+  pointer-events: none;
+}
+
+/* In-app transcript search. Inline in the screen, above the transcript, between the
+   banners and the scroller: it must not be something that scrolls away, and it must
+   not be a dialog, because the point is to read the transcript while searching it. */
+.transcript-search {
+  flex: 0 0 auto;
+  padding: 8px calc(var(--safe-right) + 12px) 8px calc(var(--safe-left) + 12px);
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 45vh;
+  min-height: 0;
+}
+
+.transcript-search-field {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.transcript-search-label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.transcript-search input {
+  flex: 1 1 auto;
+  /* The same 44px touch target as every other control in the app. */
+  min-height: var(--touch-min);
+  min-width: 0;
+}
+
+.transcript-search-actions {
+  display: flex;
+  gap: 2px;
+}
+
+.transcript-search-actions button {
+  min-width: var(--touch-min);
+  min-height: var(--touch-min);
+  font-size: 1.1rem;
+  line-height: 1;
+}
+
+.transcript-search-count {
+  margin: 0;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+
+.transcript-search-results {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.transcript-search-results button {
+  display: flex;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+  align-items: baseline;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  padding: 6px 8px;
+  color: var(--text);
+  font-size: 0.8rem;
+}
+
+.transcript-search-results button[aria-current="true"] {
+  background: var(--surface-secondary);
+  border-color: var(--primary);
+}
+
+.transcript-search-ordinal {
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  flex: 0 0 auto;
+  min-width: 2.5em;
+}
+
+.transcript-search-excerpt {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.transcript-search-excerpt mark {
+  background: var(--warning);
+  color: #111111;
+  border-radius: 2px;
+}
+
+.transcript-search-more {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  padding: 4px 8px;
 }
 
 .message-card {
@@ -1313,327 +1478,16 @@ details[open] summary {
 .history-reader { position: fixed; inset: 0; z-index: 100; overflow-y: auto; background: var(--bg); padding: calc(var(--safe-top) + 16px) calc(var(--safe-right) + 16px) calc(var(--safe-bottom) + 16px) calc(var(--safe-left) + 16px); }
 .history-reader-head { justify-content: space-between; margin-bottom: 8px; }
 .history-reader .message-card { margin-top: 10px; }
-.tool-output-preview { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 7rem; overflow: hidden; color: var(--text-muted); }
 .message-card pre { max-width: 100%; overflow-x: auto; white-space: pre; }
 .message-card summary, .message-card button { min-height: var(--touch-min); }
 
-/* ── Tool activity (round 50) ────────────────────────────────────────────────
-   Grouped, collapsed-by-default tool activity. Sizing follows the 4/8/12/16/24
-   scale; the `tv-` classes inside the expanded body come from the vendored guest
-   renderer (`packages/guest/src/tool-render/tool-render.css`), which bridges its
-   tokens to the `--tv-*` fallbacks defined below so it themes with this app. */
-
-.activity-group,
-.tool-row {
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--surface);
-  min-width: 0;
-}
-
-.activity-group-head,
-.tool-row-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  min-height: var(--touch-min);
-  padding: 8px 12px;
-  background: none;
-  border: 0;
-  color: inherit;
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
-  touch-action: manipulation;
-}
-
-.activity-group-head:hover,
-.tool-row-head:hover {
-  background: var(--surface-hover);
-}
-
-.activity-group-state,
-.tool-row-state {
-  flex: none;
-  width: 16px;
-  text-align: center;
-  font-size: 0.85rem;
-}
-
-.activity-group--completed .activity-group-state,
-.tool-row:not(.tool-row--error) .tool-row-state { color: #3fb950; }
-.activity-group--running .activity-group-state { color: var(--primary); }
-.activity-group--failed .activity-group-state,
-.tool-row--error .tool-row-state { color: var(--danger-text); }
-
-.activity-group-label {
-  flex: 1;
-  min-width: 0;
-  font-size: 0.9rem;
-  font-weight: 600;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* Verified-diff counts on a collapsed group head. Kept on one line with the
-   label so the summary still reads as a single row. */
-.activity-group-counts {
-  flex: none;
-  font-family: var(--font-mono);
-  font-size: 0.78rem;
-  white-space: nowrap;
-}
-
-.tool-row-name {
-  flex: none;
-  font-family: var(--font-mono);
-  font-size: 0.78rem;
-  color: var(--text-muted);
-}
-
-.tool-row-sum {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 0.82rem;
-  color: var(--text-muted);
-}
-
-.tool-row-status {
-  flex: none;
-  font-size: 0.75rem;
-  color: var(--text-muted);
-}
-
-.activity-group-chevron,
-.tool-row-chevron {
-  flex: none;
-  color: var(--text-muted);
-}
-
-.activity-group-body,
-.tool-body {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 0 12px 12px;
-  min-width: 0;
-}
-
-.tool-body-section {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  min-width: 0;
-}
-
-.tool-body-heading {
-  font-size: 0.75rem;
-  color: var(--text-muted);
-}
-
-.tool-body-note {
-  margin: 0;
-  font-size: 0.8rem;
-  color: var(--text-muted);
-}
-
-/* Per-file rows are plain list lines, not nested bordered cards. */
-.tv-file-changes {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  font-family: var(--font-mono);
-  font-size: 0.8rem;
-}
-
-.tv-file-change {
-  display: block;
-  min-width: 0;
-}
-
-/* One line per file in an edit's flattened body: whole row is the control. */
-.tv-file-change-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-  width: 100%;
-  min-height: var(--touch-min);
-  padding: 0;
-  border: 0;
-  background: none;
-  color: inherit;
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
-}
-
-.tv-file-change-head:disabled {
-  cursor: default;
-  /* A row with nothing to open is not a control, but it keeps the same height so
-     the list does not jitter between rows. */
-}
-
-.tv-file-change-head:hover {
-  background: var(--surface-hover);
-}
-
-/* Filename primary, directory secondary on one line: an absolute path is never
-   printed twice, and the part that distinguishes two files is the part that
-   survives the ellipsis. */
-.tv-file-titles {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  flex: 1;
-  min-width: 0;
-}
-
-.tv-file-name {
-  flex: none;
-  max-width: 60%;
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-}
-
-.tv-file-dir {
-  flex: 1;
-  min-width: 0;
-  font-size: 0.75rem;
-  color: var(--text-muted);
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-  /* Ellipsise from the LEFT so the deepest directory survives: the tail of the
-     path (the part nearest the file) is what tells two lookalike trees apart. */
-  direction: rtl;
-  text-align: left;
-}
-
-/* The failed call's own reason, verbatim: a failure with no message is one the
-   user cannot act on. */
-.tool-body-error {
-  margin: 0;
-  padding: 6px 8px;
-  border-radius: 6px;
-  background: var(--surface);
-  border-left: 2px solid var(--danger-text);
-  color: var(--danger-text);
-  font-size: 0.8rem;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-
-/* The raw `details` payload, one disclosure per edit row. */
-.tool-raw-details {
-  margin: 0;
-}
-
-.tv-note {
-  margin: 0;
-  font-size: 0.75rem;
-  color: var(--warning);
-}
-
-.tv-note--err {
-  color: var(--danger-text);
-}
-
-.tv-file-status--failed {
-  color: var(--danger-text);
-}
-
-.tv-file-change-body {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  margin: 4px 0 4px 3ch;
-  min-width: 0;
-}
-
-.tv-file-chevron {
-  flex: none;
-  color: var(--text-muted);
-}
-
-.tv-file-error {
-  margin: 0;
-  padding: 6px 8px;
-  overflow-x: auto;
-  font-size: 0.75rem;
-  white-space: pre-wrap;
-  color: var(--danger-text);
-  background: var(--surface);
-  border-radius: 6px;
-}
-
-.tv-file-error--err {
-  border-left: 2px solid var(--danger-text);
-}
-
-.tv-file-change--failed .tv-file-path {
-  color: var(--danger-text);
-}
-
-.activity-group-note {
-  flex: none;
-  font-size: 0.75rem;
-  color: var(--text-muted);
-}
-
-.tv-file-status {
-  flex: none;
-  width: 2ch;
-  font-weight: 600;
-}
-.tv-file-status--added { color: #3fb950; }
-.tv-file-status--deleted { color: var(--danger-text); }
-.tv-file-status--renamed,
-.tv-file-status--modified { color: var(--warning); }
-.tv-file-status--binary,
-.tv-file-status--unknown { color: var(--text-muted); }
-
-.tv-file-path {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-}
-
-.tv-file-from,
-.tv-file-counts {
-  flex: none;
-  color: var(--text-muted);
-}
-
-.tv-count-add { color: #3fb950; font-variant-numeric: tabular-nums; }
-.tv-count-del { color: var(--danger-text); font-variant-numeric: tabular-nums; }
-
-.tool-diff-block {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  min-width: 0;
-}
-
-.tool-diff-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  min-width: 0;
-  font-size: 0.8rem;
-}
+/* ── Tool activity ──────────────────────────────────────────────────────────
+   Grouped, collapsed-by-default tool activity, owned by `components/ToolActivity.tsx`
+   and styled in `apps/web/src/tool-activity.css` (imported from that component). The
+   rules live there, not here, so a change to the activity card cannot collide with an
+   unrelated screen's change to this file. What stays here is only what must be global:
+   the guest design system's host-token bridge below, and the diff row colours the
+   Files Center viewer also reads. */
 
 /* The guest design system's host-token bridge. The scope is `:root`, not
    `.tv-card` and not `.tool-row`: the web bundle never emits `.tv-card` (only the
@@ -1668,9 +1522,6 @@ details[open] summary {
    to disagree. The hunk rows stay out of it and keep their own muted colour. */
 .tv-diff-row--add { color: #3fb950; }
 .tv-diff-row--del { color: var(--danger-text); }
-
-.tool-body .tv-head { min-height: var(--touch-min); }
-.tool-body .tv-expand { min-height: var(--touch-min); }
 
 @media (prefers-reduced-motion: reduce) {
   .tv-spin { animation: none; }
@@ -1877,21 +1728,8 @@ details[open] summary {
 
 .conversation-header-actions { position: relative; }
 
-/* The tool body's raw-output block reuses the app's `pre` styling; the only
-   overrides here are the scroll bound and the inherited size. */
-.tool-raw-output {
-  max-height: 24rem;
-  overflow: auto;
-  margin: 0;
-  font-size: 0.8rem;
-  overscroll-behavior: contain;
-}
-
-.tool-body .tool-output-preview,
-.activity-group > .tool-output-preview {
-  margin: 0 12px 12px;
-  font-size: 0.8rem;
-}
+/* The tool body's raw-output block and its preview moved to
+   `apps/web/src/tool-activity.css` with the rest of the activity CSS. */
 
 /* ── Activity timeline rows ──────────────────────────────────────────────────
    The panel used to render ~15 inline styles per row; these are those styles,

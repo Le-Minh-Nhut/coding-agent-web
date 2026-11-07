@@ -75,15 +75,29 @@ function diff(before: Metrics, after: Metrics): Metrics {
   return out;
 }
 
-/** Wait for the whole snapshot to be mounted, without bracketing the wait in page time. */
+/**
+ * Wait until the whole snapshot has ARRIVED, without bracketing the wait in page time.
+ *
+ * This used to count `.messages-content > *` and demand 4,075 of them — i.e. it waited
+ * for the entire history to be mounted, which is the behaviour the windowed transcript
+ * deliberately removed. The question it was really asking is "has the snapshot been
+ * applied", and the document answers that directly and more precisely: the entries it
+ * renders carry `aria-setsize`, which is the length of the authoritative `rows` array.
+ * On a list short enough to mount in full there is no `aria-setsize`, so the fallback
+ * stays the old count.
+ */
 async function waitForRows(page: Page, rows: number, timeout = 180_000): Promise<void> {
   await page.evaluate(
     ({ rows, timeout }) =>
       new Promise<void>((resolve, reject) => {
         const started = performance.now();
         const check = () => {
-          if (document.querySelectorAll(".messages-content > *").length >= rows) return resolve();
-          if (performance.now() - started > timeout) return reject(new Error(`never reached ${rows} rows`));
+          const declared = Number(document.querySelector(".transcript-entries [aria-setsize]")?.getAttribute("aria-setsize") ?? 0);
+          if (declared >= rows) return resolve();
+          if (declared === 0 && document.querySelectorAll(".messages-content > *").length >= rows) return resolve();
+          if (performance.now() - started > timeout) {
+            return reject(new Error(`never reached ${rows} rows (declared ${String(declared)})`));
+          }
           requestAnimationFrame(check);
         };
         check();
@@ -149,7 +163,11 @@ test("PERF-COST: browser-side load and streaming cost at 4075 entries", async ({
   const load = diff(loadBefore, loadAfter);
   const dom = await page.evaluate(() => ({
     elements: document.querySelectorAll("*").length,
-    rows: document.querySelectorAll(".messages-content > *").length,
+    // `.transcript-entry`, not `.messages-content > *`: after windowing that selector
+    // also counts the spacers, so a single spacer satisfied `rows > 0` (W22).
+    rows: document.querySelectorAll(".transcript-entry").length,
+    spacers: document.querySelectorAll(".transcript-spacer").length,
+    declaredEntries: Number(document.querySelector(".messages-scroll [aria-setsize]")?.getAttribute("aria-setsize") ?? Number.NaN) || null,
     // Row height is the check that catches `contain: size` (which reports cheap
     // layout because it collapsed the rows to nothing).
     firstRowHeight: Math.round((document.querySelector(".messages-content > *") as HTMLElement | null)?.getBoundingClientRect().height ?? 0),
@@ -180,7 +198,20 @@ test("PERF-COST: browser-side load and streaming cost at 4075 entries", async ({
     layout: Math.round((stream.LayoutDuration / UPDATES) * 100) / 100,
   } })}`);
 
-  expect(dom.rows, "the whole transcript must stay in the document").toBeGreaterThan(LARGE / 2);
+  // This used to assert that half the history is mounted, i.e. that the DOM is
+  // O(conversation). That is the assumption the owner overruled, and the measurement
+  // shows why: with the window the same session costs 147 elements instead of 78,617,
+  // and appends cost 2.47 ms/task at 4× throttle instead of dominating the frame.
+  //
+  // What must hold instead is the pair the change promises: the DOM stays proportional
+  // to the window, and the transcript still declares the whole conversation.
+  expect(dom.elements, "the document must stay proportional to the window, not the history").toBeLessThan(20_000);
+  // Rows are bounded AND present, and the unmounted span is represented by spacers:
+  // asserting only `rows > 0` would be satisfied by the old unwindowed list too (W22).
+  expect(dom.rows, "the window still mounts rows").toBeGreaterThan(0);
+  expect(dom.rows, "the window must bound the mounted rows").toBeLessThan(LARGE / 10);
+  expect(dom.spacers, "the unmounted span must be represented by a spacer").toBeGreaterThan(0);
+  expect(dom.declaredEntries, "the transcript must still declare every entry it holds").toBe(LARGE);
   expect(dom.firstRowHeight, "a row must still have real height").toBeGreaterThan(20);
 });
 
@@ -248,7 +279,10 @@ test("PERF-COST-THROTTLED: updates vs appends into a full history, 4x CPU", asyn
 
   const dom = await page.evaluate(() => ({
     elements: document.querySelectorAll("*").length,
-    rows: document.querySelectorAll(".messages-content > *").length,
+    // `.transcript-entry`, not `.messages-content > *`: after windowing that selector
+    // also counts the spacers, so a single spacer satisfied `rows > 0` (W22).
+    rows: document.querySelectorAll(".transcript-entry").length,
+    spacers: document.querySelectorAll(".transcript-spacer").length,
     heapMb: Math.round(((performance as unknown as { memory: { usedJSHeapSize: number } }).memory.usedJSHeapSize / 1048576) * 10) / 10,
   }));
   console.log(`PERF_THROTTLED_DOM ${JSON.stringify(dom)}`);

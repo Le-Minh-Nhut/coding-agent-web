@@ -235,10 +235,68 @@ test("render cost of a 2000-row transcript with 50 tool calls", async ({ page })
   for (let index = 0; index < entries.length; index += 50) {
     await host.send({ t: "snapshot-chunk", entries: entries.slice(index, index + 50), final: index + 50 >= entries.length });
   }
-  // The list follows the tail, so the FIRST row is legitimately scrolled out of
-  // view; assert the rows exist (mount cost is what this test measures) and that
-  // the transcript actually grew.
-  await expect.poll(() => page.locator(".message-card, .activity-group").count()).toBeGreaterThan(100);
+  // The transcript is windowed, so this asserts the WINDOW contract rather than the
+  // old "every row is in the document" one. It is strictly stronger than the count
+  // it replaces: a bounded mount alone would pass with an empty document, and a
+  // complete document alone would pass without windowing. All three are required.
+  //
+  // It used to read `expect.poll(() => count()).toBeGreaterThan(100)` on
+  // `.message-card, .activity-group`, which encoded the unwindowed list and started
+  // failing at 16 mounted cards once the list began mounting a window.
+  const ROWS = 2000;
+  await expect.poll(() => page.locator(".message-card, .activity-group").count(), {
+    message: "the tail window must mount the newest rows",
+  }).toBeGreaterThan(2);
+
+  const windowed = await page.evaluate(() => {
+    const scroller = document.querySelector(".messages-scroll");
+    const entries = Array.from(document.querySelectorAll(".transcript-entry"));
+    const spacers = Array.from(document.querySelectorAll(".transcript-spacer"));
+    // `aria-setsize` lives on the entry's real box, not the `display: contents` wrapper
+    // (measured: ARIA on the unboxed wrapper never reached Chromium's AX tree).
+    const setsizes = new Set(entries.map((entry) => (entry.firstElementChild ?? entry).getAttribute("aria-setsize")));
+    // The role and the position are on the entry's real box, not the display:contents
+    // wrapper (see `PERF-A11Y-01`).
+    const positions = entries.map((entry) => Number((entry.firstElementChild ?? entry).getAttribute("aria-posinset")));
+    const mountedHeight = entries.reduce((sum, entry) => {
+      const box = (entry.firstElementChild ?? entry).getBoundingClientRect();
+      return sum + box.height;
+    }, 0);
+    return {
+      mountedEntries: entries.length,
+      cards: document.querySelectorAll(".message-card, .activity-group").length,
+      setsizes: Array.from(setsizes),
+      spacerHeight: spacers.reduce((sum, spacer) => sum + spacer.getBoundingClientRect().height, 0),
+      spacerCount: spacers.length,
+      mountedHeight,
+      scrollHeight: scroller?.scrollHeight ?? 0,
+      childCount: document.querySelectorAll(".transcript-entries > *").length,
+      minPosition: positions.length === 0 ? null : Math.min(...positions),
+      maxPosition: positions.length === 0 ? null : Math.max(...positions),
+    };
+  });
+
+  console.log(`[round50 ${OUT} windowed]`, JSON.stringify(windowed));
+  // 1. Bounded: the DOM holds a window, not the history. 100 is the ceiling the
+  //    overscan sweep picked (measured 214-315 ELEMENTS for 8,000 entries, of which
+  //    the mounted rows are a fraction); 2000/10 catches a window that grew with
+  //    the conversation without tripping on an expansion.
+  expect(windowed.cards, `mounted cards (${String(windowed.cards)}) must be bounded`).toBeLessThan(100);
+  expect(windowed.mountedEntries * 10, "the window must stay small against the history").toBeLessThan(ROWS);
+  // 2. Declares the whole history: every mounted row's aria-setsize is the real total.
+  expect(windowed.setsizes, "mounted rows must declare the full history size").toEqual([String(ROWS)]);
+  // 3. The spacers cover the unmounted span, so the scroll range is the history's:
+  //    spacers + mounted rows must account for the scroller's height, allowing for
+  //    the 10px gap the entries wrapper puts between its children.
+  const slack = windowed.childCount * 12 + 40;
+  expect(windowed.spacerCount, "an unmounted span must be represented by a spacer").toBeGreaterThan(0);
+  expect(
+    Math.abs(windowed.spacerHeight + windowed.mountedHeight - windowed.scrollHeight),
+    `spacers (${String(Math.round(windowed.spacerHeight))}) + mounted (${String(Math.round(windowed.mountedHeight))}) must cover the scroll height (${String(windowed.scrollHeight)})`,
+  ).toBeLessThanOrEqual(slack);
+  // The window is a contiguous run of the history, not a sample of it: a gap in the
+  // middle would be a hole the reader could scroll into and see nothing.
+  expect(windowed.maxPosition! - windowed.minPosition! + 1, "the mounted window must be contiguous").toBe(windowed.mountedEntries);
 
   const first = await measure(page);
   // Repeatable: settle, then measure three times and keep the spread.
@@ -247,6 +305,20 @@ test("render cost of a 2000-row transcript with 50 tool calls", async ({ page })
     await page.waitForTimeout(150);
     samples.push((await measure(page)).domCharacterCount);
   }
+  // A windowed list mounts ~15 of 2,000 rows, and the 50 tool calls are one row in
+  // every 40, so whether a group happens to be inside the window is luck. Scroll
+  // until one is: the claim below is about how a group is rendered, not about where
+  // the window landed.
+  for (let attempt = 0; attempt < 80; attempt++) {
+    const found = await page.locator(".activity-group").count();
+    if (found > 0) break;
+    await page.evaluate((fraction) => {
+      const scroller = document.querySelector(".messages-scroll");
+      if (scroller !== null) scroller.scrollTop = Math.round(scroller.scrollHeight * fraction);
+    }, (attempt + 1) / 80);
+    await page.waitForTimeout(60);
+  }
+  await expect(page.locator(".activity-group"), "a tool group must be reachable in the history").not.toHaveCount(0);
   // The claim, measured directly instead of via a character budget that the plain
   // rows alone would blow: no collapsed tool body is mounted at all.
   const mounted = await page.evaluate(() => ({
@@ -271,6 +343,106 @@ test("render cost of a 2000-row transcript with 50 tool calls", async ({ page })
     expect(mounted.diffs, "diffs must not be mounted while collapsed").toBe(0);
     expect(mounted.activityGroups, "the 50 tool calls form collapsed groups").toBeGreaterThan(0);
   }
+
+  // 4. Reachability: the window is a rendering choice, never an information one. The
+  //    whole history stays reachable by scrolling, which is the half of the old
+  //    assertion that flipping `>` to `<` would have deleted.
+  const reach = async (where: "top" | "middle" | "end"): Promise<{ visible: number[]; scrollTop: number }> => {
+    /**
+     * Scroll to a FRACTION OF THE RANGE and settle, rather than to `scrollHeight / 2`.
+     *
+     * With a windowed list, `scrollHeight / 2` is halfway through a document whose
+     * unmounted span is made of ESTIMATES that are corrected as rows are measured. The
+     * raw half-way pixel can therefore sit thousands of entries from the half-way
+     * ENTRY — measured here as "the middle landed near entry 8" of 2,000 — while the
+     * entries are perfectly reachable. Repeating the scroll as the document settles is
+     * what asks the honest question: can the reader get to a middle entry.
+     */
+    await page.evaluate((target) => {
+      const scroller = document.querySelector(".messages-scroll");
+      if (scroller === null) return;
+      const range = scroller.scrollHeight - scroller.clientHeight;
+      scroller.scrollTop = target === "top" ? 0 : target === "end" ? range : Math.round(range / 2);
+    }, where);
+    // One settle: the window re-renders from the new offset during the next frame, and a
+    // jump to the end must be able to move once more after rows are measured.
+    // Arrive, then WAIT for the window to actually show rows there before reading: a
+    // single 250ms sleep raced the render, and the read then reported the previous
+    // position's rows (measured: "middle landed near entry 5" while a direct probe of
+    // the same fixture landed on 798-801 of 2,000).
+    await expect.poll(() => page.evaluate(() => {
+      const scroller = document.querySelector(".messages-scroll");
+      const band = scroller?.getBoundingClientRect();
+      if (scroller === null || band === undefined) return 0;
+      let visible = 0;
+      for (const entry of Array.from(document.querySelectorAll(".transcript-entry"))) {
+        const box = (entry.firstElementChild ?? entry).getBoundingClientRect();
+        if (box.bottom > band.top + 1 && box.top < band.bottom - 1) visible += 1;
+      }
+      return visible;
+    }), { message: `rows must be painted after scrolling to the ${where}`, timeout: 10_000, intervals: [50, 100, 200] }).toBeGreaterThan(0);
+    // The window is derived from the live offset during render, so one frame per
+    // attempt is enough; poll anyway because the row measurement that follows a jump
+    // can move the offsets under the reader once.
+    //
+    // Poll for STABILITY, not merely for "some rows are painted". A jump to the end
+    // reports the previous window for one frame before the anchor correction lands:
+    // measured at 100ms intervals after `scrollTop = scrollHeight`, the read was
+    // `max 1999 of 2,000` on the first sample and `max 2000` from the second sample on,
+    // stable for the following 11 samples. Reading on the first sample therefore
+    // reported a one-frame-old window as a lost last entry. Two identical consecutive
+    // samples mean the window has stopped moving, which is the state this reaches for.
+    await expect.poll(async () => {
+      const sample = (): Promise<{ max: number; min: number; count: number; top: number }> => page.evaluate(() => {
+        const scroller = document.querySelector(".messages-scroll");
+        const band = scroller?.getBoundingClientRect();
+        const positions: number[] = [];
+        for (const entry of Array.from(document.querySelectorAll(".transcript-entry"))) {
+          const box = (entry.firstElementChild ?? entry).getBoundingClientRect();
+          if (box.bottom > (band?.top ?? 0) + 1 && box.top < (band?.bottom ?? 0) - 1) positions.push(Number((entry.firstElementChild ?? entry).getAttribute("aria-posinset")));
+        }
+        return {
+          max: positions.length === 0 ? 0 : Math.max(...positions),
+          min: positions.length === 0 ? 0 : Math.min(...positions),
+          count: positions.length,
+          top: Math.round(scroller?.scrollTop ?? 0),
+        };
+      });
+      const first = await sample();
+      await page.waitForTimeout(100);
+      const second = await sample();
+      return first.max === second.max && first.min === second.min && first.count === second.count && first.top === second.top;
+    }, { message: `the window at the ${where} must stop moving before it is read`, timeout: 15_000, intervals: [50, 100, 200] }).toBe(true);
+    const seen = await page.evaluate(() => {
+      const scroller = document.querySelector(".messages-scroll");
+      const band = scroller?.getBoundingClientRect();
+      const visible: number[] = [];
+      for (const entry of Array.from(document.querySelectorAll(".transcript-entry"))) {
+        const box = (entry.firstElementChild ?? entry).getBoundingClientRect();
+        if (box.bottom > (band?.top ?? 0) + 1 && box.top < (band?.bottom ?? 0) - 1) visible.push(Number((entry.firstElementChild ?? entry).getAttribute("aria-posinset")));
+      }
+      return { visible, scrollTop: Math.round(scroller?.scrollTop ?? 0) };
+    });
+    return seen;
+  };
+
+  const top = await reach("top");
+  expect(top.scrollTop, "the top of the history must be scrollable to").toBeLessThan(2);
+  expect(Math.min(...top.visible), "the FIRST entry must be reachable and painted").toBe(1);
+  const middle = await reach("middle");
+  console.log(`[round50 middle] ` + JSON.stringify(await page.evaluate(() => {
+    const scroller = document.querySelector(".messages-scroll");
+    return { top: scroller === null ? null : Math.round(scroller.scrollTop), entriesReported: document.querySelectorAll("[aria-setsize]").length, setsize: document.querySelector("[aria-setsize]")?.getAttribute("aria-setsize"), h: scroller?.scrollHeight, c: scroller?.clientHeight, spacers: Array.from(document.querySelectorAll(".transcript-spacer")).map((n) => Math.round(n.getBoundingClientRect().height)), mounted: document.querySelectorAll(".transcript-entry").length };
+  })), JSON.stringify(await page.evaluate(() => {
+    const el = document.querySelector(".transcript-entries");
+    return { gap: el === null ? null : getComputedStyle(el).rowGap, kids: el?.children.length };
+  })));
+  const middleRank = middle.visible.length === 0 ? 0 : middle.visible[Math.floor(middle.visible.length / 2)]!;
+  expect(middleRank, `scrolling to the middle must land near entry ${String(ROWS / 2)}, saw ${String(middleRank)}`).toBeGreaterThan(ROWS * 0.3);
+  expect(middleRank, `scrolling to the middle must land near entry ${String(ROWS / 2)}, saw ${String(middleRank)}`).toBeLessThan(ROWS * 0.7);
+  const end = await reach("end");
+  expect(Math.max(...end.visible), "the LAST entry must be reachable and painted").toBe(ROWS);
+  console.log(`[round50 ${OUT} reach]`, JSON.stringify({ windowed, top: top.visible.slice(0, 3), middle: middle.visible.slice(0, 3), end: end.visible.slice(-3) }));
 });
 
 test("a group expands, a diff opens, and the draft survives the round trip", async ({ page }) => {

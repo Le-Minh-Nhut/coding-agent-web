@@ -235,6 +235,12 @@ const clearedOmpEnvKeys = new Set([
 ]);
 const cleanParentEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) => !clearedOmpEnvKeys.has(key)));
 
+// NOTE: `CAW_INSECURE_COOKIES` reaches this server only because `cleanParentEnv` is
+// spread here — it is not set explicitly below, the way the CAW_* values are. It is
+// forwarded deliberately: `playwright.config.ts` sets it for the web server when the
+// WebKit project is in the run, because WebKit discards a `Secure` cookie on plain-HTTP
+// loopback. Do not "tidy" it away by narrowing this spread without also setting it
+// explicitly, or the WebKit auth run starts failing on a missing cookie.
 const env = {
   ...cleanParentEnv,
   // Keep scratch listeners off the deployed app and relay ports; both remain independently overridable.

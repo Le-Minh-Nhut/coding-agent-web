@@ -57,6 +57,28 @@ try {
 }
 const includeWebkit = process.env.CAW_E2E_SKIP_WEBKIT !== "1" && (webkitBundleInstalled || process.env.CAW_E2E_FORCE_WEBKIT === "1");
 
+/**
+ * The session-cookie mode this run uses, resolved ONCE and published to both sides.
+ *
+ * WebKit will not store `__Host-caw_session` over plain HTTP — the prefix REQUIRES
+ * `Secure`, and unlike Chrome it does not exempt loopback — so a WebKit run needs the
+ * app's loopback-only dev mode (`CAW_INSECURE_COOKIES=1`), which names the cookie
+ * `caw_session` without `Secure`. The server already refuses that flag unless the bind
+ * host is localhost (`apps/server/src/config.ts:151`) and `scripts/e2e-server.mjs` binds
+ * 127.0.0.1, so it cannot reach a deployment.
+ *
+ * This used to be set ONLY inside `webServer.env`. The server therefore ran in dev-cookie
+ * mode while the spec process saw `undefined` and asserted the production `__Host-`
+ * cookie against a server that was never going to issue it — measured as `Expected
+ * "__Host-caw_session" / Received "caw_session"` in `auth.spec.ts`. One value, assigned
+ * to `process.env` and passed through to the server, is what keeps the assertion honest:
+ * a spec can now tell which mode the run is in without inferring it from the cookie it is
+ * testing.
+ */
+const insecureCookies = includeWebkit;
+if (insecureCookies) process.env.CAW_INSECURE_COOKIES = "1";
+else delete process.env.CAW_INSECURE_COOKIES;
+
 export default defineConfig({
   testDir: "./tests/e2e",
   // Ceiling: one server, state dir, fixture manifest, and folder tree, so specs stay serial. Upgrade path: per-shard server with its own port, state dir, fixture manifest, and roots before enabling `--shard` + N workers.
@@ -97,6 +119,26 @@ export default defineConfig({
     env: {
       CAW_E2E_FIXTURE: FIXTURE_FILE,
       ...(REUSE_PORT ? { CAW_E2E_PORT: REUSE_PORT } : {}),
+      /**
+       * WebKit will not store `__Host-caw_session` over plain HTTP: the prefix
+       * REQUIRES `Secure`, and unlike Chrome, WebKit does not exempt loopback from
+       * that rule. The browser accepts the login response, discards the cookie, and
+       * every later request is 401 — measured, with the harness logging in through
+       * the screen and then reading an empty cookie jar.
+       *
+       * The server already has the flag for exactly this situation: it is the app's
+       * documented loopback-only dev mode, refused unless the bind host is localhost
+       * (`apps/server/src/config.ts:151`), and it switches to `caw_session` without
+       * `Secure` (`auth.ts:50`). The harness server is always bound to 127.0.0.1, so
+       * this cannot leak into a deployment.
+       *
+       * Set only when the WebKit project is in the run, so a Chromium-only run still
+       * exercises the production cookie — and `auth.spec.ts` asserts the right cookie
+       * for whichever mode the run is in rather than being weakened. The same resolved
+       * value is published to `process.env` above, so the spec and the server cannot
+       * disagree about which mode is under test.
+       */
+      ...(insecureCookies ? { CAW_INSECURE_COOKIES: "1" } : {}),
     },
   },
 });

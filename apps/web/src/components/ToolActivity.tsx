@@ -10,22 +10,28 @@
  * disclosure further down, and for a tool with no dedicated renderer it *is* the
  * body.
  */
-import { memo, useState } from "react";
+import { memo, useMemo, useState } from "react";
 import { Badges, DiffBlock, PathText } from "../guest-tools.js";
 import { hasGuestRenderer, resolveGuestRenderer } from "../guest-tools.js";
 import {
   argumentsFor,
-  categoryLabel,
   fileChangesOf,
+  groupEvidence,
+  groupState,
+  groupSummary,
   guestResultOf,
   stateGlyph,
+  stateWord,
   STATUS_LETTER,
+  subagentLabel,
   summarizeFileChanges,
+  toolMembers,
   toolResultError,
   type ActivityGroup,
   type FileChange,
 } from "../tool-activity.js";
 import type { ToolActivityRow } from "../tool-activity.js";
+import "../tool-activity.css";
 
 /** One-line state suffix; never asserts a verified outcome it does not have. */
 function stateSuffix(row: ToolActivityRow): string {
@@ -134,7 +140,7 @@ function FileChangeRow({ file }: { file: FileChange }) {
           {/* Diagnostics are not a diff concern and survive whether or not one was
               drawn: the host's own LSP verdict on this file, shown verbatim. */}
           {diag?.summary != null && (
-            <p className={`tv-note${diag.errored ? " tv-note--err" : ""}`}>{diag.summary}</p>
+            <p className={`tv-diag-note${diag.errored ? " tv-diag-note--err" : ""}`}>{diag.summary}</p>
           )}
           {diag !== undefined && diag.messages.length > 0 && (
             <pre className={`tv-file-error${diag.errored ? " tv-file-error--err" : ""}`}><code>{diag.messages.join("\n")}</code></pre>
@@ -198,7 +204,7 @@ function EditFileRow({ file, onOpenFile }: { file: FileChange; onOpenFile: (path
           part of an edit result a diff cannot show. Plain text, no second
           disclosure — the row stays one level. */}
       {diag?.summary != null && (
-        <p className={`tv-note${diag.errored ? " tv-note--err" : ""}`}>{diag.summary}</p>
+        <p className={`tv-diag-note${diag.errored ? " tv-diag-note--err" : ""}`}>{diag.summary}</p>
       )}
       {diag !== undefined && diag.messages.length > 0 && (
         <pre className={`tv-file-error${diag.errored ? " tv-file-error--err" : ""}`}><code>{diag.messages.join("\n")}</code></pre>
@@ -435,13 +441,27 @@ export const ToolRow = memo(function ToolRow({ row, pairedArgs, onOpenFile = noo
  *
  * Group state summarises member row states and never makes a separate success
  * claim: one running member makes the group `◌`, one failed member makes it `✕`.
- * A failing member's own text is surfaced under the head without a tap, because
- * an error the user cannot read is an error they will miss — the same guarantee
- * the single-card view gave with its always-visible preview.
+ * A failure is legible without a tap, because an error the user cannot read is an
+ * error they will miss — the same guarantee the single-card view gave with its
+ * always-visible preview. Two sources cover the two ways a group can fail: the
+ * failing member's own text when the wire flagged it, and the runner's own
+ * summary line when the failure is proven by output alone and every member's wire
+ * flag says clean. A clean group shows no preview at all.
  */
-export const ActivityGroupRow = memo(function ActivityGroupRow({ group, pairedArgs, onOpenFile = noopOpenFile }: {
+export const ActivityGroupRow = memo(function ActivityGroupRow({ group, pairedArgs, onOpenFile = noopOpenFile, revealMemberId }: {
   group: ActivityGroup;
   pairedArgs: Map<string, Record<string, unknown>>;
+  /**
+   * A member row that must be shown, not merely present.
+   *
+   * Windowing made the transcript reach by identity but not always *readable* by
+   * identity: a search hit or a deep link can land on a group whose body is collapsed,
+   * and a collapsed body is not in the document at all — so the match would be
+   * "revealed" by scrolling to a card that does not contain the words the user
+   * searched for. Setting this opens the group. It is behaviour only: no class, no
+   * element and no ordering in the head is touched.
+   */
+  revealMemberId?: string;
   /**
    * Seam to the diff viewer, forwarded to each member `ToolRow`.
    *
@@ -452,18 +472,58 @@ export const ActivityGroupRow = memo(function ActivityGroupRow({ group, pairedAr
   onOpenFile?: (path: string) => void;
 }) {
   const [open, setOpen] = useState(false);
-  const failed = group.state === "failed" ? group.rows.find((row) => row.isError === true) : undefined;
+  // A reveal opens the body without taking away the user's own toggle: they can still
+  // collapse it afterwards, and the group does not re-open on every later render.
+  const [revealedFor, setRevealedFor] = useState<string | undefined>(undefined);
+  if (revealMemberId !== undefined && revealMemberId !== revealedFor && group.rows.some((row) => row.id === revealMemberId)) {
+    setRevealedFor(revealMemberId);
+    setOpen(true);
+  }
+  // The members, never the suppression echoes: an echo renders nothing on its own,
+  // and its call's arguments are reachable from the result row it belongs to.
+  const members = useMemo(() => toolMembers(group), [group]);
+  const evidence = useMemo(() => groupEvidence(group, pairedArgs), [group, pairedArgs]);
+  const state = groupState(group, evidence);
+  const summary = useMemo(() => groupSummary(group, evidence), [group, evidence]);
+  const failed = state === "failed" ? members.find((row) => row.isError === true) : undefined;
+  // What the reader must be able to see without a tap: a failing member's own
+  // text, else — when the group is `failed` from the runner's output alone and
+  // the wire said the call was clean (48 such groups in the owner's session) —
+  // the runner's summary line, verbatim, labelled as the runner's report. A
+  // failure announced only in the head's metric is the one a reader misses.
+  const preview = failed !== undefined && failed.text.length > 0
+    ? `${failed.text.slice(0, 240)}${failed.text.length > 240 ? "…" : ""}`
+    : state === "failed" && evidence.test !== null && evidence.test.failed > 0
+      ? `Runner reported: ${evidence.test.source}`
+      : null;
   // Only edit-shaped groups can carry file-change data, and only real diffs are
   // summed. A group whose diffs are missing keeps its plain label rather than
   // printing counts the transport never proved.
   const changes = group.category === "edit" || group.category === "patch" || group.category === "diff"
-    ? summarizeFileChanges(group.rows)
+    ? summarizeFileChanges(members)
     : null;
+  // Failure is announced in words, not only in the glyph's colour, and the name
+  // repeats every secondary fact the head prints — a screen-reader user must not
+  // get less than a sighted one.
+  const spoken = [
+    `${stateWord(state)}: ${summary.label}`,
+    changes !== null && changes.note !== "" ? changes.note : null,
+    changes !== null && changes.additions !== null && changes.deletions !== null
+      ? `+${changes.additions} −${changes.deletions}`
+      : null,
+    summary.metric,
+  ].filter((part): part is string => part !== null).join(", ");
   return (
-    <div className={`activity-group activity-group--${group.state}`}>
-      <button type="button" className="activity-group-head" aria-expanded={open} onClick={() => setOpen((value) => !value)}>
-        <span className="activity-group-state" aria-label={group.state}>{stateGlyph(group.state)}</span>
-        <span className="activity-group-label">{categoryLabel(group.category, group.rows.length)}</span>
+    <div className={`activity-group activity-group--${state}`}>
+      <button
+        type="button"
+        className="activity-group-head"
+        aria-expanded={open}
+        aria-label={spoken}
+        onClick={() => setOpen((value) => !value)}
+      >
+        <span className="activity-group-state" aria-hidden="true">{stateGlyph(state)}</span>
+        <span className="activity-group-label">{summary.label}</span>
         {changes !== null && changes.note !== "" && (
           <span className="activity-group-note">{changes.note}</span>
         )}
@@ -473,16 +533,65 @@ export const ActivityGroupRow = memo(function ActivityGroupRow({ group, pairedAr
             <span className="tv-count-del">−{changes.deletions}</span>
           </span>
         )}
+        {summary.metric !== null && (
+          <span className="activity-group-metric">{summary.metric}</span>
+        )}
         <span className="activity-group-chevron" aria-hidden="true">{open ? "▾" : "›"}</span>
       </button>
-      {!open && failed !== undefined && failed.text.length > 0 && (
-        <p className="tool-output-preview">{failed.text.slice(0, 240)}{failed.text.length > 240 ? "…" : ""}</p>
+      {!open && preview !== null && (
+        <p className="tool-output-preview">{preview}</p>
       )}
       {open && (
         <div className="activity-group-body">
-          {group.rows.map((row) => <ToolRow key={row.id} row={row} pairedArgs={pairedArgs} onOpenFile={onOpenFile} />)}
+          {members.map((row) => <ToolRow key={row.id} row={row} pairedArgs={pairedArgs} onOpenFile={onOpenFile} />)}
         </div>
       )}
+    </div>
+  );
+});
+
+/**
+ * A roll-up of the subagents the host says are working, or nothing at all.
+ *
+ * The count comes from the host's own agent snapshot — the same
+ * `kind === "sub" && status === "running"` test the app already makes before
+ * offering Stop (`ConversationView.tsx:1593`), and the same source the Agents
+ * panel renders. It is deliberately not derived from tool output: see
+ * `runningSubagents` for the census that ruled that out.
+ *
+ * With no navigation handler the line still states the count — that is the
+ * honest half — but offers no tap, because a control that does nothing is worse
+ * than absent. Nothing is rendered for zero running subagents, so an idle session
+ * gains no row.
+ */
+export const SubagentActivityRow = memo(function SubagentActivityRow({ running, onOpenAgents }: {
+  running: number;
+  /** Opens the Agents panel. Required for the hint line; omitted leaves a static row. */
+  onOpenAgents?: () => void;
+}) {
+  if (running <= 0) return null;
+  const label = subagentLabel(running);
+  if (onOpenAgents === undefined) {
+    return (
+      <div className="subagent-row">
+        <span className="subagent-row-state" aria-hidden="true">○</span>
+        <span className="subagent-row-label">{label}</span>
+      </div>
+    );
+  }
+  return (
+    <div className="subagent-row">
+      <button
+        type="button"
+        className="subagent-row-head"
+        aria-label={`${label}. Open Agents to view details`}
+        onClick={onOpenAgents}
+      >
+        <span className="subagent-row-state" aria-hidden="true">○</span>
+        <span className="subagent-row-label">{label}</span>
+        <span className="subagent-row-chevron" aria-hidden="true">›</span>
+      </button>
+      <p className="subagent-row-hint">Open Agents to view details</p>
     </div>
   );
 });
