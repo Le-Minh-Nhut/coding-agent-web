@@ -36,5 +36,15 @@ export default defineConfig({
   },
   build: {
     target: "es2022",
+    /**
+     * Never the directory the server serves. `apps/web/dist` used to be vite's
+     * default outDir *and* the served directory, so a plain `vite build`
+     * replaced live assets. Releases are built into `.deploy/staging` and only
+     * `scripts/deploy-web.mjs publish` moves one into `current`; a bare direct
+     * build lands in staging, where nothing is served from it and no manifest
+     * exists to publish it.
+     */
+    outDir: resolve(root, "apps/web/.deploy/staging/manual"),
+    emptyOutDir: true,
   },
 });

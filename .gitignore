@@ -245,3 +245,6 @@ var/
 # ─── Playwright ──────────────────────────────────────────────────────────────
 test-results/
 playwright-report/
+
+# ─── Web release layout (built artifacts, never committed) ───────────────────
+.deploy/
