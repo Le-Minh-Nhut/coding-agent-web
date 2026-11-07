@@ -923,9 +923,10 @@ provider credits and was out of scope. Recorded as an inference, not a result.
 Verdict vocabulary is PASS / FAIL / BLOCKED / UNVERIFIED only. Every number below is an
 **observed release-sweep or CI value**, reported to me by the director; nothing is rounded
 into a different claim and nothing unfilled is written as a pass. The remaining negative
-verdicts are physical-device work — CI is read through run **119** (`b6ace88`, green), while
-run **120 on the shipped `d29ffe6`** is still `in_progress`, so its step detail does not
-exist yet and is stated as such.
+verdicts are physical-device work — CI is read: run **121 on `99fae06` = `success`**, a tree
+whose build inputs are identical to the deployed `d29ffe6`; run **120 on `d29ffe6` itself**
+was `cancelled` 20 s in by a doc-only push, so no verdict exists for that exact SHA and it is
+not called green (§I.2). Step detail is unavailable for every run.
 
 ### H.1 The gate table
 
@@ -949,7 +950,7 @@ exist yet and is stated as such.
 | `PERF-A11Y-01` | **PASS** | list + listitems through Playwright's aria engine on **both engines**; `role` / `aria-setsize` / `aria-posinset` read on the entry's **real box**; calibration control (a native `<ul><li>` exposes the same absence of `posinset`/`setsize` through CDP) | `npx playwright test tests/e2e/perf-a11y.spec.ts` |
 | `auth.spec.ts` | **PASS** | **4/4** in both cookie modes: `caw_session` + `secure:false` (loopback dev) and `__Host-caw_session` + `secure:true` (production) | `npx playwright test tests/e2e/auth.spec.ts` per project |
 | `pnpm compat` | **PASS** | **18 ok, 0 warn, 0 fail** | `node scripts/compat-check.mjs` |
-| CI (`.github/workflows/ci.yml`) | **PASS through run 119** (`b6ace88`, `success`); run **120** on the shipped `d29ffe6` is **`in_progress`** — no verdict exists for the shipped commit. Step logs **UNVERIFIED** for every run | Read without `gh` (absent; `GITHUB_TOKEN`/`GH_TOKEN` unset) from `https://api.github.com/repos/Le-Minh-Nhut/coding-agent-web/actions/runs` on 2026-11-07T02:44Z: 120 `d29ffe6` `in_progress`; 119 `b6ace88` `success`; 118 `9e36a35` `cancelled`; 117 `f788ab8` `success`; 116 `d0e1bd5` `success`. Runs 114/115/118 read `cancelled` — **superseded by the next push, not evidence about the code**: the workflow declares `concurrency: ci-<ref>` with `cancel-in-progress: true`. The earlier 403 rate-limit cleared at 02:43Z; the index was readable again at 02:44Z (57/60 remaining). Per-step logs are not exposed without a token, so every step-level claim stays UNVERIFIED. **The shipped code is ahead of the last completed verdict** (§I.2) | Actions index |
+| CI (`.github/workflows/ci.yml`) | **PASS on run 121 (`99fae06`, `success`)** — the tree with the deployed build inputs; run **120 on the deployed `d29ffe6` itself is `cancelled`**, not green. Step logs **UNVERIFIED** for every run | Read without `gh` (absent; `GITHUB_TOKEN`/`GH_TOKEN` unset) from `https://api.github.com/repos/Le-Minh-Nhut/coding-agent-web/actions/runs`: 121 `99fae06` `success` (completed 02:59:40Z); 120 `d29ffe6` `cancelled` (superseded 20 s after start by the doc push); 119 `b6ace88` `success`; 118 `9e36a35` `cancelled`; 117 `f788ab8` `success`; 116 `d0e1bd5` `success`. Every `cancelled` row is the workflow's own `concurrency: ci-<ref>` with `cancel-in-progress: true` superseding an in-flight run — **not evidence about the code**. Per-step logs are not exposed without a token, so every step-level claim stays UNVERIFIED. The deployed SHA has no run of its own; the argument that run 121 covers its build inputs is in §I.2 | Actions index |
 | Physical iPhone Safari | **BLOCKED** | no device (§J.6) | — |
 
 **The skips are counted, not explained away.** 3 per Chromium sweep and 1 in the WebKit
@@ -1080,7 +1081,7 @@ and now describe the `d29ffe6` bundle the origin actually serves.
 | Final commit SHA | `d29ffe6aabd84b6fbca6b716bde0fa05a30b0b0a` (`fix(web): never float the jump-to-latest control over an approval`). The release itself was `8d3d2cc891c73237c0b787bb2338235c9a7c1333`; `d29ffe6` is what the origin now serves (§I.3) |
 | Release commits | `b1ef86c` perf(web): window the transcript; `ab2a7bb` feat(web): group tool activity by evidence + premium chrome; `8d3d2cc` docs |
 | Push to `origin/main` | **`b0114e3..8d3d2cc`, exit 0**; working tree clean; 75 files committed (28 round-58 PNGs, largest 193,325 B); sensitive-value scan empty |
-| CI run and result | **Newest completed verdict: run 119 on `b6ace88` = `success`.** Run 116 on `d0e1bd5` was `completed successfully` (badge `passing`); 117 on `f788ab8` also `success`; 114/115/118 are `cancelled` because `concurrency: ci-<ref>` with `cancel-in-progress: true` let the next push supersede them — **not** code evidence. **Run 120 on `d29ffe6`, the shipped commit, is `in_progress` with no conclusion** (§I.2). Conclusions read from the Actions index without `gh`; **per-step logs UNVERIFIED** |
+| CI run and result | **Run 121 on `99fae06` = `success`** — its build inputs are identical to the deployed `d29ffe6` (the only delta is this report), so it is the run that covers the shipped code. **Run 120 on the deployed SHA itself is `cancelled`**, superseded 20 s in by that doc push; no verdict exists for the exact deployed SHA (§I.2). 117 `f788ab8` and 116 `d0e1bd5` are `success`; 114/115/118 are `cancelled` under `concurrency: ci-<ref>` + `cancel-in-progress: true` — **not** code evidence. Conclusions read from the Actions index without `gh`; **per-step logs UNVERIFIED** |
 | Deployed SHA | **`d29ffe6`**, proven by rebuilding HEAD in a detached worktree (`git worktree add /tmp/caw-verify HEAD`, `npx vite build --outDir /tmp/caw-verify-dist`) and hashing the output — see §I.3. This supersedes the earlier entry that read `8d3d2cc` |
 | Deployed revision | **`d29ffe6aabd84b6fbca6b716bde0fa05a30b0b0a` — VERIFIED.** The scratch build of HEAD reproduced all three served deliverables byte-for-byte (§I.3), so the live origin is serving a committed SHA's output, not an unrecorded tree |
 | `apps/web/dist` JS | `assets/index-hVfEUPqx.js`, sha256 `02660079191e8615ea455b8e67b096023507c888b4539569f5b06fd5778a035b`, **486,141 B** (gzip **143,295 B**) |
@@ -1108,39 +1109,34 @@ conversation, scroll to the top and back to the bottom. The newest row must be o
 and the transcript must not go blank on the way up. That is the symptom this round
 existed for, and it is the only claim nobody has checked in the deployed app.
 
-### I.2 The shipped code is ahead of the last CI verdict
+### I.2 The shipped code now has a CI verdict, one commit removed
 
-The deployed revision is now `d29ffe6` (§I.3 proves it), and the newest **completed** CI
-run is **119 on `b6ace88` = `success`**. So the bundle on the origin contains a commit
-whose CI verdict does not exist yet — the honest statement is *shipped code is ahead of
-the last CI verdict*, not "CI covers what is deployed".
+The deployed revision is `d29ffe6` (§I.3 proves it). CI ran on it and was **`cancelled`** —
+run 120, superseded 20 s after start by the doc-only push that carried this section. But the
+next run tested the very next commit, **121 on `99fae06` = `success`**, and `99fae06`'s only
+delta from `d29ffe6` is *this report*. So CI's green run 121 executed the shipped
+`ConversationView.tsx` and `styles.css`:
 
-Read from the Actions index on 2026-11-07T02:44Z (unauthenticated, `core` quota 57/60
-remaining — the earlier 403 had cleared at 02:43Z):
+| run | SHA | status | conclusion | note |
+| --- | --- | --- | --- | --- |
+| 121 | `99fae06` (docs: reconcile the deployed bundle…) | `completed` | **`success`** | tests the shipped tree plus one doc file |
+| 120 | `d29ffe6` (**the deployed commit**) | `completed` | `cancelled` | superseded 20 s in by the doc push; not a code verdict |
+| 119 | `b6ace88` | `completed` | **`success`** | |
+| 118 | `9e36a35` | `completed` | `cancelled` | superseded by 119 |
+| 117 | `f788ab8` | `completed` | **`success`** | |
+| 116 | `d0e1bd5` | `completed` | **`success`** | last run before the overlay fix |
 
-| run | SHA | status | conclusion |
-| --- | --- | --- | --- |
-| 120 | `d29ffe6aabd84b6fbca6b716bde0fa05a30b0b0a` | **`in_progress`** | `null` — no verdict yet |
-| 119 | `b6ace88da4b46bea1d536da928b5fe1dc31521d6` | `completed` | **`success`** |
-| 118 | `9e36a354a1a8bdb78f87065680361bc4d2f727ee` | `completed` | `cancelled` (superseded by 119 under `cancel-in-progress`) |
-| 117 | `f788ab8cebc8ff41e02490e0912e412fdcb67c7d` | `completed` | **`success`** |
-| 116 | `d0e1bd55953933887e38d76d0d29baf9e95b6453` | `completed` | **`success`** |
+**How to read this honestly.** "Run 121 green" is not "run 120 green": no CI verdict exists
+for the exact SHA served, and `cancelled` is not a pass. What exists is a green run on a tree
+whose build inputs are byte-identical to the served commit's — the difference is one
+Markdown file, shown by `git diff-tree --name-only -r 99fae06`. That is a strong argument,
+and it is an argument, not a verdict; stated as such.
 
-Which of the post-116 commits can reach the bundle, by `git diff-tree --name-only -r`:
-
-| commit | files | can reach `dist`? |
-| --- | --- | --- |
-| `f788ab8` | this report | no |
-| `9e36a35` | this report | no |
-| `b6ace88` | `apps/web/src/components/ConversationView.tsx` | **yes** |
-| `d29ffe6` | `apps/web/src/components/ConversationView.tsx`, `apps/web/src/styles.css`, `tests/e2e/overlay-collision.spec.ts` | **yes** (the spec is not a build input) |
-
-`b6ace88` is covered by run 119's `success`; `d29ffe6` changes the shipped JavaScript and
-has no verdict at all, because run 120 is still running. It is the one commit whose CI
-status is genuinely unknown **and** whose code is being served. Its gates pass locally
-(§I.4, 6/6, and fail on the pre-fix build — a stronger statement than a pass), but local is
-not CI. The verdict arrives with run 120 and was **not** available while this edit was
-written.
+The `cancelled` churn is the workflow's own `concurrency: ci-<ref>` + `cancel-in-progress:
+true`, which cancels an in-flight run when a newer push arrives. Every doc-only commit on
+`main` therefore invalidates the run for the code commit beneath it. That is why this table
+is the shape it is, and it is worth noticing that a doc push "cancel" is not evidence about
+code (the same reading as runs 114/115/118).
 
 The origin does serve the `dist` bytes, which is a separate and verified claim: §I.3's
 three-way hash table is 9/9.
@@ -1342,8 +1338,8 @@ pixels of the live origin. That is the honest coverage statement for this round.
 13. **`.agent-chat-carry` still paints `--text-faint` as body text at 3.85:1**
     (`agent-chat.css:137`). Recorded by the visual lane, not owned by this workstream.
 
-14. **The round's gates are committed (W29 closed), and CI has been read — green through
-    `b6ace88`, with the shipped commit still in flight.**
+14. **The round's gates are committed (W29 closed), and CI has been read — green on the
+    tree that ships.**
     `perf-scroll-harness.ts`, `perf-scroll.spec.ts`, `perf-scroll-gates.spec.ts`,
     `perf-a11y.spec.ts`, `premium-visual.spec.ts`, `perf-input.spec.ts`,
     `perf-pixels.spec.ts`, `perf-profile.spec.ts`, `perf-decision.spec.ts`, `perf-trace.ts`,
@@ -1353,8 +1349,9 @@ pixels of the live origin. That is the honest coverage statement for this round.
     rather than assumed: **117 `f788ab8` `success`, 119 `b6ace88` `success`**, with
     114/115/118 `cancelled` by the lane's own `cancel-in-progress: true` rather than
     failing (§H.1). **Run 120 on `d29ffe6` — the commit the origin serves — is
-    `in_progress`**, so the shipped code is ahead of the last completed verdict and that
-    gap is stated, not papered over (§I.2). Locally the same suites pass: 210 expected / 0
+    `in_progress` when the release sweep read it and `cancelled` once a doc push superseded
+    it, so no verdict exists for the exact deployed SHA — the verdict that covers it is run
+    **121 on `99fae06` = `success`**, one doc-only commit above it (§I.2). Locally the same suites pass: 210 expected / 0
     unexpected twice on Chromium; the overlay gate 6/6 after the fix and failing at all four
     widths before it. What stays open is the **step-level** detail of every run — no `gh`,
     and the unauthenticated API exposes conclusions only — so "the run succeeded" is
@@ -1425,13 +1422,14 @@ pixels of the live origin. That is the honest coverage statement for this round.
 ## Open items
 
 Reconciled on 2026-11-07 against the live machine and the Actions index. Six entries: one
-**in progress** (CI for the shipped commit), two **BLOCKED** (no device, no owner session
-cookie), one **UNVERIFIED** figure, one **VERIFIED and closed** (bundle provenance), and one
-recorded gap in the release sweep's coverage.
+**PASS with a stated caveat** (CI covers the deployed build inputs, not the exact deployed
+SHA), two **BLOCKED** (no device, no owner session cookie), one **UNVERIFIED** figure, one
+**VERIFIED and closed** (bundle provenance), and one recorded gap in the release sweep's
+coverage that the escaped defect proved.
 
 | Item | Status | Why it cannot be closed here | Who closes it |
 | --- | --- | --- | --- |
-| **CI verdict for the shipped code** | **OPEN — run 120 `in_progress`; shipped code is ahead of the last completed verdict** | CI has **not completed on `d29ffe6`**, which is the commit the origin serves (§I.3). Completed runs on the preceding commits: **119 `b6ace88` success**, 118 `9e36a35` `cancelled` (superseded under `cancel-in-progress`, not a failure), **117 `f788ab8` success**, **116 `d0e1bd5` success**. So `f788ab8` and `b6ace88` are *not* unverified — they were probed and are green — but `d29ffe6`, the one that changes shipped behaviour (approval gate + `styles.css`), has no verdict. Read from the Actions index with the unauthenticated API (`core` 57/60 remaining at 02:44Z; no `gh` on this machine) | the CI lane, on push of this commit. Until it finishes, "shipped and CI-green" is **false** for `d29ffe6`; "shipped and locally gated" is true (§I.4) |
+| **CI verdict for the deployed build** | **PASS on run 121 (`99fae06`, `success`), one doc-only commit above the deployed `d29ffe6`; the run on the deployed SHA itself (120) is `cancelled`, so no verdict exists for that exact SHA** | CI ran on `d29ffe6` (run 120) and was superseded 20 s in by the push that carried §I.2, so `cancelled` — which is not a pass. Run **121 on `99fae06` completed `success`** at 02:59:40Z; `git diff-tree --name-only -r 99fae06` shows its only delta from the deployed commit is this Markdown file, so the green run executed the shipped `ConversationView.tsx` and `styles.css`. That is an argument a reader can check, not a verdict on the exact SHA: stated as such in §I.2. Earlier runs: 119 `b6ace88` `success`, 117 `f788ab8` `success`, 116 `d0e1bd5` `success`; 114/115/118 `cancelled` by `cancel-in-progress`. Read from the Actions index (unauthenticated API, no `gh` on this machine); **step logs UNVERIFIED** | nothing for the conclusion; `gh run view 121 --log` for step detail, or a push that does not supersede the deploy commit |
 | CI **step-level** detail for any run | **UNVERIFIED** | no `gh`; the API returns conclusions, not step logs, without a token | `gh run view 120 --log` once available |
 | Physical iPhone Safari (compositor under a real thumb, safe-area insets, tab eviction, keyboard) | **BLOCKED** | no device on this machine. Playwright WebKit is the same engine family and the WebKit run reported **26 expected / 0 unexpected / 1 skipped / 0 flaky**, but it is not a thumb. The approval-overlay gate (§I.4) ran at four widths — a real iPhone is still a different compositor and a different thumb | owner, on the phone |
 | Authenticated populated-conversation walk in the deployed app | **BLOCKED** | no owner session cookie. Everything else about the deploy is machine-verified (§I.1, §I.3) | owner: open the origin, open a long conversation with an approval pending, scroll top→bottom; newest row on screen, no blank, and every approval option tappable |
