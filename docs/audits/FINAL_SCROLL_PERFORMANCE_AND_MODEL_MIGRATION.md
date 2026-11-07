@@ -132,10 +132,12 @@ is blown by an order of magnitude, repeatedly, for the whole gesture.
 every row's full DOM (markdown, tables, diffs, tool bodies). The code did exactly what
 it said; the cost was its unbounded output:
 
-- Writer in the revision under test: `apps/web/src/components/MessageRow.tsx:244` —
-  `{entries.map((entry) => …)}` inside `TranscriptList`, with no window. (Line 244 of
-  `git show HEAD:apps/web/src/components/MessageRow.tsx`; in the current tree the same
-  render site is `MessageRow.tsx:846`.)
+- Writer in the revision under test: `apps/web/src/components/MessageRow.tsx:244` at
+  **`b0114e3`** — `{entries.map((entry) => …)}` inside `TranscriptList`, with no window
+  (`git show b0114e3:apps/web/src/components/MessageRow.tsx`, 278 lines total; the file is
+  named by revision rather than `HEAD` because `HEAD` has moved since). In the current
+  tree the same render sits in the `!windowed` branch, `MessageRow.tsx:995-1000`, and the
+  windowed path builds `items` instead (`:1021-1059`).
 - Consequence: DOM size is **O(history)**. 4,075 heavy entries → **160,027** elements;
   8,000 heavy entries → **313,916** elements.
 
@@ -207,7 +209,7 @@ the one that explains why every Chromium gate was green while the owner's phone 
 The window's anchor correction has a **missing-anchor branch**: when the row it captured
 is no longer mounted, it recomputes the target offset from the height model alone. That
 arithmetic omitted the scroll movement since capture. The correct identity, stated at
-`MessageRow.tsx:735-759`:
+`MessageRow.tsx:734-760`:
 
 ```
 target = modelOffset - anchor.offset + (scrollTop - anchor.scrollTop)
@@ -230,7 +232,7 @@ close:
 
 | change | what it fixes | measured evidence |
 | --- | --- | --- |
-| the tail invariant is enforced **after every commit**, not on notification | WebKit can grow the document after the write with **no scroll event and no observer record** | `ConversationView.tsx:1245`: write at `scrollTop 404,873` vs `scrollHeight 420,637` — **15,764 px** short, permanently (identical at +50/150/400/1000 ms). `MessageRow.tsx:513`: `712,712` vs `732,974` — **19,580 px** short. Instrumenting it made the gap appear in **9 of 10 runs** |
+| the tail invariant is enforced **after every commit**, not on notification | WebKit can grow the document after the write with **no scroll event and no observer record** | `ConversationView.tsx:1245`: write at `scrollTop 404,873` vs `scrollHeight 420,637` — **15,764 px** short, permanently (identical at +50/150/400/1000 ms). `MessageRow.tsx:511-515`: `712,712` vs `732,974` — **19,580 px** short. Instrumenting it made the gap appear in **9 of 10 runs** |
 | the view **adopts** the bottom when it is already within `TAIL_THRESHOLD_PX` | the lock is released when the reader leaves, but nothing re-acquired it after a programmatic write whose scroll event WebKit coalesced away | `ConversationView.tsx:1266-1273`: final `scrollTop = scrollHeight` landed at 713,347 against `scrollHeight 733,608` and stayed there. "Is the view at the bottom" needs no event to answer, and a reader who genuinely left is further than the threshold, so this cannot pull anyone back |
 | the window **self-heals** when the mounted range does not contain the live offset | WebKit moves `scrollTop` *after* render — it clamps a write to a maximum it is still recomputing, then applies it after layout, with no further scroll event | `MessageRow.tsx:536-542`: write at `scrollTop 126,241` with `scrollHeight` already 937,795, window stuck at rows 104-118 — **`SCROLL-03` reported `posinset 17` with `setsize 4075`**, i.e. the scroller at the end and the window at the start. Chromium never reproduces it because its scroll event arrives with the write |
 
@@ -258,19 +260,19 @@ Cost was therefore a function of conversation length, not of what the reader can
 | Concern | Decision | Where |
 | --- | --- | --- |
 | What is bounded | the **mounted DOM**, never the data. `rows` and `groupActivity(rows)` stay whole | `apps/web/src/components/MessageRow.tsx` |
-| Window unit | **entries** (a group is one entry, a row is one entry), not rows | `transcript-window.ts` `EntryWindow` |
+| Window unit | **entries** (a group is one entry, a row is one entry), not rows | `EntryWindow` (`transcript-window.ts:212`), `computeWindow` (`:226`) |
 | Heights | **measured**, cached by identity; only never-measured entries borrow an estimate from the nearest measured neighbour | `estimateHeights` (`transcript-window.ts:92`) |
-| Measurement | one `ResizeObserver`, re-armed on the mounted set, reading the `display: contents` wrapper's `firstElementChild` | `MessageRow.tsx` observer effect |
-| Offsets | prefix sums in a `Float64Array`, binary search — O(log n) per scroll event | `buildOffsets:138`, `indexAtOffset:176` |
-| Spacers | **exact sums of the same offsets array**, so `scrollTop = offsets[i]` lands entry `i` at the top even while distant heights are guesses | `computeWindow:205`, `spacerHeights:241`, `fitSpacersToGap:271` |
-| Flex `gap` | subtracted from the spacers, because `gap` is additive between *rendered* items and belongs to no element's measured height — the adversarial review's W1 | `fitSpacersToGap:271`, `MessageRow.tsx:885` |
-| Anchor | identity + offset from the viewport top + **the `scrollTop` it was taken at**; the third field is what stops the correction from fighting the user | `captureAnchor` / correction effect |
-| Tail-follow | unchanged `followTailRef` / `TAIL_THRESHOLD_PX`, plus re-pinning on **known** document growth and on viewport shrink (a subagent row appearing) | `ConversationView.tsx` `updateTailLock` |
+| Measurement | one `ResizeObserver`, re-armed on the mounted set, reading the `display: contents` wrapper's `firstElementChild` | observer at `MessageRow.tsx:845-852` |
+| Offsets | prefix sums in a `Float64Array`, binary search — O(log n) per scroll event | `buildOffsets` (`transcript-window.ts:138`), `indexAtOffset` (`transcript-window.ts:197`) |
+| Spacers | **exact sums of the same offsets array**, so `scrollTop = offsets[i]` lands entry `i` at the top even while distant heights are guesses | `computeWindow` (`transcript-window.ts:226`), `spacerHeights` (`transcript-window.ts:262`) |
+| Flex `gap` | charged **inside the height model**, not corrected at render time: `buildOffsets(heights, gapPx)` adds one gap before every entry after the first — `count − 1` gaps, deliberately none after the last, because a trailing gap is space the DOM does not have (it showed as content ending **177 px** past the scrollport). That makes an entry's model offset its DOM position for every window, so a window move is not a geometry change. The review's W1. The previous render-time subtraction (`fitSpacersToGap`) is what caused the oscillation — see §D.2.2; the symbol no longer exists | `buildOffsets` signature + gap loop, `transcript-window.ts:138` / `:171`; rationale `MessageRow.tsx:358` |
+| Anchor | identity + offset from the viewport top + **the `scrollTop` it was taken at**; the third field is what stops the correction from fighting the user | `captureAnchor` (`MessageRow.tsx:639`); correction effect `:697-817` |
+| Tail-follow | unchanged `followTailRef` / `TAIL_THRESHOLD_PX`, plus re-pinning on **known** document growth and on viewport shrink (a subagent row appearing), plus the after-every-commit enforcement and bottom adoption of §B.7 | `updateTailLock` (`ConversationView.tsx:1135`), `TAIL_THRESHOLD_PX` (`:81`), enforcement effect `:1259-1315` |
 | Native scroll anchoring | **disabled** — `overflow-anchor: none` on `.messages-scroll` | `apps/web/src/styles.css:724` |
-| Pinned entries | force-mounted as **separate segments**, never by widening the window; `isError` rows pinned by identity; open disclosures and the focused row derived from the live DOM | `computeSegments:400` |
-| Estimate propagation | capped at **8×** the entry's own fallback (`PROPAGATION_CAP_FACTOR`), and the total is scaled under the engine's `MAX_SCROLL_HEIGHT_PX = 33,554,428` — the review's W3 | `transcript-window.ts:76,83,141` |
-| Small lists | `< 60` entries render everything — a short conversation must not pay for a measurement pass | `WINDOW_MIN_ENTRIES = 60` |
-| Overscan | **800 px**, chosen by sweep (§C.3) | `DEFAULT_OVERSCAN_PX = 800` |
+| Pinned entries | force-mounted as **separate segments**, never by widening the window; `isError` rows pinned by identity; open disclosures and the focused row derived from the live DOM | `computeSegments` (`transcript-window.ts:441`) |
+| Estimate propagation | capped at **8×** the entry's own fallback (`PROPAGATION_CAP_FACTOR`), and the total is scaled under the engine's `MAX_SCROLL_HEIGHT_PX = 33,554,428` — the review's W3 | `transcript-window.ts:76`, `:83`, `:169-179` |
+| Small lists | `< 60` entries render everything — a short conversation must not pay for a measurement pass | `WINDOW_MIN_ENTRIES = 60` (`transcript-window.ts:34`) |
+| Overscan | **800 px**, chosen by sweep (§C.3) | `DEFAULT_OVERSCAN_PX = 800` (`transcript-window.ts:45`) |
 | Dependency | **none added** | `git diff package.json apps/web/package.json` → empty |
 
 ### C.3 Why 800 px, by measurement
@@ -370,7 +372,7 @@ twice. What is *measured* in the subsections below is each individual item, from
 instrument's printed `PERF_JSON`; the sweep's verdicts are quoted as verdicts. The app
 defect was **React error #185, "maximum update depth exceeded"**: 4 of 6 runs, only on
 the changed tree (**0 of 6** on pristine `b0114e3`). The in-source record says "4-6 of 6"
-(`ConversationView.tsx:1802`); the gate's own comment says 4 of 6
+(`ConversationView.tsx:1880`); the gate's own comment says 4 of 6
 (`perf-input.spec.ts:162`). I use **4 of 6**, the smaller figure, and note that the two
 differ rather than picking the worse-looking one.
 
@@ -385,7 +387,7 @@ One keystroke drove three writes:
 2. `onChange` → `updateDraft(...)` — publish the draft to the parent.
 3. the `[draft]` effect → `setInputText(draft)` — take the parent mirror back as state,
    even though the parent's `draft` *is* the value this component just published.
-   `ConversationView.tsx:1325`.
+   `ConversationView.tsx:1403-1418`.
 
 React fires **both** `onInput` and `onChange` for a single edit, and `updateDraft`'s
 `sendVersionRef++` invalidated `adoptElementValue`'s authorship guard, so the pair
@@ -398,32 +400,39 @@ The fix is one writer:
 | writer | before | after |
 | --- | --- | --- |
 | text input | `onInput`→`adoptElementValue`, `onChange`→`updateDraft`, `[draft]`→`setInputText` | **one**: `handleComposerChange` reads `event.currentTarget.value` |
-| parent mirror | written back as state on every identity | the `[draft]` effect is a **no-op** when the parent merely mirrors our own published value; a genuine external change (restored draft, recovered refusal) still lands (`ConversationView.tsx:1337`) |
+| parent mirror | written back as state on every identity | the `[draft]` effect is a **no-op** when the parent merely mirrors our own published value; a genuine external change (restored draft, recovered refusal) still lands (`ConversationView.tsx:1415`) |
 | IME / composition guards | in `adoptElementValue` | moved into the single writer |
 
 Result: **0 page errors in 6 of 6 runs, across three separate sweeps**. The permanent gate
 is **`PERF-STREAM-02`** (burst typing *and* scrolling while a turn streams ⇒ zero
-`pageerror`, `tests/e2e/perf-input.spec.ts:160`); it **fails on the released bundle and
+`pageerror`, `tests/e2e/perf-input.spec.ts:169`); it **fails on the released bundle and
 passes on the fix**. Input exactness (`PERF-INPUT-01`) never caught this — the characters
 arrived correctly and the page died afterwards — which is why the new gate asserts the one
 thing that would have.
 
 #### D.2.2 Height model vs the CSS flex gap
 
-`fitSpacersToGap` subtracted `(mounted − 1) × gap` at **render time**, so every mounted row
+**The function that caused this was `fitSpacersToGap`, and it no longer exists.** It
+subtracted `(mounted − 1) × gap` from the spacers at **render time**, so every mounted row
 sat `k × gap` below its model offset for a `k` that changed with the mounted range. The
 anchor correction then measured a fresh delta after every window move and re-armed
 itself. Measured on the crashing build, anchor 21,600 px from the top: the correction
 fired **+40, −20, +10, −10, +10, −10 px** in succession — an oscillation, not a
-convergence.
+convergence. (`grep -rn fitSpacersToGap apps/web/src` today returns **comments only**, and
+each of those comments describes it in the past tense as the removed cause.)
 
-Fix: the gap is charged **inside `buildOffsets`** (`transcript-window.ts:138`) — `count−1`
-gaps, none after the last entry — so a window move is no longer a geometry change and the
-measured `delta` is **0**. The comment that explains why the correction belongs to the
-model and not to render time is at `MessageRow.tsx:359`. `spacerHeights` takes exactly one
-gap off each **non-empty** spacer (`transcript-window.ts:262`), and that subtraction
-depends only on how many spacers are rendered — 0, 1 or 2 — never on how many entries are
-mounted, which is what keeps a window move from changing the document's height.
+**What ships instead:** the gap is charged **inside `buildOffsets(heights, gapPx)`**
+(`transcript-window.ts:138`), which is why the function now takes a second parameter. The
+loop adds one gap before every entry after the first — `if (index > 0) running += gap`
+(`:171`), so `count − 1` gaps and deliberately none after the last entry. A window move is
+therefore not a geometry change and the measured `delta` is **0**. The rationale — and the
+177 px trailing-gap measurement that fixed the "no gap after the last entry" detail — is
+in the `buildOffsets` comments (`transcript-window.ts:142-153` for the model rationale,
+`:165-170` for the 177 px trailing gap); the mirror of it on the component side is
+`MessageRow.tsx:358`. `spacerHeights` takes exactly one gap off each
+**non-empty** spacer (`transcript-window.ts:262`), and that subtraction depends only on how
+many spacers are rendered — 0, 1 or 2 — never on how many entries are mounted, which is
+what keeps a window move from changing the document's height.
 
 **Confirmed on the released build:** `PERF-STREAM-02` passes with **0 page errors in 6 of
 6 runs across three separate sweeps**, `PERF-LOAD-01` measured **first content 302–320 ms
@@ -455,7 +464,7 @@ the view still showed rows 267–299 after the write). A probe must go through t
 path.
 
 One real latent bug was removed on the way: **`entriesRef` was declared but never attached
-to the DOM** (`MessageRow.tsx:382`, now `ref={entriesRef}` at `:985`), so every
+to the DOM** (`MessageRow.tsx:382`, now `ref={entriesRef}` at `:1064`), so every
 gap/lead-in read that depended on it had silently never run.
 
 ### D.3 Frame gaps (the owner's symptom)
@@ -1065,7 +1074,7 @@ director's release sweep and reported to me; they are not inferred from this rep
 | Was the service restarted? | **No** |
 | What was not restarted, and why | The backend. `apps/server` and `packages/*` have **zero changes**, and the server reads `apps/web/dist` from disk (`apps/server/src/app.ts:286`), so new web assets went live with no restart — which is exactly why the pane pids are unchanged and no session was at risk |
 | Authenticated populated-conversation walk in the deployed app | **BLOCKED** — no owner session cookie was available to the sweep |
-| Commits after the deployed build | `a1cd120` (CI lane only: `playwright.config.ts` + `.github/workflows/ci.yml`, no `apps/web` file) and `d0e1bd5` (this report). The served bundle is unchanged by both — argued in §I.2 with the diff and `find` evidence — and the three `dist` hashes were re-read from disk on 2026-11-07 and still match the deployed build |
+| Commits after the deployed build | `a1cd120` (CI lane only: `playwright.config.ts` + `.github/workflows/ci.yml`, no `apps/web` file), then doc-only `d0e1bd5`, `f788ab8` and `docs: correct shipped-code citations and record the CI probe` (this file each time). The served bundle is unchanged by all of them — argued in §I.2 with the diff and `find` evidence — and the three `dist` hashes were re-read from disk on 2026-11-07 and still match the deployed build |
 
 **Independent re-read.** The three files were re-hashed from `apps/web/dist` on
 2026-11-07 after the release: `486,148 B` JS, `58,345 B` CSS, `973 B` HTML — the same
@@ -1091,19 +1100,23 @@ CI validated?
 | --- | --- |
 | What `a1cd120` touches | exactly `.github/workflows/ci.yml` + `playwright.config.ts` — CI lane only |
 | What `d0e1bd5` touches | exactly this report |
-| Build inputs changed between `a1cd120` and `d0e1bd5` | `git diff-tree --name-only -r a1cd120 d0e1bd5` filtered to `vite|package.json|pnpm-lock|tsconfig|apps/web/(src|index.html)` → **empty** |
+| Every doc-only commit on top of the deployed `8d3d2cc` | `a1cd120` (CI lane), `d0e1bd5` (`docs: record the round-58 gate results, deploy and CI status`), `f788ab8` (`docs: record the CI verdict for the released revision`), and this report's own `docs: correct shipped-code citations and record the CI probe`. **None of them touches a build input** |
+| Build inputs changed across that whole span | `git diff-tree --name-only -r d0e1bd5 <this commit>` and the same filtered comparison from `a1cd120`: after filtering to `vite|package.json|pnpm-lock|tsconfig|apps/web/(src|index.html)` → **empty** |
 | Source newer than the built artifact | `find apps/web/src -newer apps/web/dist/index.html` → **empty** |
 | What the origin actually serves | `index-5jbQdjjW.js` / `index-e2muy0ow.css`, **byte-for-byte identical to `apps/web/dist`** (§I.1, 9/9 checks) |
+| CI coverage of this commit | **not re-probed**: `curl -s "https://api.github.com/repos/Le-Minh-Nhut/coding-agent-web/actions/runs?per_page=3"` returned **403 `API rate limit exceeded`** (unauthenticated, 60/hour, resets 2026-11-07T02:43Z). Run 116 on `d0e1bd5` remains the newest verdict read; the doc-only commits after it are unobserved by CI and cannot change the artifact |
 
-I re-ran the last row myself while writing this section, on the loopback origin:
+I re-ran the origin row myself while writing this section, on the loopback origin:
 `curl http://127.0.0.1:8791/assets/index-5jbQdjjW.js` and the CSS both hash to
 `d4cbcf66…` / `ca7c06d5…`, identical to `sha256sum apps/web/dist/assets/*` — and the
 served `index.html` references exactly those two filenames. So the origin is serving the
 `dist` bytes, not a stale copy.
 
 So the deployed bundle was built from `8d3d2cc` — all three code commits and nothing after
-them that can reach `dist` — and the two follow-ups are inert with respect to the shipped
-artifact. Green CI on `d0e1bd5` therefore covers the shipped code: run 116 contains all
+them that can reach `dist` — and every follow-up since is doc-only or CI-lane-only, hence
+inert with respect to the shipped artifact. That is the reason this report keeps being
+committed without a rebuild: the commits are documentation about a fixed artifact, not a
+new artifact. Green CI on `d0e1bd5` therefore covers the shipped code: run 116 contains all
 three code commits **plus** the CI-lane fix that made the lane able to run at all. Read
 the other way round, a reader who sees "deployed `8d3d2cc`, CI green on `d0e1bd5`" and
 assumes a gap is looking at exactly the gap this table closes.
@@ -1212,8 +1225,9 @@ assumes a gap is looking at exactly the gap this table closes.
 
 15. **Adversarial-review status, stated honestly.** 30 findings: **0 blocker, 8 major, 20
     minor, 2 info**. The eight majors were all addressed in the working tree:
-    W1 (flex `gap` outside the model) → `fitSpacersToGap`, and the "exact to the pixel"
-    claim now includes it; W2/W20 (composer wrote IME half-composition and could
+    W1 (flex `gap` outside the model) → first `fitSpacersToGap`, then (after the crash
+    fix) the gap folded into `buildOffsets` itself (`transcript-window.ts:171`); the
+    function was deleted, and the "exact to the pixel" claim now includes the gap; W2/W20 (composer wrote IME half-composition and could
     resurrect a sent draft) → three authorship guards in `adoptElementValue`; W3
     (uncapped estimate propagation could pass the engine's maximum scroll height) → 8×
     cap + total scaling; W4 (sub-pixel correction left a stale anchor baseline) → the
@@ -1224,7 +1238,7 @@ assumes a gap is looking at exactly the gap this table closes.
     views) → three explicitly scoped surfaces.
     Minors: W11 strengthened, W12 split into two helpers, W14 strengthened, W15 measured
     and structurally fixed (§J.8), W16 fixed with a `focusin` listener, W17 now uses the
-    tested `fitSpacersToGap`/`spacerHeights`, W18 fixed (150 ms debounce + per-identity
+    tested `buildOffsets(gapPx)`/`spacerHeights`, W18 fixed (150 ms debounce + per-identity
     line index, was 77 ms/keystroke on a 96 MB / 8,000-message transcript), W19 fixed
     (`htmlFor` + actions outside the `<label>`), W22 fixed, W25 fixed (viewport shrink is
     an excuse for the tail lock, like document growth), W26 fixed (a `0` height is not a
@@ -1282,7 +1296,7 @@ assert). The CI **conclusion** is no longer open.
 
 | Item | Status | Why it cannot be closed here | Who closes it |
 | --- | --- | --- | --- |
-| CI conclusion, for `8d3d2cc` **and** for the current head | **PASS** (read), **UNVERIFIED** at step level | Run **116 on `d0e1bd5`** = `completed successfully`, badge `passing` (cache-busted twice), read from the Actions index because `gh` is absent and the API quota was spent mid-poll. Per-step logs were not read, so the conclusion is asserted and the step detail is not. Its coverage of the deployed bundle is argued in §I.2, not assumed | nothing — but a reader wanting step detail needs `gh` after 2026-11-07T02:43Z |
+| CI conclusion | **PASS** (read), **UNVERIFIED** at step level | Run **116 on `d0e1bd5`** = `completed successfully`, badge `passing` (cache-busted twice), read from the Actions index because `gh` is absent and the API quota was spent mid-poll. Per-step logs were not read, so the conclusion is asserted and the step detail is not. Its coverage of the deployed bundle is argued in §I.2, not assumed. The doc-only commits after it were **not** re-probed: the same API returned **403 rate-limited** on a single retry | nothing — but a reader wanting step detail needs `gh` after 2026-11-07T02:43Z |
 | Physical iPhone Safari (compositor under a real thumb, safe-area insets, tab eviction, keyboard) | **BLOCKED** | no device on this machine. Playwright WebKit is the same engine family and the WebKit run reported **26 expected / 0 unexpected / 1 skipped / 0 flaky**, but it is not a thumb. | owner, on the phone |
 | Authenticated populated-conversation walk in the deployed app | **BLOCKED** | no owner session cookie. Everything else about the deploy is machine-verified (§I.1). | owner: open the origin, open a long conversation, scroll top→bottom; newest row on screen, no blank |
 | Post-fix blank-frame **count** on the final WebKit build | **UNVERIFIED** | `SCROLL-01` measures blank duration rather than asserting on it, and the sweep reported verdicts, not the blank series; the 283 ms sample quoted throughout is a workstream-build number (§J.1) | a rerun that prints `PERF_JSON` for `SCROLL-01` |
