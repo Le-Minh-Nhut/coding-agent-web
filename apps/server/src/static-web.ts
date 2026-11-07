@@ -266,13 +266,12 @@ export function registerStaticWeb(
 
     const web = resolveWeb(request);
     if (web.root === null) {
-      // A dead release pointer is not the same state as "never built": say which
-      // one it is, so a broken publish reads as a broken publish.
-      const detail = web.fault === "broken_release" ? ` (${web.reason})` : "";
+      // The reason is logged by resolveWeb; the body stays generic so an
+      // unauthenticated request cannot learn filesystem layout.
       return reply
         .code(404)
         .type("text/plain; charset=utf-8")
-        .send(`Web build missing${detail}. Run pnpm --filter @caw/web build`);
+        .send("Web build missing. Run pnpm --filter @caw/web build");
     }
     const webRoot = web.root;
 
