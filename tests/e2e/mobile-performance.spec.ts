@@ -45,7 +45,7 @@ import {
   sentinel,
   type PerfEntry,
 } from "./perf-fixtures.js";
-import { revealRow, waitForRow } from "./perf-scroll-harness.js";
+import { budget, describeEnvironment, revealRow, waitForRow } from "./perf-scroll-harness.js";
 
 const COMPOSER = /Send a follow-up…|Turn in flight — send a follow-up…|Read-only/;
 const MENU = "#conversation-actions-menu";
@@ -98,9 +98,7 @@ function report(id: string, payload: Record<string, unknown>): void {
  * Skip with the measured value named, once the correctness assertions have already
  * run. The number stays in the JSON above, so the parent still gets the measurement.
  */
-function skipIfOverBudget(measured: number, what: string): void {
-  if (measured > BUDGET_MS) test.skip(true, `${what} ${measured}ms exceeds the brief's ${BUDGET_MS}ms budget on the current build; measured value recorded in PERF_JSON`);
-}
+// skipIfOverBudget removed: replaced by budget() helper
 
 const nowInPage = (page: Page): Promise<number> => page.evaluate(() => performance.now());
 
@@ -623,7 +621,8 @@ test("PERF-01: 4075-entry history renders, with DOM count, long tasks and heap r
   expect(top.found, "a row near the top must be reachable").toBe(true);
   expect(middle.found, "a row from the middle of a 4075-entry history must be reachable").toBe(true);
   expect(end.found, "a row near the end must be reachable").toBe(true);
-  skipIfOverBudget(loadMs, "snapshot load");
+  const env = await describeEnvironment(page, { fixtureName: "plain-4075", entryCount: LARGE });
+  budget({ id: "MOBILE-PERF-01-LOAD", measuredMs: loadMs, budgetMs: BUDGET_MS, blocking: false, env, sampler: "layout" });
   await assertNoUnexpectedAppErrors(page);
 });
 
@@ -666,7 +665,8 @@ test("PERF-02: menu open during active streaming, input-to-visible p50/p95", asy
   expect(samples, "six menu open/close cycles must have completed").toHaveLength(6);
   expect(samples.every((sample) => sample >= 0), `every cycle must have been observed: ${samples.join(", ")}`).toBe(true);
   expect(streamingDuringSamples, "the samples must have been taken while a stream was live").toBe(true);
-  skipIfOverBudget(p95, "menu open p95");
+  const env = await describeEnvironment(page, { fixtureName: "stream-menu-500", entryCount: 500 });
+  budget({ id: "MOBILE-PERF-02-MENU", measuredMs: p95, budgetMs: BUDGET_MS, blocking: true, samples, env, sampler: "layout" });
   await assertNoUnexpectedAppErrors(page);
 });
 
@@ -752,9 +752,8 @@ test("PERF-03: 500 characters typed during streaming arrive exactly once, in ord
   expect(TYPED_500).toHaveLength(500);
   expect(human.samples.length, "every keystroke must have been observed in the page").toBe(500);
   const dropped = TYPED_500.length - human.value.length;
-  if (human.value !== TYPED_500 || burst.value !== TYPED_500) {
-    test.skip(true, `composer drops typed characters while a turn streams: ${human.value.length}/500 at 40ms per key, ${burst.value.length}/500 burst (dropped ${dropped}); measured value recorded in PERF_JSON`);
-  }
+  expect(human.value, `composer lost characters during human typing: ${human.value.length}/500 (dropped ${dropped})`).toBe(TYPED_500);
+  expect(burst.value, `composer lost characters during burst typing: ${burst.value.length}/500 (dropped ${TYPED_500.length - burst.value.length})`).toBe(TYPED_500);
   await assertNoUnexpectedAppErrors(page);
 });
 
@@ -794,7 +793,8 @@ test("PERF-04: Stop generating is one tap while streaming, and the abort reaches
   expect(await page.locator(MENU).count(), "Stop must never live inside the overflow menu").toBe(0);
   // A phone control: 44px is the app's own touch minimum.
   expect(box?.height ?? 0, "Stop must keep its 44px touch target").toBeGreaterThanOrEqual(44);
-  skipIfOverBudget(tapToSettledMs, "Stop tap to settled UI");
+  const env = await describeEnvironment(page, { fixtureName: "stop-500", entryCount: 500 });
+  budget({ id: "MOBILE-PERF-04-STOP", measuredMs: tapToSettledMs, budgetMs: BUDGET_MS, blocking: true, env, sampler: "layout" });
   await assertNoUnexpectedAppErrors(page);
 });
 
@@ -871,7 +871,8 @@ test("PERF-05: scrolling a 2000-entry transcript stays responsive, with long tas
 
   expect(missed, "every scroll step must paint a contiguous run of rows at its offset").toBe(0);
   expect(offsets.length, "every step must have painted rows").toBeGreaterThan(10);
-  skipIfOverBudget(p95, "scroll frame p95");
+  const env = await describeEnvironment(page, { fixtureName: "scroll-2000", entryCount: 2000 });
+  budget({ id: "MOBILE-PERF-05-SCROLL", measuredMs: p95, budgetMs: BUDGET_MS, blocking: true, samples, env, sampler: "compositor" });
   await assertNoUnexpectedAppErrors(page);
 });
 
@@ -967,7 +968,8 @@ test("PERF-06: agents open → detail → back → conversation, with the transc
 
   expect(after, "returning from the layer must leave the transcript where it was").toBeGreaterThan(0);
   expect(drift, `scroll drifted ${drift}px across the layer walk`).toBeLessThan(60);
-  skipIfOverBudget(Math.max(openMs, detailMs, backToConversationMs), "agent navigation p95");
+  const env = await describeEnvironment(page, { fixtureName: "agent-nav-500", entryCount: 500 });
+  budget({ id: "MOBILE-PERF-06-AGENT-NAV", measuredMs: Math.max(openMs, detailMs, backToConversationMs), budgetMs: BUDGET_MS, blocking: true, env, sampler: "layout" });
   await assertNoUnexpectedAppErrors(page);
 });
 
@@ -1017,7 +1019,8 @@ test("PERF-07: a 100-file change list opens, and a 300-line patch renders bounde
   // The viewer bounds its first render (50 hunks / 400 lines) and a 300-line patch fits
   // inside it; rendering far more than the patch is the bug this catches.
   expect(diffRows, "a 300-line patch must not explode into thousands of rows").toBeLessThan(1200);
-  skipIfOverBudget(Math.max(listMs, diffMs), "files/diff open p95");
+  const env = await describeEnvironment(page, { fixtureName: "diff-400", entryCount: 400 });
+  budget({ id: "MOBILE-PERF-07-FILES-DIFF", measuredMs: Math.max(listMs, diffMs), budgetMs: BUDGET_MS, blocking: true, env, sampler: "layout" });
   await assertNoUnexpectedAppErrors(page);
 });
 
@@ -1067,7 +1070,8 @@ test("PERF-08: a ~12 MB snapshot loads, renders and records peak heap", async ({
   expect(bytes, `SNAPSHOT_12MB must stay within 10% of its documented ${SNAPSHOT_12MB_BYTES} bytes`).toBeGreaterThan(SNAPSHOT_12MB_BYTES * 0.9);
   expect(bytes).toBeLessThan(SNAPSHOT_12MB_BYTES * 1.1);
   expect(dom.messageCards, "the tail of a 12 MB snapshot must be on screen").toBeGreaterThan(5);
-  skipIfOverBudget(loadMs, "12 MB snapshot load");
+  const env = await describeEnvironment(page, { fixtureName: "snapshot-12mb", entryCount: entries.length, snapshotSizeBytes: bytes });
+  budget({ id: "MOBILE-PERF-08-12MB-LOAD", measuredMs: loadMs, budgetMs: BUDGET_MS, blocking: false, env, sampler: "layout" });
   await assertNoUnexpectedAppErrors(page);
 });
 
@@ -1282,7 +1286,8 @@ test("PERF-12: the composer keeps focus while streaming, and a keystroke stays v
   expect(value, "every keystroke must land in the composer, in order").toBe(keys.join(""));
   expect(focusedThroughout, "a streaming update must not steal focus from the composer").toBe(true);
   expect(keystrokes, "every keystroke must have been observed in the page").toHaveLength(keys.length);
-  skipIfOverBudget(p95, "keystroke p95");
+  const env = await describeEnvironment(page, { fixtureName: "keystrokes-streaming", entryCount: 500 });
+  budget({ id: "MOBILE-PERF-12-KEYSTROKE", measuredMs: p95, budgetMs: BUDGET_MS, blocking: true, samples: keystrokes, env, sampler: "layout" });
   await assertNoUnexpectedAppErrors(page);
 });
 
