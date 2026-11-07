@@ -747,13 +747,13 @@ export const TranscriptList = memo(function TranscriptList({
     /**
      * Always anchor to *something* mounted.
      *
-     * The first version only anchored to an entry that reached the viewport, and that
-     * made it fail in exactly the case that needed it: after a fast flick the mounted
-     * window can sit ENTIRELY above the band (measured on WebKit: 24 entries mounted,
-     * band 100% blank, 283ms), there is no such entry, the anchor stayed `null`, and the
-     * correction that would have pulled the content back never ran. The nearest entry
-     * above the fold is a perfectly good anchor — it is the row the reader has just
-     * scrolled past, and its position is exactly as meaningful for a correction.
+     * Prefers the mounted entry actually crossing the scroller's top edge
+     * (`box.top <= top && box.bottom >= top`). When no entry spans the top edge (e.g. after a fast
+     * flick or jump where the mounted window has not caught up; measured on WebKit: 24 entries
+     * mounted, band 100% blank, 283ms), `closest` selects the entry nearest to the top edge by
+     * absolute distance (`Math.abs(box.top - top)`). Nearest-by-distance can sit above or below
+     * the fold (which is what `SCROLL-05` exercised when the reader jumped ahead of the window),
+     * providing a valid anchor with model offset for subsequent commits.
      */
     anchorRef.current = best ?? closest;
   };
@@ -821,24 +821,29 @@ export const TranscriptList = memo(function TranscriptList({
         const modelOffset = offsets[anchorIndex];
         if (modelOffset !== undefined) {
           /**
-           * The scroll movement since capture MUST be part of the target.
+           * Compensate strictly for content growth above the anchor row.
            *
-           * At capture the anchor row sat at document offset `D0`, viewport offset `O0`
-           * with `scrollTop = S0`, so `D0 - S0 = O0`. Holding that viewport offset now
-           * needs `target = D1 - O0 = (D1 - D0) + S0`. If the reader (or a programmatic
-           * jump) has since scrolled `ΔS = scrollTop - S0`, the row must sit `ΔS` higher
-           * in the viewport, so `target = modelOffset - anchor.offset + ΔS`.
+           * The anchored row's model offset before (`anchor.modelOffset`) and after
+           * (`modelOffset`) tells you exactly how far content above it grew or shrank,
+           * independent of any movement the reader has since made. That growth is the only
+           * movement the reader must be compensated for: any reader-initiated scroll is
+           * theirs to keep, and the viewport offset of the anchor is preserved by
+           * construction (`element.scrollTop + growth`).
            *
-           * Leaving that term out made this branch undo any movement that unmounted the
-           * anchor. Measured on WebKit, 4,075 heavy rows, "return to bottom": the write
-           * landed correctly (`scrollTop 458,385`, `atMax: true`), then the very next
-           * frame reverted it to 44,578 and the frame after to 44,558 — the capture-time
-           * position — because the anchor row (~entry 460) was unmounted by the jump and
-           * the arithmetic put the view back where the anchor was last seen. Chromium hit
-           * the same branch less often, which is why this surfaced on the owner's engine.
+           * Why this branch exists:
+           * 1. The `Show more` expansion: a single entry expanded to 4,460px, pushing all
+           *    subsequent rows out of the window. Without this branch, the unmounted anchor
+           *    caused a bailout leaving the reader staring at an empty block.
+           * 2. The WebKit "return to bottom" reversal: jumping to tail unmounted the old anchor
+           *    (~entry 460); earlier attempts without proper unmounted handling reverted the
+           *    landed bottom write (458,385 → 44,578).
            *
-           * The `Show more` case this branch was written for has `ΔS = 0` (the reader did
-           * not scroll; the document grew), so that behaviour is unchanged.
+           * Why the previous formula failed:
+           * The prior calculation `target = modelOffset - anchor.offset + ΔS` assumed `anchor.offset`
+           * was captured at the fold. When an anchor was selected below the viewport with a stale
+           * offset of 1,049px, subtracting a stale `anchor.offset` for a row captured 1,049px below
+           * the viewport produced a −1049px yank on a plain streaming append (`SCROLL-05`), which is
+           * what `growth` eliminates.
            */
           const growth = modelOffset - anchor.modelOffset;
           if (Math.abs(growth) >= 0.5) {
