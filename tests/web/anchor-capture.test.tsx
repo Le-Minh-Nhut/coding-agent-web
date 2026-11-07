@@ -109,4 +109,64 @@ describe("anchor capture counting", () => {
     // Position must be held, not yanked by missing-anchor correction
     expect(element.scrollTop).toBe(67_000);
   });
+
+  it("does not drift when mounted rows are below the fold during capture and relayout occurs", () => {
+    const { ref, element } = makeScroller();
+    const rows: DisplayMessage[] = Array.from({ length: 60 }, (_, i) => ({
+      id: `m-${i}`,
+      role: "user",
+      text: `message content ${i}`,
+    }));
+    const controller = new ScrollController();
+    const { rerender, container } = render(
+      <TranscriptList rows={rows} scrollElement={ref} controller={controller} />
+    );
+
+    // Position cards below fold (scroller top is 0; no row satisfies box.top <= 0 && box.bottom >= 0)
+    let cardTop = 1200;
+    const originalGBCR = HTMLElement.prototype.getBoundingClientRect;
+    try {
+      HTMLElement.prototype.getBoundingClientRect = function () {
+        if (this === element) {
+          return { top: 0, bottom: 800, left: 0, right: 390, width: 390, height: 800, x: 0, y: 0, toJSON: () => ({}) };
+        }
+        if (this.classList?.contains("message-card")) {
+          return {
+            top: cardTop,
+            bottom: cardTop + 40,
+            left: 0,
+            right: 390,
+            width: 390,
+            height: 40,
+            x: 0,
+            y: cardTop,
+            toJSON: () => ({}),
+          };
+        }
+        return originalGBCR.call(this);
+      };
+
+      // Enter READING_HISTORY mode by moving away from tail
+      controller.sync();
+      element.scrollTop = 2000;
+      controller.sync();
+      expect(controller.follows).toBe(false);
+
+      // Perform capture: all mounted cards report top >= 1200 (below fold, fold is 0)
+      rerender(<TranscriptList rows={[...rows]} scrollElement={ref} controller={controller} />);
+
+      const scrollBefore = element.scrollTop;
+
+      // Simulate relayout between capture and correction: change mounted rows' getBoundingClientRect().top by ~1200px
+      cardTop = 0;
+
+      // Run correction effect
+      rerender(<TranscriptList rows={[...rows]} scrollElement={ref} controller={controller} />);
+
+      // Assert reader's scrollTop did not move
+      expect(element.scrollTop).toBe(scrollBefore);
+    } finally {
+      HTMLElement.prototype.getBoundingClientRect = originalGBCR;
+    }
+  });
 });

@@ -738,22 +738,26 @@ export const TranscriptList = memo(function TranscriptList({
         best = { key, offset: box.top - top, scrollTop: element.scrollTop, modelOffset: mOffset };
         break;
       }
-      const dist = Math.abs(box.top - top);
-      if (dist < closestDist) {
-        closestDist = dist;
-        closest = { key, offset: box.top - top, scrollTop: element.scrollTop, modelOffset: mOffset };
+      if (box.top <= top) {
+        const dist = top - box.top;
+        if (dist < closestDist) {
+          closestDist = dist;
+          closest = { key, offset: box.top - top, scrollTop: element.scrollTop, modelOffset: mOffset };
+        }
       }
     }
     /**
-     * Always anchor to *something* mounted.
+     * Anchor to a row at or above the fold.
      *
      * Prefers the mounted entry actually crossing the scroller's top edge
      * (`box.top <= top && box.bottom >= top`). When no entry spans the top edge (e.g. after a fast
-     * flick or jump where the mounted window has not caught up; measured on WebKit: 24 entries
-     * mounted, band 100% blank, 283ms), `closest` selects the entry nearest to the top edge by
-     * absolute distance (`Math.abs(box.top - top)`). Nearest-by-distance can sit above or below
-     * the fold (which is what `SCROLL-05` exercised when the reader jumped ahead of the window),
-     * providing a valid anchor with model offset for subsequent commits.
+     * flick), fallback selects the nearest entry above the fold (`box.top <= top`) — the row the
+     * reader has just scrolled past.
+     *
+     * Rows below the fold are never chosen: holding the reading position to content below the
+     * viewport causes transient relayouts near the fold to yank scrollTop upward (SCROLL-05).
+     * If every mounted row is below the fold (e.g. immediately after a jump before the window
+     * catches up), anchorRef is left null; the next commit re-captures once rows reach the fold.
      */
     anchorRef.current = best ?? closest;
   };
