@@ -144,10 +144,20 @@
 | Baseline Sweep 1 (reference) | `playwright test tests/e2e` on `d29ffe6` | **214 expected / 2 unexpected / 3 skipped / 0 flaky** — unexpected: `guest-lifecycle.spec.ts :: built Guest connects, ends, and recovers a long unconfirmed prompt` (30 s timeout) AND `perf-scroll.spec.ts:360 :: SCROLL-05` (premise failure: `expected > 200 / received 23`) | **FAIL** |
 | Baseline Sweep 2 (reference) | `playwright test tests/e2e` on `d29ffe6` | **215 expected / 1 unexpected / 3 skipped / 0 flaky** — unexpected: `guest-lifecycle.spec.ts :: built Guest connects, ends, and recovers a long unconfirmed prompt` (30 s timeout) | **FAIL** |
 | Full WebKit Sweep | `pnpm exec playwright test tests/e2e --project=webkit` | **BLOCKED** — halted following Sweep 2 failure | **BLOCKED** |
+| Post-fix Unit / Web tests | `npx vitest run` | **205 files passed / 2 skipped; 1910 tests passed / 8 skipped** | **PASS** |
+| Post-fix Typecheck | `pnpm -r typecheck` | exit 0 across workspace packages | **PASS** |
+| Post-fix Target spec repeat-6 | `pnpm exec playwright test tests/e2e/{mobile,regression,scroll-chunk-race}.spec.ts --project=chromium --repeat-each=6` | **96 expected / 0 unexpected / 0 skipped / 0 flaky** | **PASS** |
+| Post-fix Scroll perf spec | `pnpm exec playwright test tests/e2e/perf-scroll.spec.ts --project=chromium` | 12 expected / 0 unexpected | **PASS** |
+| Post-fix Scroll perf gates | `pnpm exec playwright test tests/e2e/perf-scroll-gates.spec.ts --project=chromium` | 15 expected / 0 unexpected / 0 skipped / 0 flaky (`PERF-SCROLL-09` bottom distance: 18px) | **PASS** |
+| Post-fix SCROLL-05 repeat-10 (run 1) | `pnpm exec playwright test tests/e2e/perf-scroll.spec.ts --project=chromium -g "SCROLL-05:" --repeat-each=10` | **10 expected / 0 unexpected**, all ten drifts 0 px | **PASS** |
+| Post-fix SCROLL-05 repeat-10 (run 2) | `pnpm exec playwright test tests/e2e/perf-scroll.spec.ts --project=chromium -g "SCROLL-05:" --repeat-each=10` | **6 expected / 4 unexpected**, drifts −841, −1027, −1989, −847 px | **FAIL** |
+| Post-fix Full Chromium Sweep 1 | `pnpm exec playwright test tests/e2e --project=chromium` | **220 expected / 1 unexpected** — unexpected: `tests/e2e/perf-scroll-gates.spec.ts:827 :: PERF-LOAD-01` (`PERF-LOAD-12MB-CLIENT` budget: client pipeline 218 ms vs 200 ms budget) | **FAIL** |
+| Post-fix Full Chromium Sweep 2 | `pnpm exec playwright test tests/e2e --project=chromium` | **NOT RUN** — sweep halted per escalation protocol following `PERF-LOAD-01` failure | **NOT RUN** |
+| Post-fix Full WebKit Sweep | `pnpm exec playwright test tests/e2e --project=webkit` | **NOT RUN** — sweep halted per escalation protocol following `PERF-LOAD-01` failure | **NOT RUN** |
 
 ### 2. Pre-existing flake: SCROLL-05
 
-`SCROLL-05` (`tests/e2e/perf-scroll.spec.ts:360`) fails on **both** trees: it is **pre-existing, not introduced by this round, and not eliminated by it**. Isolated runs vary from 5/5 green to 1/1 red; back-to-back `--repeat-each=10` reds **5 of 10 on HEAD** against **1 of 10 on the `d29ffe6` baseline**, with comparable drift magnitude (~1.0–1.4k px upward) — i.e. the paired measurement shows the defect is *more reachable* on HEAD, while the two full-suite sweeps show the opposite ordering (HEAD `221/0` and `220/1`; baseline `214/2` and `215/1`, where the baseline's extra reds are `guest-lifecycle` timeouts and an `SCROLL-05` premise failure, not drift failures). **Root cause not established; the discrepancy between the two invocation modes is unexplained. Not claimed as improved.**
+`SCROLL-05` (`tests/e2e/perf-scroll.spec.ts:360`) fails on both trees: it is pre-existing, not introduced by this round, and not eliminated by it. Pre-fix HEAD measured 5/10 red on repeat-10; baseline `d29ffe6` measured 1/10 red. Following the second fix attempt (`72fe8f7`), back-to-back repeat-10 runs measured: run 1 with 10 expected / 0 unexpected (all ten drifts 0 px), followed immediately by run 2 with 6 expected / 4 unexpected (drifts −841, −1027, −1989, −847 px). The fix (`72fe8f7`) removed one confirmed contributor (unit-test-reproduced −1200 px upward drift from below-fold fallback anchors) and did not eliminate the drift. Residual mechanism is not established. No third fix attempted per the brief's stop-line.
 ### 3. Classification of WebKit status
 
 The final WebKit sweep was **BLOCKED** and not executed after the Sweep 2 halt. Earlier investigative sweeps recorded: `197 expected / 22 unexpected / 2 skipped`.
@@ -236,6 +246,11 @@ Routing updated per owner ruling (lifting the 2026-10-30/11-06 ban on Gemini).
 | `SCROLL-ATTACK-03` | Controller | `returnToTail()` set `mode = "RETURNING_TO_TAIL"` but called `write()` without intent, clobbering state to `FOLLOWING_TAIL`. | **Fixed**: Passed explicit intent `"return"` in commit `8258bee`. |
 
 *Audit process correction*: An earlier draft of this report claimed the flake frequency was "materially reduced"; the paired repeat-10 data contradicted that claim and it was corrected before publication.
+
+### 3. Second scroll fix attempt (`72fe8f7`)
+- **What it proved**: The below-fold anchor fallback was a genuine defect. Commit `72fe8f7` constrained fallback anchor selection to rows at or above the fold (`box.top <= top`), preventing positive `anchor.offset` divergence (`delta ≈ −D`). A unit test in `tests/web/anchor-capture.test.tsx` reproduces −1200 px upward drift on unfixed code and passes after the fix.
+- **What it failed to prove**: That below-fold anchoring explained the e2e gate. Back-to-back post-fix repeat-10 runs on `SCROLL-05` measured 10/10 green then 4/10 red (−841 to −1989 px drift). The fix did not eliminate the defect; residual mechanism is not established.
+- **Stop line**: Investigation was halted deliberately after two fix attempts rather than iterated further.
 ---
 
 ## I. Release and Provenance
@@ -263,14 +278,16 @@ Routing updated per owner ruling (lifting the 2026-10-30/11-06 ban on Gemini).
   No pane died, no PID changed, no start time moved, nothing was signalled or attached.
 - **Rollback**: **UNVERIFIED in production.** This was the first publish under `.deploy`, so there is no `previous` pointer yet and the drill could not be exercised in production. The mechanism is verified by `tests/deploy/web-release-isolation.test.ts` (12-point sequence including rollback), and a subsequent publish will create the first `previous` pointer.
 - **Legacy dist status**: `apps/web/dist` remains on disk untouched as a fallback artifact, bypassed by `current`.
+- **Deployment status of post-release commits**: All release facts above describe bundle `f58e53ee0615` built from `f58e53e`. All later commits on `main` — including docs commits `e9e4cfc`, `e0ab192`, `764bc80`, `1c65787` and anchor fix `72fe8f7` — are **undeployed**. The live production bundle does not contain the anchor change; testing production tests `f58e53e`.
 ---
 
 ## J. Final Verdict
 
-### **Verdict**: READY WITH NON-BLOCKING LIMITATIONS
+### **Verdict**: BLOCKED
 
 **Justification**:
 1. **Core stabilization delivered**: The build-to-production deployment hazard is fully resolved with atomic directory swaps and request-level symlink resolution. The scroller race condition (`↓ Latest` unreliability) is fixed with a unified, single-writer `ScrollController` passing 96/96 repeated runs on target specs.
-2. **Known pre-existing limitation**: `SCROLL-05` (`tests/e2e/perf-scroll.spec.ts:360`) fails on **both** trees: it is **pre-existing, not introduced by this round, and not eliminated by it**. Isolated runs vary from 5/5 green to 1/1 red; back-to-back `--repeat-each=10` reds **5 of 10 on HEAD** against **1 of 10 on the `d29ffe6` baseline**, with comparable drift magnitude (~1.0–1.4k px upward) — i.e. the paired measurement shows the defect is *more reachable* on HEAD, while the two full-suite sweeps show the opposite ordering (HEAD `221/0` and `220/1`; baseline `214/2` and `215/1`, where the baseline's extra reds are `guest-lifecycle` timeouts and an `SCROLL-05` premise failure, not drift failures). **Root cause not established; the discrepancy between the two invocation modes is unexplained. Not claimed as improved.** This is a residual defect that the release does not fix; it is documented here rather than deferred silently, and the round's fix for the primary `↓ Latest` defect does not depend on it.
-3. **WebKit sweep blocked**: WebKit was halted following Chromium sweep 2 and remains **BLOCKED** from final sweep verification. The 22 recorded WebKit failures are classified as 11 headless browser capability discrepancies (CDP mouse-wheel/touch emulation), 9 pre-existing baseline failures, and 2 resolved harness/timing defects: `TAIL_ALLOWANCE_PX` `ReferenceError` in `perf-scroll-gates` (instrument defect, resolved in `14bfcb9`) and `HIST-13`'s unpolled DOM read in `history-loading` (test premise race settled offline, green 3/3 isolated and 15/15 for file; resolved in `ca8f745`).
-4. **Safety & continuity**: Deliberate service restart (PID 92072 → 2508064) loaded the per-request static root resolver without dropping any of the 3 background OMP agent sessions (PIDs 1204278, 2080435, 2082046).
+2. **Residual defect: SCROLL-05 reproduced post-fix**: `SCROLL-05` (`tests/e2e/perf-scroll.spec.ts:360`) fails on both trees (pre-fix HEAD 5/10 red, baseline `d29ffe6` 1/10 red). Post-fix (`72fe8f7`) back-to-back repeat-10 runs measured 10/10 green followed immediately by 4/10 red (drifts −841, −1027, −1989, −847 px). The fix removed one confirmed contributor (unit-test-reproduced −1200 px upward drift from below-fold fallback anchors) and did not eliminate the drift. Residual mechanism is not established. No third fix attempted per the brief's stop-line.
+3. **Residual defect: PERF-LOAD-01 client pipeline budget overage**: Post-fix Chromium sweep 1 produced 220 expected / 1 unexpected, failing `tests/e2e/perf-scroll-gates.spec.ts:827` (`PERF-LOAD-01`, `PERF-LOAD-12MB-CLIENT` budget: client pipeline 218 ms against 200 ms budget). That budget covers WebCrypto decrypt + JSON parse + reducer replay + React commit + layout/paint for the 12 MB fixture with harness send loop excluded. Whether the anchor change contributed is plausible but unproven [INFERENCE]; the over-budget measurement is genuine and halted the sweep per escalation protocol.
+4. **Residual verification gap: Chromium sweep 2 and WebKit sweep not run**: Following the `PERF-LOAD-01` halt in Chromium sweep 1, post-fix Chromium sweep 2 and the post-fix WebKit sweep were not run. Gate criteria requiring clean dual full sweeps and cross-browser validation remain unfulfilled.
+5. **Safety & continuity**: Deliberate service restart (PID 92072 → 2508064) loaded the per-request static root resolver without dropping any background OMP agent sessions. Production remains on release `f58e53e`; post-release commits including `72fe8f7` are undeployed.
