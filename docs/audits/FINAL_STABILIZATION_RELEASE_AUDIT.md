@@ -140,16 +140,14 @@
 | Scroll perf gates | `pnpm exec playwright test tests/e2e/perf-scroll-gates.spec.ts --project=chromium` | **15 expected / 0 unexpected / 0 skipped / 0 flaky** (`PERF-SCROLL-09` bottom distance: 18px) | **PASS** |
 | Mobile performance | `pnpm exec playwright test tests/e2e/mobile-performance.spec.ts --project=chromium` | 13 expected / 0 unexpected / 0 skipped / 0 flaky | **PASS** |
 | Full Chromium Sweep 1 | `pnpm exec playwright test tests/e2e --project=chromium` | **221 expected / 0 unexpected / 0 skipped / 0 flaky** (515 s) | **PASS** |
-| Full Chromium Sweep 2 | `pnpm exec playwright test tests/e2e --project=chromium` | **220 expected / 1 unexpected (`SCROLL-05`, −1228 px) / 0 skipped / 0 flaky** (517 s) | **FAIL** |
+| Full Chromium Sweep 2 | `pnpm exec playwright test tests/e2e --project=chromium` | **220 expected / 1 unexpected / 0 skipped / 0 flaky** (517 s) — unexpected: `perf-scroll.spec.ts:360 :: SCROLL-05` (drift: −1228 px) | **FAIL** |
+| Baseline Sweep 1 (reference) | `playwright test tests/e2e` on `d29ffe6` | **214 expected / 2 unexpected / 3 skipped / 0 flaky** — unexpected: `guest-lifecycle.spec.ts :: built Guest connects, ends, and recovers a long unconfirmed prompt` (30 s timeout) AND `perf-scroll.spec.ts:360 :: SCROLL-05` (premise failure: `expected > 200 / received 23`) | **FAIL** |
+| Baseline Sweep 2 (reference) | `playwright test tests/e2e` on `d29ffe6` | **215 expected / 1 unexpected / 3 skipped / 0 flaky** — unexpected: `guest-lifecycle.spec.ts :: built Guest connects, ends, and recovers a long unconfirmed prompt` (30 s timeout) | **FAIL** |
 | Full WebKit Sweep | `pnpm exec playwright test tests/e2e --project=webkit` | **BLOCKED** — halted following Sweep 2 failure | **BLOCKED** |
 
 ### 2. Pre-existing flake: SCROLL-05
 
-`SCROLL-05` is a **pre-existing flake** on this repository and was not eliminated in this round.
-- **Baseline `d29ffe6` evidence**: Built and run under identical harness conditions, `d29ffe6` failed both full Chromium sweeps (`expected 214, unexpected 2, skipped 3` and `expected 215, unexpected 1, skipped 3`). Isolated `--repeat-each=10` runs produced drift jumps up to −1353 px.
-- **Current HEAD evidence**: Full sweep 1 passed clean (221/0/0/0). Sweep 2 produced 1 unexpected failure on `SCROLL-05` (−1228 px drift). A 10-repeat run produced drifts: `0, -1325, -1028, 0, 0, -1132, -1188, -946, 0, 0`.
-- **Verdict**: The growth formula fix in `MessageRow.tsx:848` reduced isolated drift to 0 px in standard conditions, but rapid multi-turn chunk streams can still trip DOM measurement timing. The issue is reduced, not eliminated.
-
+`SCROLL-05` (`tests/e2e/perf-scroll.spec.ts:360`) fails on **both** trees: it is **pre-existing, not introduced by this round, and not eliminated by it**. Isolated runs vary from 5/5 green to 1/1 red; back-to-back `--repeat-each=10` reds **5 of 10 on HEAD** against **1 of 10 on the `d29ffe6` baseline**, with comparable drift magnitude (~1.0–1.4k px upward) — i.e. the paired measurement shows the defect is *more reachable* on HEAD, while the two full-suite sweeps show the opposite ordering (HEAD `221/0` and `220/1`; baseline `214/2` and `215/1`, where the baseline's extra reds are `guest-lifecycle` timeouts and an `SCROLL-05` premise failure, not drift failures). **Root cause not established; the discrepancy between the two invocation modes is unexplained. Not claimed as improved.**
 ### 3. Classification of WebKit status
 
 The final WebKit sweep was **BLOCKED** and not executed after the Sweep 2 halt. Earlier investigative sweeps recorded: `197 expected / 22 unexpected / 2 skipped`.
@@ -235,9 +233,9 @@ Routing updated per owner ruling (lifting the 2026-10-30/11-06 ban on Gemini).
 - Refuted claims: 9
 
 | Item | Area | Finding | Disposition |
-|---|---|---|---|
 | `SCROLL-ATTACK-03` | Controller | `returnToTail()` set `mode = "RETURNING_TO_TAIL"` but called `write()` without intent, clobbering state to `FOLLOWING_TAIL`. | **Fixed**: Passed explicit intent `"return"` in commit `8258bee`. |
 
+*Audit process correction*: An earlier draft of this report claimed the flake frequency was "materially reduced"; the paired repeat-10 data contradicted that claim and it was corrected before publication.
 ---
 
 ## I. Release and Provenance
@@ -272,6 +270,6 @@ Routing updated per owner ruling (lifting the 2026-10-30/11-06 ban on Gemini).
 
 **Justification**:
 1. **Core stabilization delivered**: The build-to-production deployment hazard is fully resolved with atomic directory swaps and request-level symlink resolution. The scroller race condition (`↓ Latest` unreliability) is fixed with a unified, single-writer `ScrollController` passing 96/96 repeated runs on target specs.
-2. **Known pre-existing limitation**: `SCROLL-05` exhibits an intermittent layout timing drift under extreme streaming loads: it is **pre-existing, materially reduced, not eliminated.** Baseline `d29ffe6` fails it too (`--repeat-each=10` produced drifts up to `-1353px`, and its two full Chromium sweeps were red at `214 expected / 2 unexpected / 3 skipped` and `215 / 1 / 3`). Current HEAD: 10-repeat drifts `0, -1325, -1028, 0, …, -1132, -1188, -946, 0` and sweeps `221/0/0/0` then `220/1/0/0`.
+2. **Known pre-existing limitation**: `SCROLL-05` (`tests/e2e/perf-scroll.spec.ts:360`) fails on **both** trees: it is **pre-existing, not introduced by this round, and not eliminated by it**. Isolated runs vary from 5/5 green to 1/1 red; back-to-back `--repeat-each=10` reds **5 of 10 on HEAD** against **1 of 10 on the `d29ffe6` baseline**, with comparable drift magnitude (~1.0–1.4k px upward) — i.e. the paired measurement shows the defect is *more reachable* on HEAD, while the two full-suite sweeps show the opposite ordering (HEAD `221/0` and `220/1`; baseline `214/2` and `215/1`, where the baseline's extra reds are `guest-lifecycle` timeouts and an `SCROLL-05` premise failure, not drift failures). **Root cause not established; the discrepancy between the two invocation modes is unexplained. Not claimed as improved.** This is a residual defect that the release does not fix; it is documented here rather than deferred silently, and the round's fix for the primary `↓ Latest` defect does not depend on it.
 3. **WebKit sweep blocked**: WebKit was halted following Chromium sweep 2 and remains **BLOCKED** from final sweep verification. The 22 recorded WebKit failures are classified as 11 headless browser capability discrepancies (CDP mouse-wheel/touch emulation), 9 pre-existing baseline failures, and 2 resolved harness/timing defects: `TAIL_ALLOWANCE_PX` `ReferenceError` in `perf-scroll-gates` (instrument defect, resolved in `14bfcb9`) and `HIST-13`'s unpolled DOM read in `history-loading` (test premise race settled offline, green 3/3 isolated and 15/15 for file; resolved in `ca8f745`).
 4. **Safety & continuity**: Deliberate service restart (PID 92072 → 2508064) loaded the per-request static root resolver without dropping any of the 3 background OMP agent sessions (PIDs 1204278, 2080435, 2082046).
