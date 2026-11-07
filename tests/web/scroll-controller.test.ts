@@ -13,12 +13,13 @@ import { ScrollController, type ScrollState, type ScrollSurface } from "../../ap
 interface FakeSurface extends ScrollSurface {
   setHeight: (height: number) => void;
   setTop: (top: number) => void;
+  clampTo?: number;
 }
-
 function surface(options: { height: number; viewport: number; top?: number }): FakeSurface {
   let scrollTop = options.top ?? 0;
   let scrollHeight = options.height;
   const clientHeight = options.viewport;
+  let clampTo: number | undefined;
   return {
     get scrollTop() { return scrollTop; },
     /**
@@ -26,12 +27,17 @@ function surface(options: { height: number; viewport: number; top?: number }): F
      * object so a test can produce a clamp without a real layout pass.
      */
     set scrollTop(value: number) {
-      scrollTop = Math.min(Math.max(0, value), Math.max(0, scrollHeight - clientHeight));
+      const maxReachable = clampTo !== undefined
+        ? Math.min(clampTo, Math.max(0, scrollHeight - clientHeight))
+        : Math.max(0, scrollHeight - clientHeight);
+      scrollTop = Math.min(Math.max(0, value), maxReachable);
     },
     get scrollHeight() { return scrollHeight; },
     get clientHeight() { return clientHeight; },
     setHeight: (height: number) => { scrollHeight = height; scrollTop = Math.min(scrollTop, Math.max(0, scrollHeight - clientHeight)); },
     setTop: (top: number) => { scrollTop = top; },
+    get clampTo() { return clampTo; },
+    set clampTo(value: number | undefined) { clampTo = value; },
   };
 }
 
@@ -135,14 +141,21 @@ describe("invariant 5: Latest reaches the newest entry even after estimates chan
   });
 
   it("stays armed while a return is short of the bottom", () => {
-    const { el, controller } = mount();
-    el.scrollTop = 0;
+    const { el, controller } = mount(10_000, 800);
+    el.scrollTop = 2000;
     controller.sync();
-    // A return whose write the engine clamps: the document grew before the maximum did.
-    const original = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el), "scrollTop");
-    void original;
+    expect(controller.state().mode).toBe("READING_HISTORY");
+
+    // A viewport whose document is still growing: the engine accepts only part of the jump.
+    el.clampTo = 9000;
     controller.returnToTail();
-    expect(controller.state().mode).toBe("FOLLOWING_TAIL");
+    expect(controller.currentMode).toBe("RETURNING_TO_TAIL");
+    expect(controller.state().canReturnToTail).toBe(false);
+
+    // and after the document settles, the next pin reaches the tail
+    el.clampTo = undefined;
+    controller.pin();
+    expect(controller.currentMode).toBe("FOLLOWING_TAIL");
   });
 });
 

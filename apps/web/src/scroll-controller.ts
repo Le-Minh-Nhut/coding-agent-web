@@ -257,7 +257,7 @@ export class ScrollController {
   returnToTail(): void {
     if (this.surface === null) return;
     this.mode = "RETURNING_TO_TAIL";
-    this.write(this.max());
+    this.write(this.max(), "return");
   }
 
   /** Reveal a specific row (search hit, jump to an identity). */
